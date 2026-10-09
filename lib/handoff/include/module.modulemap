@@ -1,0 +1,4 @@
+module CHandoff {
+  header "handoff.h"
+  export *
+}

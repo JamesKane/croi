@@ -4,9 +4,18 @@
 
 #pragma once
 
+#include <stdint.h>
+
 // Swift (Kernel/Main.swift). Entered from arch/<arch>/start.S on the boot
-// stack with the loader's handoff block, or null when there is none.
-[[noreturn]] void kernel_main(const void *_Nullable handoff);
+// stack with the physical address of the loader's croi_handoff_t (see
+// lib/handoff), identity mapped.
+[[noreturn]] void kernel_main(uint64_t handoff);
 
 // Assembly (arch/<arch>/start.S). Masks interrupts and idles the CPU forever.
 [[noreturn]] void arch_halt(void);
+
+#if defined(__x86_64__)
+// Assembly (arch/amd64/start.S). Port I/O, which Swift cannot express.
+uint8_t arch_inb(uint16_t port);
+void arch_outb(uint16_t port, uint8_t value);
+#endif

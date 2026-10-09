@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 # Boot a croi EFI system partition under QEMU with edk2 firmware.
 #
-#   qemu.sh [--test] <amd64|arm64|rv64> <esp-dir> <work-dir> <edk2-dir> [qemu args...]
+#   qemu.sh [--test <text>] <amd64|arm64|rv64> <esp-dir> <work-dir> <edk2-dir> [qemu args...]
 #
 # The ESP directory is served as a virtual FAT drive. Writable firmware
 # variable stores are copied into <work-dir> on first use. With --test the
-# run is headless, non-interactive and bounded by a timeout, and console
-# output goes to stdout for the caller to check.
+# run is headless and console output is copied to stdout; it succeeds as
+# soon as a line containing <text> appears and fails after a timeout.
 
 set -euo pipefail
 
-test_mode=0
+expect=
 if [[ ${1:-} == --test ]]; then
-  test_mode=1
-  shift
+  expect=${2:?--test needs the text to wait for}
+  shift 2
 fi
 if (( $# < 4 )); then
   sed -n '4p' "$0" >&2
@@ -65,8 +65,20 @@ esac
 
 qemu+=(-m 512M -smp 2 -net none "${disk[@]}")
 
-if (( test_mode )); then
-  exec timeout --foreground 90 "${qemu[@]}" -display none -serial stdio -monitor none -no-reboot "$@"
+if [[ -n $expect ]]; then
+  coproc vm { exec timeout 90 "${qemu[@]}" -display none -serial stdio -monitor none -no-reboot "$@" 2>&1; }
+  status=1
+  while IFS= read -r line <&"${vm[0]}"; do
+    printf '%s\n' "$line"
+    if [[ $line == *"$expect"* ]]; then
+      status=0
+      break
+    fi
+  done
+  kill "$vm_PID" 2>/dev/null || true
+  wait "$vm_PID" 2>/dev/null || true
+  (( status == 0 )) || echo "qemu.sh: '$expect' not seen" >&2
+  exit $status
 else
   exec "${qemu[@]}" -nographic "$@"
 fi

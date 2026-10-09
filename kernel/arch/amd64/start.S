@@ -24,3 +24,24 @@ arch_halt:
 boot_stack:
     .skip   16384
 boot_stack_top:
+
+.section .text.arch_io, "ax", @progbits
+
+// uint8_t arch_inb(uint16_t port)
+.globl arch_inb
+.type arch_inb, @function
+arch_inb:
+    mov     %edi, %edx
+    inb     %dx, %al
+    ret
+.size arch_inb, . - arch_inb
+
+// void arch_outb(uint16_t port, uint8_t value)
+.globl arch_outb
+.type arch_outb, @function
+arch_outb:
+    mov     %edi, %edx
+    mov     %esi, %eax
+    outb    %al, %dx
+    ret
+.size arch_outb, . - arch_outb

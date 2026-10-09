@@ -23,6 +23,8 @@ set(CROI_LINK_FLAGS
 include(cmake/CroiImage.cmake)
 
 add_subdirectory(lib/rt)
+add_subdirectory(lib/handoff)
+add_subdirectory(lib/fmt)
 add_subdirectory(kernel)
 add_subdirectory(boot)
 
@@ -42,8 +44,8 @@ add_custom_target(run
   DEPENDS esp USES_TERMINAL)
 
 enable_testing()
+# Boots through the loader into the kernel, which reports and halts.
 add_test(NAME boot-smoke
-  COMMAND ${CROI_QEMU} --test ${CROI_ARCH} ${CROI_ESP_DIR} ${CMAKE_BINARY_DIR}/qemu ${CROI_EDK2_DIR})
-set_tests_properties(boot-smoke PROPERTIES
-  TIMEOUT 120
-  PASS_REGULAR_EXPRESSION "croi loader \\(${CROI_ARCH}\\)")
+  COMMAND ${CROI_QEMU} --test "croi kernel: halting"
+          ${CROI_ARCH} ${CROI_ESP_DIR} ${CMAKE_BINARY_DIR}/qemu ${CROI_EDK2_DIR})
+set_tests_properties(boot-smoke PROPERTIES TIMEOUT 120)
