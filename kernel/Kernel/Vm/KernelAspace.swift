@@ -45,11 +45,11 @@ struct KernelAspace: ~Copyable {
     // MARK: Regions
 
     /// `pages` zeroed pages of fresh RAM, mapped read/write and never
-    /// executable, between guard pages. Returns the base address.
-    mutating func allocate(pages: Int) throws(VmError) -> UInt64 {
+    /// executable, between guard pages, at a base aligned to `alignment`.
+    mutating func allocate(pages: Int, alignment: UInt64 = KernelLayout.pageSize) throws(VmError) -> UInt64 {
         try vmLock.withLock { () throws(VmError) -> UInt64 in
             let size = UInt64(pages) * KernelLayout.pageSize
-            let (base, index) = try findGap(size: size, alignment: KernelLayout.pageSize)
+            let (base, index) = try findGap(size: size, alignment: alignment)
             var mapped: UInt64 = 0
             do throws(VmError) {
                 while mapped < size {

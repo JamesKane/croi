@@ -1,6 +1,8 @@
 // arm64 kernel entry. The loader jumps here at EL1 with interrupts masked
 // and the handoff pointer in x0, which is passed straight through.
 
+#include "stack.h"
+
 .section .text.boot, "ax", %progbits
 .globl _start
 .type _start, %function
@@ -37,10 +39,23 @@ arch_load_page_tables:
     ret
 .size arch_load_page_tables, . - arch_load_page_tables
 
+// void arch_continue_on_stack(uint64_t top)
+.section .text.arch_continue_on_stack, "ax", %progbits
+.globl arch_continue_on_stack
+.type arch_continue_on_stack, %function
+arch_continue_on_stack:
+    mov     sp, x0
+    mov     x29, xzr
+    mov     x30, xzr
+    bl      kernel_main_continue
+    udf     #0
+.size arch_continue_on_stack, . - arch_continue_on_stack
+
+// The boot stack has the same geometry as every kernel stack (stack.h).
 .section .bss.boot_stack, "aw", %nobits
-.balign 16
+.balign 2 * CROI_KERNEL_STACK_SIZE
 boot_stack:
-    .skip   16384
+    .skip   CROI_KERNEL_STACK_SIZE
 boot_stack_top:
 
 // uint64_t arch_current_el(void)

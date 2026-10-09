@@ -1,4 +1,5 @@
 module CKernel {
   header "kernel.h"
+  header "stack.h"
   export *
 }

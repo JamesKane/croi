@@ -108,8 +108,20 @@ the handler may edit the frame to resume elsewhere. Installed at the top
 of kernel_main. amd64: IDT of 256 stubs, TSS with IST1 for NMI/#DF/#MC.
 arm64: VBAR_EL1. rv64: stvec, S-mode traps only. Breakpoints resume (the
 boot test checks one round trip); anything else prints a register dump to
-`panicConsole` and halts via `panic()`. No stack guard pages yet, so kernel
-stack overflow is not caught. A deliberate fault in kernel code must use a
+`panicConsole` and halts via `panic()`.
+
+Kernel stacks (`Kernel/KernelStack.swift`, geometry in `include/stack.h`):
+16 KiB from `kernelAspace`, aligned to 32 KiB, guard pages both sides;
+`~Copyable`, freed on drop (`keepForever()` for permanent ones). The .bss
+boot stack is only used until the VM is up: kernel_main then switches to a
+guarded stack (`arch_continue_on_stack` -> `kernel_main_continue`).
+Overflow is reported, not a hang: amd64 escalates to #DF on IST1; arm64
+and rv64 exception entry test bit CROI_KERNEL_STACK_SHIFT of the would-be
+frame address (clear on every valid stack thanks to the alignment) and
+switch to a .bss emergency stack (arm64 stashes x0 in TPIDRRO_EL0, rv64
+uses sscratch: both must be revisited when user mode arrives). Every stack
+the CPU runs on must keep this geometry. IST1 and the emergency stacks are
+still unguarded .bss, one per system until per-CPU data exists. A deliberate fault in kernel code must use a
 volatile access, or LLVM may delete it (e.g. stores to const symbols).
 
 Kernel enters on the loader's page tables with the handoff's physical
@@ -160,6 +172,8 @@ kernel must not use PAC until it does.
   SE-0474 `yielding borrow` spelling is still experimental). `borrow`
   accessors can't return through a raw pointer's `pointee`, and key paths
   don't support `~Copyable` types.
+- `discard self` in Embedded Swift needs `@frozen` (public types only) or
+  `@export(interface)` on the method; croi uses the latter.
 - Swift precedence trap: `<<`/`>>` bind tighter than `*`, so write
   `(pages * pageSize) >> 20`, never `pages * pageSize >> 20`.
 - C constants Swift must see are typed C23 enums (`enum : uint64_t {...}`),

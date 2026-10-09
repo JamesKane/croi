@@ -99,13 +99,36 @@ func kernel_main(_ handoffAddress: UInt64) -> Never {
     swiftAllocationSelfTest()
     refSelfTest()
     spinLockSelfTest()
-    kernelAspace.adopt(rootLow: tables.rootLow, rootHigh: tables.rootHigh)
-    vmSelfTest()
     console.write("  heap:   slabs + large pages; UniqueBox, UniqueArray and Ref allocate and free\n")
     console.write("  locks:  spinlocks mask interrupts, nest, release on throw; pmm and heap locked\n")
+
+    // Leave the boot stack (in .bss, unguarded) for a guarded KernelStack.
+    kernelAspace.adopt(rootLow: tables.rootLow, rootHigh: tables.rootHigh)
+    do throws(VmError) {
+        bootThreadStack = try KernelStack().keepForever()
+    } catch {
+        panic("no memory for the boot thread's stack")
+    }
+    arch_continue_on_stack(bootThreadStack.top)
+}
+
+/// The boot thread's stack once the VM is up. Lives forever.
+nonisolated(unsafe) var bootThreadStack = StackRange()
+
+/// The rest of boot, on `bootThreadStack`. Declared in kernel.h; entered
+/// from arch_continue_on_stack.
+@c @implementation
+func kernel_main_continue() -> Never {
+    guard let console = panicConsole else { arch_halt() }
+    vmSelfTest()
     console.write("  vm:     kernel aspace at ")
     console.write(hex: KernelLayout.dynamicBase)
     console.write("; guards, protect, large-page split, table reclaim\n")
+
+    kernelStackSelfTest()
+    console.write("  stacks: boot thread on a guarded stack at ")
+    console.write(hex: bootThreadStack.base)
+    console.write("\n")
 
     // Exception round trip: take a breakpoint and resume after it.
     arch_breakpoint()
@@ -374,4 +397,26 @@ private func vmSelfTestBody() throws(VmError) {
     guard kernelAspace.regionCount == regionsBefore, pmm.freePages == freeBefore else {
         panic("vm self-test: pages, tables or regions not reclaimed")
     }
+}
+
+/// We are running on the boot thread's KernelStack; a second stack gets the
+/// alignment exception entry relies on, guard pages on both sides, and is
+/// fully reclaimed when dropped.
+private func kernelStackSelfTest() {
+    var marker: UInt8 = 0
+    let sp = withUnsafeMutablePointer(to: &marker) { UInt64(UInt(bitPattern: $0)) }
+    guard bootThreadStack.contains(sp) else { panic("stack self-test: not running on the boot thread stack") }
+
+    let freeBefore = pmm.freePages
+    do throws(VmError) {
+        let stack = try KernelStack()
+        guard stack.base % (2 * KernelStack.size) == 0 else { panic("stack self-test: misaligned stack") }
+        guard kernelAspace.query(stack.base - KernelLayout.pageSize) == nil,
+              kernelAspace.query(stack.top) == nil,
+              kernelAspace.query(stack.base) != nil, kernelAspace.query(stack.top - 1) != nil
+        else { panic("stack self-test: guard pages") }
+    } catch {
+        panic("stack self-test: allocation failed")
+    }
+    guard pmm.freePages == freeBefore else { panic("stack self-test: stack not reclaimed") }
 }

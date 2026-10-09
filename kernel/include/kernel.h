@@ -11,8 +11,15 @@
 // lib/handoff), identity mapped.
 [[noreturn]] void kernel_main(uint64_t handoff);
 
+// Swift (Kernel/Main.swift). The rest of boot, on a guarded KernelStack.
+[[noreturn]] void kernel_main_continue(void);
+
 // Assembly (arch/<arch>/start.S). Masks interrupts and idles the CPU forever.
 [[noreturn]] void arch_halt(void);
+
+// Assembly (arch/<arch>/start.S). Switches to the stack whose top is `top`
+// and calls kernel_main_continue; the old stack is abandoned.
+[[noreturn]] void arch_continue_on_stack(uint64_t top);
 
 // Assembly (arch/<arch>/start.S). Switches to new kernel page tables and
 // flushes the TLB. The kernel image must be mapped identically in the old
@@ -62,7 +69,8 @@ typedef struct {
   uint64_t spsr;
   uint64_t esr;
   uint64_t far;
-  uint64_t slot;   // vector table entry, 0..15
+  uint64_t slot;   // vector table entry, 0..15; +16 if taken on the
+                   // emergency stack because the stack had overflowed
   uint64_t reserved;
 } arch_exception_frame_t;
 static_assert(sizeof(arch_exception_frame_t) == 38 * 8);
@@ -73,8 +81,10 @@ typedef struct {
   uint64_t sstatus;
   uint64_t scause;
   uint64_t stval;
+  uint64_t overflow;  // nonzero: taken on the emergency stack (stack overflow)
+  uint64_t reserved;
 } arch_exception_frame_t;
-static_assert(sizeof(arch_exception_frame_t) == 36 * 8);
+static_assert(sizeof(arch_exception_frame_t) == 38 * 8);
 #endif
 
 // Swift (Kernel/Exceptions.swift). Every exception lands here.

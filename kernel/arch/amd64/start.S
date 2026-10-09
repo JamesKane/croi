@@ -1,6 +1,8 @@
 // amd64 kernel entry. The loader jumps here in long mode with interrupts
 // masked and the handoff pointer in %rdi, which is passed straight through.
 
+#include "stack.h"
+
 #define KERNEL_CS 0x08
 #define KERNEL_DS 0x10
 
@@ -68,10 +70,22 @@ gdt_pointer:
     .word   gdt_end - gdt - 1
     .quad   gdt
 
+// void arch_continue_on_stack(uint64_t top)
+.section .text.arch_continue_on_stack, "ax", @progbits
+.globl arch_continue_on_stack
+.type arch_continue_on_stack, @function
+arch_continue_on_stack:
+    mov     %rdi, %rsp
+    xor     %ebp, %ebp
+    call    kernel_main_continue
+    ud2
+.size arch_continue_on_stack, . - arch_continue_on_stack
+
+// The boot stack has the same geometry as every kernel stack (stack.h).
 .section .bss.boot_stack, "aw", @nobits
-.balign 16
+.balign 2 * CROI_KERNEL_STACK_SIZE
 boot_stack:
-    .skip   16384
+    .skip   CROI_KERNEL_STACK_SIZE
 boot_stack_top:
 
 .section .text.arch_io, "ax", @progbits

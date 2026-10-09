@@ -5,6 +5,15 @@
 // exception_common, which completes an arch_exception_frame_t (kernel.h) on
 // the current stack and calls arch_exception. The handler may change elr and
 // spsr in the frame; they are written back before eret.
+//
+// Stack overflow: if the frame would land below a kernel stack (bit
+// CROI_KERNEL_STACK_SHIFT set, see stack.h), the vector switches to the
+// emergency stack first, since pushing on the overflowed stack would just
+// fault again. The check needs a scratch register without touching memory,
+// hence the add/sub exchange of sp and x0 (as Linux does). TPIDRRO_EL0
+// briefly holds x0 on that path; it is unused while there is no user mode.
+
+#include "stack.h"
 
 #define FRAME_SIZE  (38 * 8)
 #define FRAME_SP    (31 * 8)
@@ -17,8 +26,22 @@
 .macro VECTOR slot
     .balign 0x80
     sub     sp, sp, #FRAME_SIZE
+    add     sp, sp, x0              // sp = frame + x0
+    sub     x0, sp, x0              // x0 = frame
+    tbnz    x0, #CROI_KERNEL_STACK_SHIFT, 1f
+    sub     x0, sp, x0              // x0 = original x0
+    sub     sp, sp, x0              // sp = frame
     stp     x0, x1, [sp, #0]
     mov     x0, #\slot
+    b       exception_common
+1:  sub     x0, sp, x0              // x0 = original x0
+    msr     tpidrro_el0, x0
+    adrp    x0, emergency_stack_top
+    add     x0, x0, :lo12:emergency_stack_top
+    sub     sp, x0, #FRAME_SIZE
+    mrs     x0, tpidrro_el0
+    stp     x0, x1, [sp, #0]
+    mov     x0, #(16 + \slot)
     b       exception_common
 .endm
 
@@ -105,6 +128,15 @@ arch_init_exceptions:
     ret
 .size arch_init_exceptions, . - arch_init_exceptions
 
+// Stack for handling an exception taken on an overflowed stack. Same
+// geometry as a kernel stack so exceptions taken on it pass the check.
+.section .bss.emergency_stack, "aw", %nobits
+.balign 2 * CROI_KERNEL_STACK_SIZE
+emergency_stack:
+    .skip   CROI_KERNEL_STACK_SIZE
+emergency_stack_top:
+
+.section .text.arch_init_exceptions, "ax", %progbits
 // void arch_breakpoint(void)
 .globl arch_breakpoint
 .type arch_breakpoint, %function

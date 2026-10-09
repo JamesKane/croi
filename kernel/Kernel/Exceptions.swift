@@ -11,6 +11,13 @@ func arch_exception(_ frame: UnsafeMutablePointer<arch_exception_frame_t>) {
         return
     }
     if let console = panicConsole {
+        if unsafe ExceptionFrame.isStackOverflow(frame.pointee) {
+            #if arch(x86_64)
+            console.write("\ncroi kernel: double fault, usually a kernel stack overflow (handled on IST1)")
+            #else
+            console.write("\ncroi kernel: kernel stack overflow (handled on the emergency stack)")
+            #endif
+        }
         unsafe ExceptionFrame.report(frame.pointee, to: console)
     }
     panic("unhandled exception")
@@ -20,6 +27,10 @@ func arch_exception(_ frame: UnsafeMutablePointer<arch_exception_frame_t>) {
 enum ExceptionFrame {
     #if arch(x86_64)
     static func isBreakpoint(_ f: arch_exception_frame_t) -> Bool { f.vector == 3 }
+
+    /// Overflowing onto a guard page raises #PF, which can't push its frame
+    /// on the same stack, so the CPU escalates to #DF (on its IST stack).
+    static func isStackOverflow(_ f: arch_exception_frame_t) -> Bool { f.vector == 8 }
 
     /// int3 is a trap: rip already points past it.
     static func skipBreakpoint(_ f: inout arch_exception_frame_t) {}
@@ -82,12 +93,15 @@ enum ExceptionFrame {
         f.slot == 4 && exceptionClass(f) == 0x3C
     }
 
+    /// The vector found the stack overflowed and switched stacks (slot + 16).
+    static func isStackOverflow(_ f: arch_exception_frame_t) -> Bool { f.slot >= 16 }
+
     /// brk leaves elr pointing at itself.
     static func skipBreakpoint(_ f: inout arch_exception_frame_t) { f.elr += 4 }
 
     static func report(_ f: arch_exception_frame_t, to out: some TextOutput) {
         out.write("\ncroi kernel: exception: ")
-        out.write(kind(slot: f.slot))
+        out.write(kind(slot: f.slot & 15))
         out.write(", ")
         out.write(name(exceptionClass: exceptionClass(f)))
         out.write("\n")
@@ -143,7 +157,10 @@ enum ExceptionFrame {
     }
 
     #elseif arch(riscv64)
-    static func isBreakpoint(_ f: arch_exception_frame_t) -> Bool { f.scause == 3 }
+    static func isBreakpoint(_ f: arch_exception_frame_t) -> Bool { f.scause == 3 && f.overflow == 0 }
+
+    /// The entry found the stack overflowed and switched stacks.
+    static func isStackOverflow(_ f: arch_exception_frame_t) -> Bool { f.overflow != 0 }
 
     /// ebreak leaves sepc pointing at itself; it may be compressed (2 bytes).
     static func skipBreakpoint(_ f: inout arch_exception_frame_t) {
