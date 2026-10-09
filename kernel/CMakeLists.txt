@@ -6,6 +6,8 @@ add_library(kernel-swift OBJECT
   Kernel/Exceptions.swift
   Kernel/Framebuffer.swift
   Kernel/Heap.swift
+  Kernel/Irq/Interrupts.swift
+  Kernel/Irq/Ipi.swift
   Kernel/KernelLayout.swift
   Kernel/KernelPageTables.swift
   Kernel/KernelStack.swift

@@ -45,6 +45,10 @@ struct SpinLock: ~Copyable {
     }
 
     /// Masks interrupts and spins until the lock is ours. Prefer `withLock`.
+    ///
+    /// While waiting, the caller's own interrupt state is back in force, so a
+    /// CPU spinning here from an interrupts-on context still answers IPIs:
+    /// the holder may be waiting on it (TLB shootdown under `vmLock`).
     func acquire() -> InterruptState {
         let me = Cpu.current + 1
         let saved = InterruptState(raw: arch_interrupts_save())
@@ -55,9 +59,11 @@ struct SpinLock: ~Copyable {
             if holder.load(ordering: .relaxed) == me {
                 panic("spinlock: recursive acquire")
             }
+            arch_interrupts_restore(saved.raw)
             while holder.load(ordering: .relaxed) != 0 {
                 arch_spin_pause()
             }
+            _ = arch_interrupts_save()
         }
     }
 

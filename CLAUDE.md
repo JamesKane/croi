@@ -158,10 +158,27 @@ SMP (`Kernel/Smp.swift`, `include/smp.h`, `arch/<arch>/smp.S`):
 - Boot self-test: per-CPU identity, and all CPUs incrementing a counter
   with a non-atomic load+store under one SpinLock after a start barrier
   (verified to fail without the lock).
-- Not yet: TLB shootdowns (amd64/rv64 invalidation is still local, so no
-  kernel mapping may change while secondaries could use it), per-CPU
-  TSS/IST and emergency stacks (shared today), calibrated delays for
-  INIT/SIPI (spin loops), CPU hotplug, a scheduler.
+- Not yet: per-CPU TSS/IST and emergency stacks (shared today),
+  calibrated delays for INIT/SIPI (spin loops), CPU hotplug, a scheduler.
+
+Interrupts (`Kernel/Irq/`, K2a): `Interrupts` initializes the controllers
+before secondaries start and dispatches everything `arch_exception` sees
+as an interrupt. amd64: local APIC (x2APIC when CPUID says so, else xAPIC
+MMIO), legacy 8259s and every IOAPIC pin masked; vectors 0xF0 IPI, 0xFE
+error, 0xFF spurious. arm64: GICv3 only (QEMU runs `gic-version=3`):
+distributor with all SPIs masked, per-CPU redistributor found by
+affinity, SGI 0 = IPI; the ITS is found but not set up yet. rv64: IPIs
+are SBI `send_ipi` (supervisor software interrupt); IMSIC/APLIC/PLIC are
+only counted. Device interrupts stay masked until drivers route them with
+an affinity. `Ipi.callOthers(fn, arg)` runs a C function on every other
+ready CPU and waits (Zircon's mp_sync_exec); waiters drain their own
+mailbox, so cross-calls can't deadlock. `TlbShootdown.flushOthers` (amd64,
+rv64) ends every ArchAspace map/unmap/protect. SpinLock restores the
+caller's interrupt state while spinning, so a CPU waiting on `vmLock`
+still answers the shootdown from the holder. Secondaries idle in
+`arch_idle` with interrupts on; boot ends with "boot complete, idling".
+The boot test checks sync calls and that a remapped page is seen by every
+CPU (verified to fail without remote flushes).
 
 Exceptions: `arch/<arch>/exceptions.S` saves an `arch_exception_frame_t`
 (kernel.h) and calls Swift `arch_exception` (Kernel/Exceptions.swift);

@@ -1,4 +1,3 @@
-import _Volatile
 import CHandoff
 import CKernel
 import Synchronization
@@ -14,6 +13,10 @@ struct PerCpu: ~Copyable {
     let online = Atomic<Bool>(false)
     /// Boot self-test results reported by this CPU (SelfTest bits).
     let checkedIn = Atomic<UInt32>(0)
+    /// Pending IPI kinds (Ipi mailbox bits).
+    let ipiPending = Atomic<UInt32>(0)
+    /// This CPU's interrupt controller is set up: it can take IPIs.
+    let interruptsReady = Atomic<Bool>(false)
 
     init(number: UInt32, hardwareId: UInt64, stack: StackRange) {
         self.number = number
@@ -161,7 +164,10 @@ func kernel_ap_main(_ percpu: UInt64) -> Never {
     SmpSelfTest.contend()
     results |= SmpSelfTest.contended
     unsafe record.pointee.checkedIn.store(results, ordering: .releasing)
-    arch_halt()
+
+    Interrupts.initializeThisCpu()
+    unsafe record.pointee.interruptsReady.store(true, ordering: .releasing)
+    arch_idle()
 }
 
 /// Cross-CPU boot self-test: per-CPU identity, and a counter incremented
@@ -222,9 +228,6 @@ enum X86ApStartup {
     /// The startup block for the CPU being started (heap, virtual).
     nonisolated(unsafe) static var block: UInt64 = 0
 
-    private static var apicBaseMsr: UInt32 { 0x1B }
-    private static var x2apicIcrMsr: UInt32 { 0x830 }
-
     static func start(apicId: UInt64, context: UInt64) -> Bool {
         let trampoline = pmm.lowTrampolinePage
         guard trampoline != 0, block != 0 else { return false }
@@ -272,30 +275,8 @@ enum X86ApStartup {
         return false
     }
 
-    /// Writes the interrupt command register (xAPIC MMIO or x2APIC MSR).
     private static func sendIpi(_ apicId: UInt64, _ command: UInt64) -> Bool {
-        let base = arch_rdmsr(apicBaseMsr)
-        if base & (1 << 10) != 0 {  // x2APIC
-            arch_wrmsr(x2apicIcrMsr, apicId << 32 | command)
-            return true
-        }
-        let phys = base & 0x000F_FFFF_FFFF_F000
-        let window: UInt64
-        do throws(VmError) {
-            window = try kernelAspace.mapPhysical(phys, size: KernelLayout.pageSize,
-                                                  MapAttributes(writable: true, cache: .device, global: true))
-        } catch {
-            return false
-        }
-        defer { try? kernelAspace.free(window) }
-        let icrHigh = unsafe UnsafeMutablePointer<UInt32>(bitPattern: UInt(window + 0x310))!
-        let icrLow = unsafe UnsafeMutablePointer<UInt32>(bitPattern: UInt(window + 0x300))!
-        unsafe VolatileStore.store(icrHigh, UInt32(apicId) << 24)
-        unsafe VolatileStore.store(icrLow, UInt32(command))
-        for _ in 0..<1_000_000 where unsafe VolatileStore.load(icrLow) & (1 << 12) == 0 {
-            return true  // delivered
-        }
-        return false
+        LocalApic.sendCommand(apicId: apicId, command)
     }
 
     /// A crude busy wait. Real hardware needs calibrated delays (timer TBD).
@@ -306,13 +287,4 @@ enum X86ApStartup {
     }
 }
 
-/// Volatile 32-bit MMIO accesses.
-enum VolatileStore {
-    @unsafe static func store(_ p: UnsafeMutablePointer<UInt32>, _ value: UInt32) {
-        unsafe VolatileMappedRegister<UInt32>(unsafeBitPattern: UInt(bitPattern: p)).store(value)
-    }
-    @unsafe static func load(_ p: UnsafeMutablePointer<UInt32>) -> UInt32 {
-        unsafe VolatileMappedRegister<UInt32>(unsafeBitPattern: UInt(bitPattern: p)).load()
-    }
-}
 #endif

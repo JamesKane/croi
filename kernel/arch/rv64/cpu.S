@@ -79,3 +79,51 @@ arch_cpu_hardware_id:
 arch_clean_dcache:
     ret
 .size arch_clean_dcache, . - arch_clean_dcache
+
+// void arch_idle(void): interrupts on, wait for one, forever.
+.globl arch_idle
+.type arch_idle, %function
+arch_idle:
+    csrsi   sstatus, 0x2            // SIE
+1:  wfi
+    j       1b
+.size arch_idle, . - arch_idle
+
+// void arch_tlb_invalidate_all(void): this hart.
+.globl arch_tlb_invalidate_all
+.type arch_tlb_invalidate_all, %function
+arch_tlb_invalidate_all:
+    sfence.vma
+    ret
+.size arch_tlb_invalidate_all, . - arch_tlb_invalidate_all
+
+// void arch_rv_sie_set(uint64_t mask) / void arch_rv_sie_clear(uint64_t mask)
+// void arch_rv_sip_clear(uint64_t mask)
+.globl arch_rv_sie_set
+.type arch_rv_sie_set, %function
+arch_rv_sie_set:
+    csrs    sie, a0
+    ret
+.size arch_rv_sie_set, . - arch_rv_sie_set
+
+.globl arch_rv_sie_clear
+.type arch_rv_sie_clear, %function
+arch_rv_sie_clear:
+    csrc    sie, a0
+    ret
+.size arch_rv_sie_clear, . - arch_rv_sie_clear
+
+.globl arch_rv_sip_clear
+.type arch_rv_sip_clear, %function
+arch_rv_sip_clear:
+    csrc    sip, a0
+    ret
+.size arch_rv_sip_clear, . - arch_rv_sip_clear
+
+// void arch_interrupts_enable(void)
+.globl arch_interrupts_enable
+.type arch_interrupts_enable, %function
+arch_interrupts_enable:
+    csrsi   sstatus, 0x2
+    ret
+.size arch_interrupts_enable, . - arch_interrupts_enable

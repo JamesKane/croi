@@ -5,6 +5,10 @@ import Fmt
 /// the instruction; anything else is unexpected this early and is fatal.
 @c @implementation
 func arch_exception(_ frame: UnsafeMutablePointer<arch_exception_frame_t>) {
+    if unsafe ExceptionFrame.isInterrupt(frame.pointee) {
+        unsafe Interrupts.handle(frame)
+        return
+    }
     if unsafe ExceptionFrame.isBreakpoint(frame.pointee) {
         unsafe ExceptionFrame.skipBreakpoint(&frame.pointee)
         breakpointsHandled += 1
@@ -27,6 +31,7 @@ func arch_exception(_ frame: UnsafeMutablePointer<arch_exception_frame_t>) {
 enum ExceptionFrame {
     #if arch(x86_64)
     static func isBreakpoint(_ f: arch_exception_frame_t) -> Bool { f.vector == 3 }
+    static func isInterrupt(_ f: arch_exception_frame_t) -> Bool { f.vector >= 32 }
 
     /// Overflowing onto a guard page raises #PF, which can't push its frame
     /// on the same stack, so the CPU escalates to #DF (on its IST stack).
@@ -93,6 +98,9 @@ enum ExceptionFrame {
         f.slot == 4 && exceptionClass(f) == 0x3C
     }
 
+    /// IRQ from the current EL (SP_EL0 or SP_ELx).
+    static func isInterrupt(_ f: arch_exception_frame_t) -> Bool { f.slot == 1 || f.slot == 5 }
+
     /// The vector found the stack overflowed and switched stacks (slot + 16).
     static func isStackOverflow(_ f: arch_exception_frame_t) -> Bool { f.slot >= 16 }
 
@@ -158,6 +166,7 @@ enum ExceptionFrame {
 
     #elseif arch(riscv64)
     static func isBreakpoint(_ f: arch_exception_frame_t) -> Bool { f.scause == 3 && f.overflow == 0 }
+    static func isInterrupt(_ f: arch_exception_frame_t) -> Bool { f.scause >> 63 != 0 }
 
     /// The entry found the stack overflowed and switched stacks.
     static func isStackOverflow(_ f: arch_exception_frame_t) -> Bool { f.overflow != 0 }

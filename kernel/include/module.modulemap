@@ -2,5 +2,6 @@ module CKernel {
   header "kernel.h"
   header "stack.h"
   header "smp.h"
+  header "irq.h"
   export *
 }

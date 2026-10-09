@@ -12,6 +12,15 @@ struct CpuDescriptor {
 enum Madt {
     /// Calls `body` for every processor entry for this architecture.
     static func forEachCpu(_ acpi: AcpiTables, _ body: (CpuDescriptor) -> Void) {
+        forEachEntry(acpi) { type, entry in
+            if let cpu = decode(type: type, entry) {
+                body(cpu)
+            }
+        }
+    }
+
+    /// Calls `body(type, entry)` for every interrupt controller structure.
+    static func forEachEntry(_ acpi: AcpiTables, _ body: (UInt8, RawSpan) -> Void) {
         guard let madt = acpi.table("APIC") else { return }
         acpi.withTable(madt) { (table: RawSpan) in
             var offset = 44
@@ -19,12 +28,18 @@ enum Madt {
                 let type = table.load(fromByteOffset: offset, as: UInt8.self)
                 let length = Int(table.load(fromByteOffset: offset + 1, as: UInt8.self))
                 guard length >= 2, offset + length <= table.byteCount else { break }
-                let entry = table.extracting(offset..<(offset + length))
-                if let cpu = decode(type: type, entry) {
-                    body(cpu)
-                }
+                body(type, table.extracting(offset..<(offset + length)))
                 offset += length
             }
+        }
+    }
+
+    /// The header's local interrupt controller address and flags (amd64:
+    /// the local APIC base; flag bit 0: dual 8259s are present).
+    static func header(_ acpi: AcpiTables) -> (localController: UInt64, flags: UInt32)? {
+        guard let madt = acpi.table("APIC") else { return nil }
+        return acpi.withTable(madt) { (table: RawSpan) in
+            (UInt64(table.load(fromByteOffset: 36, as: UInt32.self)), table.load(fromByteOffset: 40, as: UInt32.self))
         }
     }
 

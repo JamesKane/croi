@@ -51,11 +51,11 @@ add_custom_target(run
   DEPENDS esp USES_TERMINAL)
 
 enable_testing()
-# Boots through the loader into the kernel, which reports and halts; then
+# Boots through the loader into the kernel, which reports and idles; then
 # checks the pattern the kernel drew on the framebuffer.
 set(_fb_dump ${CMAKE_BINARY_DIR}/qemu/framebuffer.ppm)
 add_test(NAME boot-smoke
-  COMMAND ${CROI_QEMU} --test "croi kernel: halting" --screendump ${_fb_dump}
+  COMMAND ${CROI_QEMU} --test "croi kernel: boot complete" --screendump ${_fb_dump}
           ${CROI_ARCH} ${CROI_ESP_DIR} ${CMAKE_BINARY_DIR}/qemu ${CROI_EDK2_DIR})
 set_tests_properties(boot-smoke PROPERTIES TIMEOUT 120 FIXTURES_SETUP framebuffer)
 add_test(NAME framebuffer-pixels
@@ -66,7 +66,7 @@ set_tests_properties(framebuffer-pixels PROPERTIES FIXTURES_REQUIRED framebuffer
 if(CROI_ARCH STREQUAL arm64)
   # Firmware at EL2 with a GICv3: the loader must drop to EL1.
   add_test(NAME boot-smoke-el2
-    COMMAND ${CROI_QEMU} --test "croi kernel: halting"
+    COMMAND ${CROI_QEMU} --test "croi kernel: boot complete"
             ${CROI_ARCH} ${CROI_ESP_DIR} ${CMAKE_BINARY_DIR}/qemu-el2 ${CROI_EDK2_DIR}
             -machine virtualization=on,gic-version=3)
   set_tests_properties(boot-smoke-el2 PROPERTIES TIMEOUT 120)

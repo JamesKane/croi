@@ -23,7 +23,7 @@ QEMU.
 | 3 | PMM (contiguous, reclaim), heap, slab | **Done**, except ACPI-reclaim memory, which stays wired until ACPI parsing is finished |
 | 4 | Threads, wait queues, PI owned wait queues, timers | Todo (K3) |
 | 5 | Scheduler: fair + EDF | Todo (K3) |
-| 6 | SMP: AP bring-up, IPIs, TLB shootdown, per-CPU data | **Partial**: AP bring-up and per-CPU data are done. IPIs and TLB shootdown are in K2 |
+| 6 | SMP: AP bring-up, IPIs, TLB shootdown, per-CPU data | **Done** except per-CPU TSS/IST and emergency stacks (K2c) |
 | 7 | VMM phase A: VMARs, VMOs, faults, cache policy, huge pages | **Partial**: ArchAspace (map/unmap/protect/query, large pages), the kernel aspace, and the cache policy (K1; rv64 Svpbmt pending) exist. The rest is in K4 |
 | 8 | Handles, rights, koids, dispatchers, signals, waits | Todo (K5) |
 | 9 | Syscalls, user-copy, vDSO, user FP/SIMD | Todo (K6) |
@@ -53,6 +53,13 @@ with K2's ACPI work), and a text console on the framebuffer (needs a font).
   and the cache policy change gets harder the more mappings exist.
 
 ### K2: Interrupts, IPIs, clock and timers (requirements 2, 6)
+Progress: **K2a done**: controllers (x2APIC/xAPIC + IOAPIC masked, GICv3,
+SBI IPIs with AIA/PLIC discovered), dispatch, IPIs, `Ipi.callOthers`, TLB
+shootdown, interrupts on in idle. Next: **K2b** clock and tickless timers,
+then **K2c** per-CPU TSS/IST and emergency stacks, PPTT topology, RHCT and
+Svpbmt. ITS and AIA (APLIC/IMSIC) setup moves to the drivers phase
+(requirement 13), when the first MSI-capable device needs them.
+
 - **Controllers.** Pick the MSI-capable controller on each arch now, because
   item 13 needs MSI/MSI-X with per-queue vectors:
   - **amd64:** local APIC (x2APIC when available) and IOAPIC, with a per-CPU

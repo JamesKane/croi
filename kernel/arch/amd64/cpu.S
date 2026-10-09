@@ -106,3 +106,50 @@ arch_cpu_hardware_id:
 arch_clean_dcache:
     ret
 .size arch_clean_dcache, . - arch_clean_dcache
+
+// void arch_idle(void): interrupts on, halt until one arrives, forever.
+.globl arch_idle
+.type arch_idle, @function
+arch_idle:
+1:  sti
+    hlt
+    jmp     1b
+.size arch_idle, . - arch_idle
+
+// void arch_tlb_invalidate_all(void): this CPU, global entries included
+// (toggling CR4.PGE flushes them; a CR3 reload alone would not).
+.globl arch_tlb_invalidate_all
+.type arch_tlb_invalidate_all, @function
+arch_tlb_invalidate_all:
+    mov     %cr4, %rax
+    mov     %rax, %rcx
+    and     $~(1 << 7), %rcx
+    mov     %rcx, %cr4
+    mov     %rax, %cr4
+    ret
+.size arch_tlb_invalidate_all, . - arch_tlb_invalidate_all
+
+// void arch_interrupts_enable(void)
+.globl arch_interrupts_enable
+.type arch_interrupts_enable, @function
+arch_interrupts_enable:
+    sti
+    ret
+.size arch_interrupts_enable, . - arch_interrupts_enable
+
+// void arch_cpuid(uint32_t leaf, uint32_t subleaf, uint32_t out[4]): eax, ebx, ecx, edx.
+.globl arch_cpuid
+.type arch_cpuid, @function
+arch_cpuid:
+    push    %rbx
+    mov     %rdx, %r8
+    mov     %edi, %eax
+    mov     %esi, %ecx
+    cpuid
+    mov     %eax, 0(%r8)
+    mov     %ebx, 4(%r8)
+    mov     %ecx, 8(%r8)
+    mov     %edx, 12(%r8)
+    pop     %rbx
+    ret
+.size arch_cpuid, . - arch_cpuid

@@ -97,3 +97,79 @@ arch_clean_dcache:
     dsb     sy
     ret
 .size arch_clean_dcache, . - arch_clean_dcache
+
+// void arch_idle(void): interrupts on, wait for one, forever.
+.globl arch_idle
+.type arch_idle, %function
+arch_idle:
+    msr     daifclr, #3             // I and F
+1:  wfi
+    b       1b
+.size arch_idle, . - arch_idle
+
+// void arch_tlb_invalidate_all(void): all CPUs (inner shareable).
+.globl arch_tlb_invalidate_all
+.type arch_tlb_invalidate_all, %function
+arch_tlb_invalidate_all:
+    dsb     ishst
+    tlbi    vmalle1is
+    dsb     ish
+    isb
+    ret
+.size arch_tlb_invalidate_all, . - arch_tlb_invalidate_all
+
+// GICv3 CPU interface (system registers).
+
+// void arch_gicv3_cpu_init(void): system-register access on, all
+// priorities unmasked, Group 1 enabled.
+.globl arch_gicv3_cpu_init
+.type arch_gicv3_cpu_init, %function
+arch_gicv3_cpu_init:
+    mrs     x0, ICC_SRE_EL1
+    orr     x0, x0, #1              // SRE
+    msr     ICC_SRE_EL1, x0
+    isb
+    mov     x0, #0xff
+    msr     ICC_PMR_EL1, x0
+    msr     ICC_BPR1_EL1, xzr
+    mov     x0, #1
+    msr     ICC_IGRPEN1_EL1, x0
+    isb
+    ret
+.size arch_gicv3_cpu_init, . - arch_gicv3_cpu_init
+
+// uint64_t arch_gicv3_ack(void): the INTID being handled (1023: spurious).
+.globl arch_gicv3_ack
+.type arch_gicv3_ack, %function
+arch_gicv3_ack:
+    mrs     x0, ICC_IAR1_EL1
+    dsb     sy
+    ret
+.size arch_gicv3_ack, . - arch_gicv3_ack
+
+// void arch_gicv3_eoi(uint64_t intid): EOImode 0, so this also deactivates.
+.globl arch_gicv3_eoi
+.type arch_gicv3_eoi, %function
+arch_gicv3_eoi:
+    msr     ICC_EOIR1_EL1, x0
+    isb
+    ret
+.size arch_gicv3_eoi, . - arch_gicv3_eoi
+
+// void arch_gicv3_send_sgi(uint64_t value): an ICC_SGI1R_EL1 value.
+.globl arch_gicv3_send_sgi
+.type arch_gicv3_send_sgi, %function
+arch_gicv3_send_sgi:
+    dsb     ishst                   // the mailbox write before the IPI
+    msr     ICC_SGI1R_EL1, x0
+    isb
+    ret
+.size arch_gicv3_send_sgi, . - arch_gicv3_send_sgi
+
+// void arch_interrupts_enable(void)
+.globl arch_interrupts_enable
+.type arch_interrupts_enable, %function
+arch_interrupts_enable:
+    msr     daifclr, #3
+    ret
+.size arch_interrupts_enable, . - arch_interrupts_enable

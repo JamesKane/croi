@@ -27,7 +27,8 @@ struct Translation: Equatable {
 /// Tables come from the PMM (state `.mmu`) and are reached through the
 /// physmap; tables emptied by unmap go back to the PMM (never the roots).
 /// Every entry change is followed by TLB invalidation for its address
-/// (local on amd64/rv64 until SMP shootdowns exist; broadcast on arm64).
+/// (broadcast on arm64); on amd64/rv64 each operation ends with a
+/// TlbShootdown of its range on the other CPUs.
 /// Not locked: the owning address space serializes calls.
 ///
 /// Splitting a large page is break-before-make on arm64, so a split must
@@ -66,6 +67,7 @@ struct ArchAspace {
             phys += page
             left -= page
         }
+        TlbShootdown.flushOthers(virt &- size, size)
     }
 
     private func mapOne(virt: UInt64, phys: UInt64, level: Int, _ attributes: MapAttributes) throws(VmError) {
@@ -96,6 +98,7 @@ struct ArchAspace {
     /// are only partly covered. Holes are fine.
     func unmap(virt: UInt64, size: UInt64) throws(VmError) {
         try checkRange(virt, size)
+        defer { TlbShootdown.flushOthers(virt, size) }
         try update(table: root(virt), level: 0, start: virt, end: virt + size, .unmap)
     }
 
@@ -103,6 +106,7 @@ struct ArchAspace {
     /// splitting large pages that are only partly covered. Holes are skipped.
     func protect(virt: UInt64, size: UInt64, _ attributes: MapAttributes) throws(VmError) {
         try checkRange(virt, size)
+        defer { TlbShootdown.flushOthers(virt, size) }
         try update(table: root(virt), level: 0, start: virt, end: virt + size, .protect(attributes))
     }
 

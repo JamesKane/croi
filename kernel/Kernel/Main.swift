@@ -2,6 +2,7 @@ import CHandoff
 import CKernel
 import Fmt
 import PageTables
+import Synchronization
 
 private var archName: StaticString {
     #if arch(x86_64)
@@ -169,6 +170,17 @@ func kernel_main_continue() -> Never {
     Smp.initializeBootCpu(hardwareId: bootHardwareId, stack: bootThreadStack)
     guard Cpu.current == 0 else { panic("per-CPU register does not identify the boot CPU") }
     if let acpi = AcpiTables(rsdp: bootHandoff.acpi_rsdp) {
+        // Interrupt controllers before anyone else starts.
+        guard Interrupts.initializeBootCpu(acpi) else { panic("no usable interrupt controller") }
+        unsafe UnsafePointer<PerCpu>(bitPattern: UInt(Smp.records[0]))!.pointee.interruptsReady
+            .store(true, ordering: .releasing)
+        arch_interrupts_enable()
+        console.write("  irq:    ")
+        console.write(Interrupts.summary)
+        console.write(" ")
+        console.write(hex: Interrupts.detail)
+        console.write("\n")
+
         let kernelDelta = bootHandoff.kernel_virt &- bootHandoff.kernel_phys
         let (found, online) = Smp.startSecondaryCpus(acpi, bootHardwareId: bootHardwareId, kernelDelta: kernelDelta)
         console.write("  cpus:   ")
@@ -182,6 +194,7 @@ func kernel_main_continue() -> Never {
         console.write("  smp:    per-CPU identity ok; ")
         console.write(decimal: UInt64(online * SmpSelfTest.iterations))
         console.write(" contended lock increments, none lost\n")
+        ipiSelfTest(expecting: online - 1, console)
     } else {
         console.write("  cpus:   no ACPI tables; boot cpu only\n")
     }
@@ -191,8 +204,11 @@ func kernel_main_continue() -> Never {
     guard breakpointsHandled == 1 else { panic("breakpoint did not round-trip") }
     console.write("  traps:  vectors installed, breakpoint resumed\n")
 
-    console.write("croi kernel: halting\n")
-    arch_halt()
+    console.write("  irq:    ")
+    console.write(decimal: UInt64(Interrupts.unexpectedCount))
+    console.write(" unexpected interrupts\n")
+    console.write("croi kernel: boot complete, idling\n")
+    arch_idle()
 }
 
 private func report(_ error: MapError, to console: some TextOutput) {
@@ -524,4 +540,66 @@ private func framebufferSelfTest(_ console: Uart) {
     console.write(", mapped write-combining at ")
     console.write(hex: framebuffer.pixels)
     console.write("\n")
+}
+
+/// Probes run on other CPUs by the IPI self-test (C function pointers:
+/// they can't capture, so results go through these globals).
+private enum IpiProbe {
+    static let count = Atomic<Int>(0)
+    nonisolated(unsafe) static var seen = InlineArray<64, UInt64>(repeating: 0)
+
+    static let increment: Ipi.Function = { _ in
+        count.add(1, ordering: .relaxed)
+    }
+    static let read: Ipi.Function = { address in
+        seen[Int(Cpu.current)] = unsafe UnsafePointer<UInt64>(bitPattern: UInt(address))!.pointee
+    }
+}
+
+/// Cross-CPU calls reach every other CPU exactly once, and TLB shootdown
+/// makes a remapped kernel page visible everywhere: every CPU reads it
+/// (caching the translation), the page is remapped to other memory, and
+/// every CPU must then see the new contents.
+private func ipiSelfTest(expecting others: Int, _ console: Uart) {
+    for i in 1..<Smp.count {  // wait for every secondary to take IPIs
+        var ready = false
+        for _ in 0..<200_000_000 where !ready {
+            ready = Ipi.isReady(i)
+            arch_spin_pause()
+        }
+        guard ready else { panic("ipi self-test: a CPU never enabled interrupts") }
+    }
+    guard Ipi.callOthers(IpiProbe.increment, 0) == others,
+          IpiProbe.count.load(ordering: .relaxed) == others
+    else { panic("ipi self-test: call did not reach every CPU once") }
+
+    let page = KernelLayout.pageSize
+    guard let first = pmm.allocatePage(), let second = pmm.allocatePage() else { panic("ipi self-test: no pages") }
+    unsafe UnsafeMutablePointer<UInt64>(bitPattern: UInt(KernelLayout.physmap(first)))!.pointee = 0xAAAA
+    unsafe UnsafeMutablePointer<UInt64>(bitPattern: UInt(KernelLayout.physmap(second)))!.pointee = 0xBBBB
+    let data = MapAttributes(writable: true, global: true)
+    do throws(VmError) {
+        let window = try kernelAspace.reserve(size: page, alignment: page)
+        try kernelAspace.withArch { (arch) throws(VmError) in try arch.map(virt: window, phys: first, size: page, data) }
+        Ipi.callOthers(IpiProbe.read, window)
+        for cpu in 1..<Smp.count where IpiProbe.seen[cpu] != 0xAAAA {
+            panic("ipi self-test: first mapping not seen")
+        }
+        try kernelAspace.withArch { (arch) throws(VmError) in
+            try arch.unmap(virt: window, size: page)
+            try arch.map(virt: window, phys: second, size: page, data)
+        }
+        Ipi.callOthers(IpiProbe.read, window)
+        for cpu in 1..<Smp.count where IpiProbe.seen[cpu] != 0xBBBB {
+            panic("ipi self-test: stale translation after shootdown")
+        }
+        try kernelAspace.free(window)
+    } catch {
+        panic("ipi self-test: VmError")
+    }
+    pmm.free(first)
+    pmm.free(second)
+    console.write("  ipi:    sync calls reach ")
+    console.write(decimal: UInt64(others))
+    console.write(" CPUs; remapped page seen everywhere after shootdown\n")
 }
