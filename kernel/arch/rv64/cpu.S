@@ -382,3 +382,67 @@ arch_xstate_restore:
 .size arch_xstate_restore, . - arch_xstate_restore
 
 .option pop
+
+// --- PMU (pmu.h) -----------------------------------------------------------
+
+// uint64_t arch_rv_counter_read(uint32_t csr): csrr needs the CSR number
+// as an immediate, so a table of 32 reads (8 bytes each).
+.globl arch_rv_counter_read
+.type arch_rv_counter_read, %function
+arch_rv_counter_read:
+    li      t0, 0xC00
+    sub     t0, a0, t0
+    li      t1, 32
+    bgeu    t0, t1, 9f
+    lla     t1, 1f
+    slli    t0, t0, 3
+    add     t1, t1, t0
+    jr      t1
+.option push
+.option norvc
+1:
+    .irp n, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31
+    csrr    a0, 0xC00 + \n
+    ret
+    .endr
+.option pop
+9:  li      a0, 0
+    ret
+.size arch_rv_counter_read, . - arch_rv_counter_read
+
+// long arch_sbi_call5(eid, fid, arg0..arg4, uint64_t *value): the SBI
+// error; *value gets a1. SBI preserves everything but a0 and a1.
+.globl arch_sbi_call5
+.type arch_sbi_call5, %function
+arch_sbi_call5:
+    mv      t0, a7                          // value pointer
+    mv      t1, a0                          // EID
+    mv      t2, a1                          // FID
+    mv      a0, a2
+    mv      a1, a3
+    mv      a2, a4
+    mv      a3, a5
+    mv      a4, a6
+    mv      a7, t1
+    mv      a6, t2
+    ecall
+    sd      a1, 0(t0)
+    ret
+.size arch_sbi_call5, . - arch_sbi_call5
+
+// uint64_t arch_rv_scountovf(void)
+.globl arch_rv_scountovf
+.type arch_rv_scountovf, %function
+arch_rv_scountovf:
+    csrr    a0, 0xDA0
+    ret
+.size arch_rv_scountovf, . - arch_rv_scountovf
+
+// void arch_rv_lcofi_enable(void): sie.LCOFIE (Sscofpmf's overflow interrupt)
+.globl arch_rv_lcofi_enable
+.type arch_rv_lcofi_enable, %function
+arch_rv_lcofi_enable:
+    li      t0, 1 << 13
+    csrs    sie, t0
+    ret
+.size arch_rv_lcofi_enable, . - arch_rv_lcofi_enable

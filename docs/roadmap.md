@@ -235,7 +235,11 @@ joins the same mechanism with the display driver. **K6d done**: user
 FP/SIMD state switched with threads (XSAVE, Neon/SVE, F/D/RVV), user code
 built for the baseline ISA with FP/SIMD. Deferred: lazy AMX through XFD and SME streaming
 mode (neither available under QEMU TCG; both stay disabled/trapped), and
-per-thread SVE vector lengths. Next: K6e (sampling and PMU).
+per-thread SVE vector lengths. **K6e done**: tick sampling (busy CPUs
+only, idle tickless) with kernel and user frame-pointer stacks, PMU
+per-thread counters and overflow sampling (Intel/AMD, PMUv3, SBI +
+Sscofpmf), `pmu_configure`. The Intel backend awaits an Intel machine.
+**K6 is complete.** Next: K7 (IPC and processes).
 - Syscall entry/exit per arch, user-copy with fault recovery, and SMAP, PAN
   and SUM discipline.
 - **vDSO** plus the shared read-only pages: clock, topology and power

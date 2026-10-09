@@ -7,6 +7,7 @@ module CKernel {
   header "thread.h"
   header "trace.h"
   header "xstate.h"
+  header "pmu.h"
   header "aspace.h"
   header "usercopy.h"
   header "cache.h"

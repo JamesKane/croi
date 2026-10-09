@@ -529,3 +529,101 @@ arch_xstate_restore:
     msr     fpcr, x4
     ret
 .size arch_xstate_restore, . - arch_xstate_restore
+
+// --- PMUv3 (pmu.h) ---------------------------------------------------------
+
+// uint64_t arch_pmu_sysreg_read(uint32_t which)
+.globl arch_pmu_sysreg_read
+.type arch_pmu_sysreg_read, %function
+arch_pmu_sysreg_read:
+    cmp     w0, #9
+    b.hi    9f
+    adr     x1, 1f
+    add     x1, x1, x0, lsl #3
+    br      x1
+1:  mrs     x0, pmcr_el0
+    ret
+    mrs     x0, pmcntenset_el0
+    ret
+    mrs     x0, pmcntenclr_el0
+    ret
+    mrs     x0, pmintenset_el1
+    ret
+    mrs     x0, pmintenclr_el1
+    ret
+    mrs     x0, pmovsclr_el0
+    ret
+    mrs     x0, pmceid0_el0
+    ret
+    mrs     x0, pmccfiltr_el0
+    ret
+    mrs     x0, pmuserenr_el0
+    ret
+    mrs     x0, id_aa64dfr0_el1
+    ret
+9:  mov     x0, #0
+    ret
+.size arch_pmu_sysreg_read, . - arch_pmu_sysreg_read
+
+// void arch_pmu_sysreg_write(uint32_t which, uint64_t value)
+.globl arch_pmu_sysreg_write
+.type arch_pmu_sysreg_write, %function
+arch_pmu_sysreg_write:
+    cmp     w0, #8
+    b.hi    9f
+    adr     x2, 1f
+    add     x2, x2, x0, lsl #3
+    br      x2
+1:  msr     pmcr_el0, x1
+    b       8f
+    msr     pmcntenset_el0, x1
+    b       8f
+    msr     pmcntenclr_el0, x1
+    b       8f
+    msr     pmintenset_el1, x1
+    b       8f
+    msr     pmintenclr_el1, x1
+    b       8f
+    msr     pmovsclr_el0, x1
+    b       8f
+    nop                                     // PMCEID0 is read only
+    b       8f
+    msr     pmccfiltr_el0, x1
+    b       8f
+    msr     pmuserenr_el0, x1
+    b       8f
+8:  isb
+9:  ret
+.size arch_pmu_sysreg_write, . - arch_pmu_sysreg_write
+
+// uint64_t arch_pmu_counter_read(uint32_t n)
+.globl arch_pmu_counter_read
+.type arch_pmu_counter_read, %function
+arch_pmu_counter_read:
+    msr     pmselr_el0, x0
+    isb
+    mrs     x0, pmxevcntr_el0
+    ret
+.size arch_pmu_counter_read, . - arch_pmu_counter_read
+
+// void arch_pmu_counter_write(uint32_t n, uint64_t value)
+.globl arch_pmu_counter_write
+.type arch_pmu_counter_write, %function
+arch_pmu_counter_write:
+    msr     pmselr_el0, x0
+    isb
+    msr     pmxevcntr_el0, x1
+    isb
+    ret
+.size arch_pmu_counter_write, . - arch_pmu_counter_write
+
+// void arch_pmu_event_type(uint32_t n, uint64_t type)
+.globl arch_pmu_event_type
+.type arch_pmu_event_type, %function
+arch_pmu_event_type:
+    msr     pmselr_el0, x0
+    isb
+    msr     pmxevtyper_el0, x1
+    isb
+    ret
+.size arch_pmu_event_type, . - arch_pmu_event_type

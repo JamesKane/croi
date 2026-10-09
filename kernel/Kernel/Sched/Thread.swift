@@ -79,6 +79,8 @@ struct Thread: ~Copyable {
     /// Its extended register state area (ExtendedState), or 0: kernel
     /// threads never use FP/SIMD.
     var extendedState: UInt64 = 0
+    /// Per-thread PMU counters (Pmu.ThreadCounters on the heap), or 0.
+    var pmu: UInt64 = 0
     /// Its name in trace records: task << 12 | thread; kernel threads are
     /// task 0, idle threads 0.
     var traceId: UInt32 = 0

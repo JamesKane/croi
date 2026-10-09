@@ -27,7 +27,8 @@ enum ResourceSelfTest {
             }
 
             // Start, mark, stop; the rings come back read-only.
-            try TraceControl.start(table, tracing, categories: CROI_TRACE_MARK, pages: 1, mode: UInt32(CROI_TRACE_ONESHOT))
+            try TraceControl.start(table, tracing, categories: CROI_TRACE_MARK, pages: 1, mode: UInt32(CROI_TRACE_ONESHOT),
+                                   sampleHz: 0)
             try TraceControl.mark(table, tracing, 0x1234, 0x5678)
             try TraceControl.stop(table, tracing)
             var marked = false

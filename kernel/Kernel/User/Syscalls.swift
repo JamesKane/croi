@@ -91,8 +91,8 @@ enum Syscalls {
     static func dispatch(_ frame: UnsafeMutablePointer<arch_exception_frame_t>) {
         arch_interrupts_enable()
         let number = unsafe ExceptionFrame.syscallNumber(frame.pointee)
-        var a = InlineArray<5, UInt64>(repeating: 0)
-        for i in 0..<5 { a[i] = unsafe ExceptionFrame.syscallArgument(frame.pointee, i) }
+        var a = InlineArray<6, UInt64>(repeating: 0)
+        for i in 0..<6 { a[i] = unsafe ExceptionFrame.syscallArgument(frame.pointee, i) }
         count.add(1, ordering: .relaxed)
         Trace.event(CROI_TRACE_SYSCALL, UInt16(CROI_TK_SYSCALL_ENTER), number, a[0])
         let result = run(number, a)
@@ -102,7 +102,7 @@ enum Syscalls {
         _ = arch_interrupts_save()
     }
 
-    private static func run(_ number: UInt64, _ a: InlineArray<5, UInt64>) -> Int64 {
+    private static func run(_ number: UInt64, _ a: InlineArray<6, UInt64>) -> Int64 {
         switch number {
         case 0: return 0  // null
         case 1: return write(a[0], a[1])
@@ -128,7 +128,7 @@ enum Syscalls {
         }
     }
 
-    private static func objectCall(_ number: UInt64, _ a: InlineArray<5, UInt64>,
+    private static func objectCall(_ number: UInt64, _ a: InlineArray<6, UInt64>,
                                    _ table: borrowing HandleTable) throws(Status) -> Int64 {
         let handle = UInt32(truncatingIfNeeded: a[0])
         switch number {
@@ -198,16 +198,53 @@ enum Syscalls {
         case 50:  // trace_configure
             switch a[1] {
             case 0: try TraceControl.start(table, handle, categories: UInt32(truncatingIfNeeded: a[2]), pages: Int(a[3]),
-                                           mode: UInt32(truncatingIfNeeded: a[4]))
+                                           mode: UInt32(truncatingIfNeeded: a[4]), sampleHz: a[5])
             case 1: try TraceControl.stop(table, handle)
             case 2: try TraceControl.rewind(table, handle)
             case 3: try TraceControl.mark(table, handle, a[2], a[3])
             default: throw .invalidArgs
             }
+        case 51:  // pmu_configure
+            try pmuConfigure(table, handle, a)
         default:
             throw .notSupported
         }
         return 0
+    }
+
+    /// pmu_configure: a thread's own counters need nothing; sampling
+    /// (every thread on every CPU) needs the tracing resource.
+    private static func pmuConfigure(_ table: borrowing HandleTable, _ handle: UInt32,
+                                     _ a: InlineArray<6, UInt64>) throws(Status) {
+        switch a[1] {
+        case 0:
+            try check(a[2], MemoryLayout<croi_pmu_info_t>.size)
+            try put(croi_pmu_info_t(kind: Pmu.kind, counters: UInt32(Pmu.threadCounters), events: Pmu.events,
+                                    sampling: Pmu.canSample ? 1 : 0), a[2])
+        case 1:
+            try Resources.check(table, handle, system: ResourceObject.tracingBase)
+            try Pmu.startSampling(event: UInt32(truncatingIfNeeded: a[2]), period: a[3])
+        case 2:
+            try Resources.check(table, handle, system: ResourceObject.tracingBase)
+            Pmu.stopSampling()
+        case 3:
+            guard a[2] >= 1, a[2] <= UInt64(CROI_PMU_THREAD_EVENTS) else { throw .invalidArgs }
+            var events = InlineArray<4, UInt32>(repeating: 0)
+            var span = events.mutableSpan
+            let copied = span.withUnsafeMutableBytes { raw in
+                unsafe UserCopy.from(raw.baseAddress!, a[3], a[2] * 4)
+            }
+            guard copied == 0 else { throw .invalidArgs }
+            try Pmu.enableThread(events, count: Int(a[2]))
+        case 4:
+            try check(a[2], 32)
+            guard let values = Pmu.readThread() else { throw .badState }
+            try put(values, a[2])
+        case 5:
+            Pmu.disableThread()
+        default:
+            throw .invalidArgs
+        }
     }
 
     // MARK: User memory

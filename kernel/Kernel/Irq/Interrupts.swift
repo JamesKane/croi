@@ -62,6 +62,10 @@ enum Interrupts {
 
     /// Handles the interrupt described by `frame` (from arch_exception).
     static func handle(_ frame: UnsafeMutablePointer<arch_exception_frame_t>) {
+        let percpu = unsafe UnsafeMutablePointer<PerCpu>(bitPattern: UInt(arch_percpu()))!
+        unsafe percpu.pointee.interruptFrame = UInt64(UInt(bitPattern: frame))
+        unsafe percpu.pointee.interruptCount += 1
+        defer { unsafe percpu.pointee.interruptFrame = 0 }
         #if arch(x86_64)
         let vector = unsafe frame.pointee.vector
         Trace.event(CROI_TRACE_IRQ, UInt16(CROI_TK_IRQ_ENTER), vector)
@@ -75,6 +79,8 @@ enum Interrupts {
             Timers.handleInterrupt()
         case UInt64(LocalApic.errorVector):
             LocalApic.clearErrors()
+        case UInt64(Pmu.vector):
+            unsafe Pmu.handleOverflow(frame)
         default:
             unexpected(vector)
         }
@@ -88,6 +94,8 @@ enum Interrupts {
             Ipi.handle()
         } else if intid == Timers.intid {
             Timers.handleInterrupt()
+        } else if intid == Pmu.intid, intid != 0 {
+            unsafe Pmu.handleOverflow(frame)
         } else {
             unexpected(intid)
         }
@@ -101,6 +109,8 @@ enum Interrupts {
             Ipi.handle()
         } else if code == 5 {  // supervisor timer interrupt (set_timer clears it)
             Timers.handleInterrupt()
+        } else if code == 13 {  // local counter overflow (Sscofpmf)
+            unsafe Pmu.handleOverflow(frame)
         } else {
             unexpected(code)
         }

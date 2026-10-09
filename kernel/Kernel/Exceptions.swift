@@ -39,7 +39,10 @@ func arch_exception(_ frame: UnsafeMutablePointer<arch_exception_frame_t>) {
         // lock it still answers IPIs (a TLB shootdown from the holder).
         // A protection fault (SMAP/PAN/SUM: the access didn't open user
         // access) is final; retrying the present page would loop.
-        guard unsafe !ExceptionFrame.userAccessBlocked(frame.pointee) else {
+        // So is any fault in interrupt context (a sampler reading user
+        // frames): it must not take locks or sleep to page memory in.
+        let inInterrupt = unsafe UnsafeMutablePointer<PerCpu>(bitPattern: UInt(arch_percpu()))!.pointee.interruptFrame != 0
+        guard unsafe !ExceptionFrame.userAccessBlocked(frame.pointee), !inInterrupt else {
             Trace.event(CROI_TRACE_VM, UInt16(CROI_TK_FAULT), fault.address, fault.write ? CROI_VM_FAULT_WRITE : 0)
             unsafe ExceptionFrame.setProgramCounter(&frame.pointee, recovery)
             return
@@ -82,6 +85,8 @@ enum ExceptionFrame {
                          protectionKey: f.error_code & 32 != 0)
     }
     static func programCounter(_ f: arch_exception_frame_t) -> UInt64 { f.rip }
+    static func framePointer(_ f: arch_exception_frame_t) -> UInt64 { f.rbp }
+    static func stackPointer(_ f: arch_exception_frame_t) -> UInt64 { f.rsp }
     static func interruptsWereEnabled(_ f: arch_exception_frame_t) -> Bool { f.rflags & (1 << 9) != 0 }  // IF
     static func fromUser(_ f: arch_exception_frame_t) -> Bool { f.cs & 3 == 3 }
     /// SMAP: a supervisor access to a present user page with AC clear.
@@ -184,6 +189,8 @@ enum ExceptionFrame {
         return PageFault(address: f.far, write: !instruction && f.esr & (1 << 6) != 0, execute: instruction)
     }
     static func programCounter(_ f: arch_exception_frame_t) -> UInt64 { f.elr }
+    static func framePointer(_ f: arch_exception_frame_t) -> UInt64 { f.x.29 }
+    static func stackPointer(_ f: arch_exception_frame_t) -> UInt64 { f.sp }
     static func interruptsWereEnabled(_ f: arch_exception_frame_t) -> Bool { f.spsr & (1 << 7) == 0 }  // PSTATE.I
     /// PAN: a permission fault with PSTATE.PAN set (ldtr/sttr, which the
     /// accessors use, aren't subject to PAN, so it was a plain access).
@@ -274,6 +281,8 @@ enum ExceptionFrame {
         return PageFault(address: f.stval, write: f.scause == 15, execute: f.scause == 12)
     }
     static func programCounter(_ f: arch_exception_frame_t) -> UInt64 { f.sepc }
+    static func framePointer(_ f: arch_exception_frame_t) -> UInt64 { f.x.8 }  // s0
+    static func stackPointer(_ f: arch_exception_frame_t) -> UInt64 { f.x.2 }
     static func interruptsWereEnabled(_ f: arch_exception_frame_t) -> Bool { f.sstatus & (1 << 5) != 0 }  // SPIE
     /// SUM was clear: the access didn't go through an accessor.
     static func userAccessBlocked(_ f: arch_exception_frame_t) -> Bool { f.sstatus & (1 << 18) == 0 }

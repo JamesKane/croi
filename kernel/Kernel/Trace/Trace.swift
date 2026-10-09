@@ -73,7 +73,8 @@ enum Trace {
     /// Starts recording `categories` into rings of `pages` pages of
     /// records per CPU (128 records a page; rounded up to a power of two,
     /// so the writer masks instead of dividing), discarding what was there.
-    static func start(categories: UInt32, pages requested: Int, mode: UInt32) throws(VmError) {
+    static func start(categories: UInt32, pages requested: Int, mode: UInt32,
+                      sampleHz: UInt64 = UInt64(CROI_SAMPLE_DEFAULT_HZ)) throws(VmError) {
         stop()
         var pages = 1
         while pages < requested { pages *= 2 }
@@ -97,10 +98,12 @@ enum Trace {
                 mode: mode, cpu: UInt32(cpu))
         }
         croi_trace_set_categories(categories)
+        if categories & CROI_TRACE_SAMPLE != 0 { Sampler.start(hz: sampleHz) }
     }
 
     /// Stops recording; returns once no CPU is mid-record.
     static func stop() {
+        Sampler.stop()
         croi_trace_set_categories(0)
         for cpu in 0..<Smp.count {
             while unsafe percpu(cpu).pointee.traceWriting.load(ordering: .sequentiallyConsistent) {

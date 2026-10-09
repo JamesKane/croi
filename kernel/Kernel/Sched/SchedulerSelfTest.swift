@@ -67,6 +67,22 @@ enum SchedulerSelfTest {
         guard result == .timedOut, Clock.now() - start >= 3 * ms,
               Scheduler.locked({ queue.pointee.isEmpty }) else { panic("sched self-test: timeout") }
 
+        // A condition loop woken before its deadline, whose timer fires
+        // while it is ready but not yet running, then waiting again for the
+        // same deadline: it must time out at once (keeping the fired
+        // timer's id once meant waiting forever).
+        waiterDone.store(false, ordering: .relaxed)
+        dueAt = Clock.now() + 3 * ms
+        let waiter = spawn("waiter", last, waitTwice, 0)
+        let waker = spawn("waker", last, wakeQueue, 0)
+        _ = waker.join()
+        let waitGiveUp = Clock.now() + 200 * ms
+        while !waiterDone.load(ordering: .acquiring) {
+            guard Clock.now() < waitGiveUp else { panic("sched self-test: a second wait for a passed deadline") }
+            Scheduler.sleep(until: Clock.now() + ms)
+        }
+        guard waiter.join() == 0 else { panic("sched self-test: early wake, then timeout") }
+
         // Preemption: a thread that never yields spins until a second thread
         // on the same CPU sets a flag, which only a timeslice lets happen.
         start = Clock.now()
@@ -89,9 +105,38 @@ enum SchedulerSelfTest {
         console.write(decimal: UInt64(workers))
         console.write(" threads on ")
         console.write(decimal: UInt64(used))
-        console.write(" CPUs; ping-pong local and cross-CPU, sleep, timeout, preemption (")
+        console.write(" CPUs; ping-pong local and cross-CPU, sleep, timeouts, preemption (")
         console.write(decimal: preemptedAfter / ms)
         console.write(" ms), reaping ok\n")
+    }
+
+    nonisolated(unsafe) static var dueAt: UInt64 = 0
+    static let waiterDone = Atomic<Bool>(false)
+
+    /// Waits twice for `dueAt` in one locked region: woken, then timed out.
+    private static let waitTwice: Thread.Entry = { _ in
+        let results = Scheduler.locked { () -> (Thread.WaitResult, Thread.WaitResult) in
+            let first = Scheduler.block(on: queue, deadline: dueAt)
+            return (first, Scheduler.block(on: queue, deadline: dueAt))
+        }
+        waiterDone.store(true, ordering: .releasing)
+        return results.0 == .woken && results.1 == .timedOut ? 0 : 1
+    }
+
+    /// Wakes the waiter on `queue` (same CPU), then keeps the CPU with
+    /// interrupts masked past its deadline: its timer fires while it is
+    /// ready, not running.
+    private static let wakeQueue: Thread.Entry = { _ in
+        while Scheduler.locked({ queue.pointee.isEmpty }) {
+            Scheduler.sleep(until: Clock.now() + 200_000)
+        }
+        // Masked from before the wake: leaving `locked` with interrupts on
+        // would switch to the waiter at once.
+        let saved = arch_interrupts_save()
+        _ = Scheduler.locked { Scheduler.wakeOne(queue) }
+        while Clock.now() < dueAt + 2_000_000 { arch_spin_pause() }
+        arch_interrupts_restore(saved)
+        return 0
     }
 
     private static func spawn(_ name: StaticString, _ cpu: Int?, _ entry: Thread.Entry, _ argument: UInt64) -> ThreadHandle {

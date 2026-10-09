@@ -256,6 +256,35 @@ thread's stack top.
   per-thread SVE vector length. User code is built for the baseline ISA
   with FP/SIMD (`CROI_USER_CFLAGS`: x86-64, Armv8, rv64gc; SVE, V and
   AVX are run-time options); amd64 `_start` realigns its stack.
+- K6e, sampling (Kernel/Trace/Sampler.swift): with CROI_TRACE_SAMPLE on,
+  each CPU running a thread samples it every 1/sample_hz (trace_configure
+  start's sixth argument, default 1 kHz): a SAMPLE record (PC, frame
+  count, source) and FRAMES records (two return addresses each, up to
+  16), consecutive in the ring. Kernel addresses are image offsets with
+  CROI_SAMPLE_KERNEL set. Frame-pointer walks: kernel frames only inside
+  the interrupted 32 KiB stack block; user frames via `UserCopy`, and a
+  thread sampled in a syscall continues into its user frames (the frame
+  at its kernel stack top). Any fixup fault in interrupt context goes
+  straight to recovery (`PerCpu.interruptFrame`, set by
+  `Interrupts.handle`), so nothing pages in from an interrupt. The
+  sampling timer is armed at a switch to a thread and lapses on a tick
+  that finds the CPU idle, so idle CPUs stay tickless. Kernel and user
+  code keep frame pointers; amd64 user `_start` is a crt-style stub that
+  calls C (a C entry with a 16-aligned stack misaligns rbp).
+- K6e, PMU (Kernel/Trace/Pmu.swift, include/pmu.h, syscall 51
+  pmu_configure): per-thread counters (up to 4 generic or raw events;
+  `Thread.pmu`, stopped and accumulated at switch-out, restarted at
+  switch-in) and overflow sampling into the same SAMPLE records (source
+  1 + generic event) with the tracing resource. The sampling counter is
+  stopped while a CPU idles. amd64: Intel architectural PerfMon (CPUID
+  0xA, full-width writes) or AMD core counters (PerfCtrExtCore, PerfMonV2
+  global control), LVTPC vector 0xF8 (not NMI: masked code isn't
+  sampled); arm64 PMUv3 (overflow PPI from the GICC's performance GSIV,
+  offset 20); rv64 SBI PMU (counters chosen per event by the SBI) with
+  Sscofpmf's LCOFI (interrupt 13) when the RHCT lists it. QEMU TCG amd64
+  has no PMU; KVM on this AMD host covers the AMD backend; the Intel
+  backend is unverified until it runs on an Intel machine. QEMU arm64
+  counts instructions only with icount, so its tests use cycles.
 - User threads killed by a fault or exception are logged (cause and PC)
   until K7's exception channels report them.
 - The boot test runs `usertest.S` (per arch) from a VMO: registers kept
@@ -352,6 +381,12 @@ overlapping windows coalesce and zero slack is exact. amd64 TSC-deadline
 (LAPIC one-shot fallback, tested with `-cpu max,-tsc-deadline`), arm64
 virtual timer (GTDT PPI), rv64 SBI set_timer. The queue is a fixed array
 per CPU for now; K3's thread timers will need an intrusive structure.
+QEMU TCG has no TSC-deadline mode, so amd64 TCG runs use the LAPIC
+one-shot timer: its count comes from the same counter read that bounds
+the deadline (a second read past it wrapped the delta and fired a due
+timer 68.7 s late; the time self-test arms 200 already-due timers).
+`Scheduler.dump` shows each CPU's pending timers, what the hardware is
+armed for, interrupt counts, and on amd64 the dumping CPU's ISR/IRR/LVTT.
 `lib/rt/int128.c` supplies `__udivti3`/`__umodti3`, which
 `dividingFullWidth` needs (there is no compiler-rt).
 
@@ -373,7 +408,10 @@ waiting IPI (`Ipi.call`) while holding it. Use `Scheduler.locked { ... }`
 to check a condition and `block(on:deadline:)` without lost wakeups.
 Timers belong to the CPU that armed them, so a timeout left on another CPU
 is cancelled by IPI after the lock drops; a timer must never outlive its
-thread. Timer ids are only unique per CPU, and a thread can resume on
+thread. A timeout that fires while its thread is awake (woken, not yet
+running) clears the thread's timer id, so a condition loop blocking again
+for the same deadline arms a new one (it used to keep the fired id and
+wait forever; the sched self-test forces that window). Timer ids are only unique per CPU, and a thread can resume on
 another CPU after any `switchAway`: re-read `Cpu.current` after one (a
 stale CPU number in the preemption loop cancelled other CPUs' timers). Preemption: a timeslice (10 ms), or a wakeup onto an idle CPU,
 sets a per-CPU request that is acted on when an interrupt returns.

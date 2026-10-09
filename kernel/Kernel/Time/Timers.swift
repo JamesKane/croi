@@ -138,6 +138,21 @@ enum Timers {
         program()
     }
 
+    /// Diagnostics: another CPU's queue (read racily): the deadline of
+    /// timer `id` if pending, what the hardware is armed for, pending
+    /// count and interrupts taken.
+    static func inspect(cpu: Int, id: UInt32) -> (deadline: UInt64?, programmed: UInt64, pending: Int, interrupts: UInt64) {
+        let record = unsafe UnsafePointer<PerCpu>(bitPattern: UInt(Smp.records[cpu]))!
+        let queue = unsafe UnsafePointer<TimerQueue>(bitPattern: UInt(record.pointee.timerQueue))!
+        var deadline: UInt64? = nil
+        var pending = 0
+        for i in 0..<32 where unsafe queue.pointee.entries[i].id != 0 {
+            pending += 1
+            if unsafe queue.pointee.entries[i].id == id { deadline = unsafe queue.pointee.entries[i].deadline }
+        }
+        return unsafe (deadline, queue.pointee.programmed, pending, queue.pointee.interrupts)
+    }
+
     /// Timer interrupts this CPU has taken.
     static var interruptCount: UInt64 { unsafe queue.pointee.interrupts }
 
@@ -164,13 +179,17 @@ enum Timers {
     }
 
     private static func armHardware(atNanoseconds ns: UInt64) {
-        let counter = max(Clock.counter(atNanoseconds: ns), arch_counter_read() + 1)
+        let now = arch_counter_read()
+        let counter = max(Clock.counter(atNanoseconds: ns), now + 1)
         #if arch(x86_64)
         if deadlineMode {
             arch_wrmsr(0x6E0, counter)
         } else {
             // TSC ticks to APIC timer ticks, saturating at the 32-bit counter.
-            let product = (counter &- arch_counter_read()).multipliedFullWidth(by: X86TimeSources.apicTimerFrequency)
+            // From the same `now`: a second counter read could already be
+            // past `counter`, and the wrapped difference saturated the
+            // count (QEMU TCG: a due timer fired 68.7 s late).
+            let product = (counter - now).multipliedFullWidth(by: X86TimeSources.apicTimerFrequency)
             let apicTicks = product.high >= Clock.frequency
                 ? UInt64(UInt32.max) : Clock.frequency.dividingFullWidth(product).quotient
             LocalApic.write(LocalApic.timerInitial, UInt32(max(1, min(apicTicks, UInt64(UInt32.max)))))

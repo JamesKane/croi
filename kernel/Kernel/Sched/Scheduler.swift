@@ -366,6 +366,10 @@ enum Scheduler {
     private static let timeoutFired: Timers.Callback = { address, generation in
         let thread = ThreadPointer(address: address)
         lock.lockMasked()  // a timer callback: interrupts are masked
+        // This wait's timer is gone now, whatever the thread is doing: if
+        // it was woken first and blocks again for the same deadline, it
+        // must arm a new one (keeping this id lost the timeout for good).
+        if thread.pointee.waitGeneration == generation { thread.pointee.timeoutTimer = 0 }
         if thread.pointee.state == .blocked, thread.pointee.waitGeneration == generation {
             if let queue = thread.pointee.waitQueue {
                 queue.pointee.remove(thread)
@@ -1035,6 +1039,8 @@ enum Scheduler {
         }
         loadPkru(next.pointee.pkru, me)
         setKernelStack(next.pointee.stack.top)
+        Sampler.switched(to: next)
+        Pmu.switched(from: current, to: next)
         // User FP/SIMD state (K6d): out of the registers for the thread
         // leaving, in for the one arriving. Nothing in between uses FP.
         if current.pointee.extendedState != 0 {
@@ -1258,6 +1264,7 @@ enum Scheduler {
             }
         }
         ExtendedState.free(thread.pointee.extendedState)
+        Pmu.release(thread)
         let raw = unsafe UnsafeMutablePointer<Thread>(bitPattern: UInt(thread.address))!
         unsafe raw.deinitialize(count: 1)
         unsafe heap.free(UnsafeMutableRawPointer(raw))
@@ -1322,6 +1329,36 @@ enum Scheduler {
             out.write(decimal: cpus[cpu].switches)
             out.write(", ipi mailbox ")
             out.write(hex: UInt64(unsafe UnsafePointer<PerCpu>(bitPattern: UInt(Smp.records[cpu]))!.pointee.ipiPending.load(ordering: .relaxed)))
+            let timers = Timers.inspect(cpu: cpu, id: 0)
+            out.write(", timers ")
+            out.write(decimal: UInt64(timers.pending))
+            out.write(" pending, hardware ")
+            if timers.programmed == .max {
+                out.write("disarmed")
+            } else {
+                out.write("due in ")
+                out.write(decimal: UInt64(bitPattern: Int64(bitPattern: timers.programmed &- Clock.now()) / 1000))
+                out.write(" us")
+            }
+            out.write(", timer irqs ")
+            out.write(decimal: timers.interrupts)
+            let percpu = unsafe UnsafePointer<PerCpu>(bitPattern: UInt(Smp.records[cpu]))!
+            out.write(", all irqs ")
+            out.write(decimal: unsafe percpu.pointee.interruptCount)
+            #if arch(x86_64)
+            if cpu == Int(Cpu.current), LocalApic.x2apic {
+                out.write(", ISR ")
+                for i in (0..<8).reversed() { out.write(hex: arch_rdmsr(0x810 + UInt32(i))) }
+                out.write(" IRR ")
+                for i in (0..<8).reversed() { out.write(hex: arch_rdmsr(0x820 + UInt32(i))) }
+                out.write(" TPR ")
+                out.write(hex: arch_rdmsr(0x808))
+                out.write(" LVTT ")
+                out.write(hex: arch_rdmsr(0x832))
+                out.write(" TSCDL-now ")
+                out.write(hex: arch_rdmsr(0x6E0) &- arch_counter_read())
+            }
+            #endif
             out.write("\n")
         }
         var cursor = allThreads
@@ -1356,6 +1393,10 @@ enum Scheduler {
             out.write(decimal: UInt64(thread.pointee.timeoutTimer))
             out.write("@")
             out.write(decimal: UInt64(thread.pointee.timeoutCpu))
+            if thread.pointee.timeoutTimer != 0 {
+                let state = Timers.inspect(cpu: thread.pointee.timeoutCpu, id: thread.pointee.timeoutTimer)
+                out.write(state.deadline != nil ? " (pending)" : " (not in its queue)")
+            }
             out.write(" deadline ")
             out.write(decimal: thread.pointee.timeoutDeadline)
             out.write(" gen ")

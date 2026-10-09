@@ -44,6 +44,8 @@ enum : uint16_t {
   CROI_TK_SYSCALL_EXIT = 49,   // a: number; b: result
   CROI_TK_FAULT = 32,      // a: faulting user address; b: CROI_VM_FAULT_* bits
   CROI_TK_COMMIT = 33,     // a: VMO trace id; b: page index committed
+  CROI_TK_SAMPLE = 64,     // thread: sampled; a: PC; b: frames << 8 | source
+  CROI_TK_FRAMES = 65,     // a, b: the next two return addresses (0: none)
   CROI_TK_MARK = 112,      // a, b: 16 bytes of the marker's choosing
 };
 
@@ -52,6 +54,18 @@ enum : uint64_t {
   CROI_TRACE_PREEMPT_DEADLINE = 2,  // an earlier deadline became runnable
   CROI_TRACE_PREEMPT_SLICE = 3,     // a fair slice ended with others waiting
   CROI_TRACE_PREEMPT_RESERVED = 4,  // its CPU was reserved away from it
+};
+
+// Samples (CROI_TRACE_SAMPLE): a SAMPLE record, then frames/2 rounded up
+// FRAMES records, innermost first, consecutive in the ring. Addresses in
+// the kernel image are offsets from its base with CROI_SAMPLE_KERNEL set
+// (records never hold kernel addresses); user addresses are as they are.
+// A thread sampled in a syscall gets its kernel frames, then its user PC
+// and frames. Source 0 is the tick; PMU overflow sources are 1 + counter.
+enum : uint64_t {
+  CROI_SAMPLE_KERNEL = 1ull << 63,
+  CROI_SAMPLE_MAX_FRAMES = 16,
+  CROI_SAMPLE_DEFAULT_HZ = 1000,
 };
 
 enum : uint64_t {

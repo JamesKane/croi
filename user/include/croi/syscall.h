@@ -30,14 +30,26 @@ enum : uint64_t {
   CROI_SYS_VMO_READ = 41,          // (vmo, void *buffer, offset, length)
   CROI_SYS_VMO_WRITE = 42,         // (vmo, const void *buffer, offset, length)
   CROI_SYS_VMO_MAP = 43,           // (vmo, offset, length, rights bits, uint64_t *address); until VMARs (K7)
-  CROI_SYS_TRACE_CONFIGURE = 50,   // (resource, op, a, b, c)
+  CROI_SYS_TRACE_CONFIGURE = 50,   // (resource, op, a, b, c, sample_hz)
+  CROI_SYS_PMU_CONFIGURE = 51,     // (resource, op, a, b)
 };
 
 enum : uint64_t {  // CROI_SYS_TRACE_CONFIGURE ops
-  CROI_TRACE_OP_START = 0,   // a: categories, b: pages per CPU, c: mode
+  CROI_TRACE_OP_START = 0,   // a: categories, b: pages per CPU, c: mode;
+                             // sample_hz: the tick sampler's rate (0: 1 kHz)
   CROI_TRACE_OP_STOP = 1,
   CROI_TRACE_OP_REWIND = 2,
   CROI_TRACE_OP_MARK = 3,    // a, b: 16 bytes of the caller's
+};
+
+enum : uint64_t {  // CROI_SYS_PMU_CONFIGURE ops (events: pmu.h)
+  CROI_PMU_OP_INFO = 0,          // a: croi_pmu_info_t out (no resource needed)
+  CROI_PMU_OP_SAMPLE_START = 1,  // a: event, b: period (tracing resource)
+  CROI_PMU_OP_SAMPLE_STOP = 2,   // (tracing resource)
+  CROI_PMU_OP_THREAD_START = 3,  // a: count (1-4), b: uint32_t events[count];
+                                 // the calling thread, from zero
+  CROI_PMU_OP_THREAD_READ = 4,   // a: uint64_t[4] out
+  CROI_PMU_OP_THREAD_STOP = 5,
 };
 
 enum : uint64_t {  // CROI_SYS_VMO_MAP rights

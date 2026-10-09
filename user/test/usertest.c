@@ -5,6 +5,7 @@
 
 #include <croi/syscall.h>
 
+#include "pmu.h"
 #include "shared.h"
 
 #define ERR_BAD_HANDLE (-11)
@@ -236,14 +237,71 @@ static int64_t registers(uint64_t seed, uint64_t sve) {
   return 0x10000000 | (int64_t)((bits ^ bits >> 32) & 0x0FFFFFFF);
 }
 
-// Entered straight from the kernel, not called: on amd64 the stack is
-// 16-byte aligned rather than 8 off, so realign (SSE spills need it).
+// Mode 5: pmu_configure from user mode: info, the thread's own cycle
+// counter (rising, user code counted), and refusals.
+static uint64_t pmu_call(uint64_t op, uint64_t a, uint64_t b) {
+  return (uint64_t)sys(CROI_SYS_PMU_CONFIGURE, 0, op, a, b, 0);
+}
+
+static int64_t pmu(void) {
+  croi_pmu_info_t info = {};
+  CHECK(60, pmu_call(CROI_PMU_OP_INFO, (uint64_t)&info, 0) == 0);
+  uint32_t cycles[1] = {CROI_PMU_CYCLES};
+  if (info.kind == CROI_PMU_KIND_NONE) {
+    CHECK(61, pmu_call(CROI_PMU_OP_THREAD_START, 1, (uint64_t)cycles) != 0);
+    sys(CROI_SYS_TEST_REPORT, 0, 0, 0, 0, 0);
+    return 0x600D;
+  }
+  CHECK(62, pmu_call(CROI_PMU_OP_THREAD_START, 1, (uint64_t)cycles) == 0);
+  uint64_t first[4] = {}, second[4] = {};
+  for (volatile int i = 0; i < 100000; i++) {}
+  CHECK(63, pmu_call(CROI_PMU_OP_THREAD_READ, (uint64_t)first, 0) == 0 && first[0] > 0);
+  for (volatile int i = 0; i < 100000; i++) {}
+  CHECK(64, pmu_call(CROI_PMU_OP_THREAD_READ, (uint64_t)second, 0) == 0 && second[0] > first[0]);
+  CHECK(65, pmu_call(CROI_PMU_OP_SAMPLE_START, CROI_PMU_CYCLES, 1000000) != 0);  // no resource
+  uint32_t bogus[1] = {99};
+  CHECK(66, pmu_call(CROI_PMU_OP_THREAD_START, 1, (uint64_t)bogus) != 0);
+  CHECK(67, pmu_call(CROI_PMU_OP_THREAD_START, 9, (uint64_t)cycles) != 0);
+  CHECK(68, pmu_call(CROI_PMU_OP_THREAD_READ, 0x10, 0) != 0);  // bad pointer
+  CHECK(69, pmu_call(CROI_PMU_OP_THREAD_STOP, 0, 0) == 0);
+  CHECK(70, pmu_call(CROI_PMU_OP_THREAD_READ, (uint64_t)first, 0) != 0);  // stopped
+  sys(CROI_SYS_TEST_REPORT, second[0] - first[0], 0, 0, 0, 0);
+  return 0x600D;
+}
+
+// Mode 4: something to sample. Three frames deep, spin for `ns`, with a
+// clock syscall every 64 iterations (so some samples land in the kernel
+// and must continue into these frames).
+__attribute__((noinline)) static uint64_t spin3(uint64_t ns) {
+  uint64_t end = (uint64_t)sys(CROI_SYS_CLOCK_MONOTONIC, 0, 0, 0, 0, 0) + ns, n = 0;
+  for (;;) {
+    for (int i = 0; i < 64; i++) __asm__ volatile("" ::: "memory");
+    n++;
+    if ((uint64_t)sys(CROI_SYS_CLOCK_MONOTONIC, 0, 0, 0, 0, 0) >= end) return n;
+  }
+}
+__attribute__((noinline)) static uint64_t spin2(uint64_t ns) { return spin3(ns) + 1; }
+__attribute__((noinline)) static uint64_t spin1(uint64_t ns) { return spin2(ns) + 1; }
+
+// Entered straight from the kernel with a 16-byte aligned stack. On amd64
+// a C function expects to have been called (8 off), so _start is a stub
+// that calls test_main, as a crt0 would.
 #if defined(__x86_64__)
-__attribute__((force_align_arg_pointer))
-#endif
+__asm__(".section .text.start, \"ax\"\n"
+        ".globl _start\n"
+        "_start:\n"
+        "  xor %ebp, %ebp\n"
+        "  call test_main\n"
+        "  ud2\n"
+        ".text\n");
+[[noreturn]] __attribute__((used)) void test_main(uint64_t mode, uint64_t handle) {
+#else
 __attribute__((section(".text.start"))) [[noreturn]] void _start(uint64_t mode, uint64_t handle) {
+#endif
   exit_with(mode == 1   ? marks((uint32_t)handle)
             : mode == 2 ? vdso(handle)
             : mode == 3 ? registers(handle & 0xFFFF, handle >> 16 & 1)
+            : mode == 4 ? (spin1(handle) > 2 ? 0x600D : 1)
+            : mode == 5 ? pmu()
                         : objects());
 }

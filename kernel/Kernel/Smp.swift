@@ -28,6 +28,18 @@ struct PerCpu: ~Copyable {
     /// The running thread's trace id (kept by the scheduler at each switch).
     var traceThread: UInt32 = 0
     let traceWriting = Atomic<Bool>(false)
+    /// The frame of the interrupt this CPU is handling, or 0 (samplers read
+    /// it; user memory isn't paged in while it is set).
+    var interruptFrame: UInt64 = 0
+    /// Generation of this CPU's live sampling timer, or 0 (Sampler).
+    var samplerArmed: UInt64 = 0
+    var samplerTimer: UInt32 = 0
+    /// rv64: the SBI counter this CPU samples with, or ~0 (Pmu).
+    var pmuSamplingCounter: UInt64 = ~0
+    /// PMU overflow interrupts this CPU took (Pmu).
+    var pmuOverflows: UInt64 = 0
+    /// Interrupts this CPU has handled (Scheduler.dump shows it).
+    var interruptCount: UInt64 = 0
 
     init(number: UInt32, hardwareId: UInt64, acpiUid: UInt32, stack: StackRange, timerQueue: UInt64) {
         self.number = number

@@ -122,13 +122,15 @@ enum Resources {
 /// ktrace): start, stop, rewind, mark, and the rings as read-only VMOs.
 enum TraceControl {
     static func start(_ table: borrowing HandleTable, _ resource: UInt32, categories: UInt32, pages: Int,
-                      mode: UInt32) throws(Status) {
+                      mode: UInt32, sampleHz: UInt64) throws(Status) {
         try Resources.check(table, resource, system: ResourceObject.tracingBase)
-        guard pages > 0, pages <= 4096, mode == UInt32(CROI_TRACE_ONESHOT) || mode == UInt32(CROI_TRACE_CIRCULAR) else {
+        guard pages > 0, pages <= 4096, mode == UInt32(CROI_TRACE_ONESHOT) || mode == UInt32(CROI_TRACE_CIRCULAR),
+              sampleHz <= Sampler.maxHz else {
             throw .invalidArgs
         }
         do throws(VmError) {
-            try Trace.start(categories: categories, pages: pages, mode: mode)
+            try Trace.start(categories: categories, pages: pages, mode: mode,
+                            sampleHz: sampleHz == 0 ? UInt64(CROI_SAMPLE_DEFAULT_HZ) : sampleHz)
         } catch {
             throw .noMemory
         }

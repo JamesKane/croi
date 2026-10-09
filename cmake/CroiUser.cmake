@@ -19,7 +19,7 @@ function(croi_user_binary output)
     list(APPEND _includes -I${_i})
   endforeach()
   add_custom_command(OUTPUT ${output}
-    COMMAND ${CMAKE_C_COMPILER} --target=${CROI_CLANG_TRIPLE} ${CROI_USER_CFLAGS} -std=c23 -O2 -ffreestanding
+    COMMAND ${CMAKE_C_COMPILER} --target=${CROI_CLANG_TRIPLE} ${CROI_USER_CFLAGS} -std=c23 -O2 -fno-omit-frame-pointer -ffreestanding
             -fno-stack-protector -fno-builtin -nostdlib -static -fuse-ld=lld ${_code}
             -Wl,-T,${U_LINKER_SCRIPT} ${_includes} ${U_SOURCES} -o ${_elf}
     COMMAND ${CMAKE_OBJCOPY} -O binary ${_elf} ${output}

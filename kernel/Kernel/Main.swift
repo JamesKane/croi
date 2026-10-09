@@ -230,6 +230,7 @@ func kernel_main_continue() -> Never {
         } else {
             console.write("none in the GTDT\n")
         }
+        Pmu.initialize(acpi)
         console.write("  topo:   ")
         if CpuTopologies.placeAll(acpi) {
             console.write(decimal: UInt64(CpuTopologies.distinct { $0.package }))
@@ -275,6 +276,8 @@ func kernel_main_continue() -> Never {
         SyscallSelfTest.run(console)
         VdsoSelfTest.run(console)
         FpSelfTest.run(console)
+        SamplerSelfTest.run(console)
+        PmuSelfTest.run(console)
         SelfTestDeadman.done.store(true, ordering: .relaxed)
     } else {
         console.write("  cpus:   no ACPI tables; boot cpu only\n")
@@ -690,8 +693,8 @@ private func ipiSelfTest(expecting others: Int, _ console: Uart) {
 
 /// Results reported by timer callbacks (C function pointers: no captures).
 private enum TimerProbe {
-    nonisolated(unsafe) static var firedAt = InlineArray<3, UInt64>(repeating: 0)
-    nonisolated(unsafe) static var firedInInterrupt = InlineArray<3, UInt64>(repeating: 0)
+    nonisolated(unsafe) static var firedAt = InlineArray<4, UInt64>(repeating: 0)
+    nonisolated(unsafe) static var firedInInterrupt = InlineArray<4, UInt64>(repeating: 0)
     static let cpusFired = Atomic<Int>(0)
 
     static let record: Timers.Callback = { probe, _ in
@@ -735,6 +738,21 @@ private func timeSelfTest(others: Int, _ console: Uart) {
         panic("timer self-test: overlapping windows did not coalesce")
     }
     guard TimerProbe.firedAt[2] == 0 else { panic("timer self-test: cancelled timer fired") }
+
+    // Timers already due fire at once, many times over: arming one reads
+    // the counter after computing the deadline, and a second read past it
+    // once wrapped the APIC one-shot count (fired 68.7 s late).
+    for round in 0..<200 {
+        TimerProbe.firedAt[3] = 0
+        let armedAt = Clock.now()
+        guard Timers.arm(deadline: armedAt &- UInt64(round % 3), TimerProbe.record, 3) != nil else {
+            panic("timer self-test: arm")
+        }
+        while TimerProbe.firedAt[3] == 0, Clock.now() < armedAt + 50 * ms {
+            arch_spin_pause()
+        }
+        guard TimerProbe.firedAt[3] != 0 else { panic("timer self-test: a due timer didn't fire at once") }
+    }
 
     Ipi.callOthers(TimerProbe.armOnThisCpu, 0)
     let deadline = Clock.now() + 1_000 * ms
