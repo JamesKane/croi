@@ -8,6 +8,11 @@
 // Enables interrupts and waits for them forever (the idle loop).
 [[noreturn]] void arch_idle(void);
 
+// Called with interrupts masked: waits until one is pending, lets it be
+// taken, and returns with interrupts masked again. No wakeup is lost
+// between the caller's last check and the wait.
+void arch_wait_for_interrupt(void);
+
 // Unmasks interrupts on this CPU.
 void arch_interrupts_enable(void);
 

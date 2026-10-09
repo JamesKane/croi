@@ -8,6 +8,7 @@ struct TimerEntry {
     var latest: UInt64 = 0
     var callback: Timers.Callback?
     var argument: UInt64 = 0
+    var context: UInt64 = 0
 }
 
 /// A CPU's pending timers, in its PerCpu record. Touched only by its own
@@ -29,7 +30,8 @@ struct TimerQueue {
 /// arm64: the EL1 virtual timer (its PPI from the GTDT). rv64: SBI
 /// set_timer. A timer runs on the CPU that armed it, in interrupt context.
 enum Timers {
-    typealias Callback = @convention(c) (UInt64) -> Void
+    /// Called with the two values given to `arm`.
+    typealias Callback = @convention(c) (UInt64, UInt64) -> Void
 
     #if arch(x86_64)
     static var vector: UInt32 { 0xF1 }
@@ -89,7 +91,9 @@ enum Timers {
     /// Arms a timer on this CPU. Returns its id (for `cancel`), or nil if
     /// this CPU's queue is full.
     @discardableResult
-    static func arm(deadline: UInt64, slack: UInt64 = 0, _ callback: Callback, _ argument: UInt64) -> UInt32? {
+    static func arm(
+        deadline: UInt64, slack: UInt64 = 0, _ callback: Callback, _ argument: UInt64, context: UInt64 = 0
+    ) -> UInt32? {
         let saved = arch_interrupts_save()
         defer { arch_interrupts_restore(saved) }
         let queue = unsafe self.queue
@@ -98,7 +102,7 @@ enum Timers {
             unsafe queue.pointee.nextId = id == .max ? 1 : id + 1
             let latest = deadline.addingReportingOverflow(slack).overflow ? .max : deadline + slack
             unsafe queue.pointee.entries[i] = TimerEntry(id: id, deadline: deadline, latest: latest,
-                                                         callback: callback, argument: argument)
+                                                         callback: callback, argument: argument, context: context)
             program()
             return id
         }
@@ -129,7 +133,7 @@ enum Timers {
             let entry = unsafe queue.pointee.entries[i]
             guard entry.id != 0, entry.deadline <= now, let callback = entry.callback else { continue }
             unsafe queue.pointee.entries[i] = TimerEntry()  // free first: the callback may re-arm
-            callback(entry.argument)
+            callback(entry.argument, entry.context)
         }
         program()
     }

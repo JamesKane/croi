@@ -4,5 +4,6 @@ module CKernel {
   header "smp.h"
   header "irq.h"
   header "time.h"
+  header "thread.h"
   export *
 }

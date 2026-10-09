@@ -205,6 +205,23 @@ Arm MIDR). QEMU only has a PPTT on arm64 and never cache nodes, so a
 boot self-test runs the walk on a hand-built table. This is the data for
 the topology page (ext 9).
 
+Threads (K3a, Kernel/Sched/): `Scheduler.spawn` returns a `ThreadHandle`
+(`~Copyable`; `join()` frees the thread, dropping it detaches). Thread
+records are heap allocations reached through `ThreadPointer`; `savedSp` must
+stay their first field (arch_context_switch stores through the record
+address). One global scheduler lock protects all thread, run-queue and
+wait-queue state. It is taken masked (`lockMasked`) and handed across the
+switch: the resumed thread releases it (`finishSwitch`). Never send a
+waiting IPI (`Ipi.call`) while holding it. Use `Scheduler.locked { ... }`
+to check a condition and `block(on:deadline:)` without lost wakeups.
+Timers belong to the CPU that armed them, so a timeout left on another CPU
+is cancelled by IPI after the lock drops; a timer must never outlive its
+thread. Preemption: a timeslice (10 ms), or a wakeup onto an idle CPU,
+sets a per-CPU request that is acted on when an interrupt returns.
+Interrupt frames don't restore the per-CPU register (rv64 `tp` is skipped),
+because a preempted thread can resume on another CPU. Policy is
+round-robin for now; fair + EDF on scheduling contexts is K3c.
+
 Bring-up aids (K2 follow-ups from the board review in docs/roadmap.md):
 - Console: the loader takes SPCR, then DBG2 (CIX Sky1 has no SPCR), then
   COM1 on PCs; `loader.console=dbg2` in `\croi\cmdline` tries DBG2 first

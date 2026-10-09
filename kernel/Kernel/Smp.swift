@@ -185,7 +185,7 @@ func kernel_ap_main(_ percpu: UInt64) -> Never {
     CpuStacks.installThisCpu()
     Timers.initializeThisCpu()
     unsafe record.pointee.interruptsReady.store(true, ordering: .releasing)
-    arch_idle()
+    unsafe Scheduler.becomeIdle(stack: record.pointee.stack)
 }
 
 /// Cross-CPU boot self-test: per-CPU identity, and a counter incremented

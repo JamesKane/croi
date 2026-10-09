@@ -73,7 +73,9 @@ trap_entry:
     ld      t0, FRAME_SSTATUS(sp)
     csrw    sstatus, t0
     RESTORE 1
-    .irp n, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31
+    // Not tp (x4): it is per CPU, and a thread preempted here can resume
+    // on another hart.
+    .irp n, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31
     RESTORE \n
     .endr
     addi    sp, sp, FRAME_SIZE

@@ -21,6 +21,9 @@ add_library(kernel-swift OBJECT
   Kernel/Time/Clock.swift
   Kernel/Time/Timers.swift
   Kernel/Time/Watchdog.swift
+  Kernel/Sched/Thread.swift
+  Kernel/Sched/Scheduler.swift
+  Kernel/Sched/SchedulerSelfTest.swift
   Kernel/SpinLock.swift
   Kernel/Uart.swift
   Kernel/Vm/ArchAspace.swift
@@ -33,7 +36,8 @@ add_executable(kernel
   arch/${CROI_ARCH}/start.S
   arch/${CROI_ARCH}/cpu.S
   arch/${CROI_ARCH}/exceptions.S
-  arch/${CROI_ARCH}/smp.S)
+  arch/${CROI_ARCH}/smp.S
+  arch/${CROI_ARCH}/thread.S)
 target_include_directories(kernel PRIVATE include)
 target_link_libraries(kernel PRIVATE kernel-swift croi-rt)
 set_target_properties(kernel PROPERTIES OUTPUT_NAME kernel.elf)

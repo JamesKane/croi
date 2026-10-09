@@ -116,6 +116,17 @@ arch_idle:
     jmp     1b
 .size arch_idle, . - arch_idle
 
+// void arch_wait_for_interrupt(void): sti's one-instruction shadow means
+// the interrupt can't arrive before hlt.
+.globl arch_wait_for_interrupt
+.type arch_wait_for_interrupt, @function
+arch_wait_for_interrupt:
+    sti
+    hlt
+    cli
+    ret
+.size arch_wait_for_interrupt, . - arch_wait_for_interrupt
+
 // void arch_tlb_invalidate_all(void): this CPU, global entries included
 // (toggling CR4.PGE flushes them; a CR3 reload alone would not).
 .globl arch_tlb_invalidate_all

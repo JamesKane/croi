@@ -13,6 +13,8 @@ import Synchronization
 enum Ipi {
     /// Mailbox bits.
     static var call: UInt32 { 1 << 0 }
+    /// Run the scheduler when the interrupt returns.
+    static var reschedule: UInt32 { 1 << 1 }
 
     typealias Function = @convention(c) (UInt64) -> Void
 
@@ -26,6 +28,31 @@ enum Ipi {
     /// all have finished. Returns how many CPUs ran it. Any context.
     @discardableResult
     static func callOthers(_ function: Function, _ argument: UInt64) -> Int {
+        call(on: -1, function, argument)
+    }
+
+    /// Runs `function(argument)` on CPU `cpu` (this CPU: directly) and
+    /// waits for it. Returns false if that CPU can't take IPIs.
+    @discardableResult
+    static func call(onCpu cpu: Int, _ function: Function, _ argument: UInt64) -> Bool {
+        if UInt32(cpu) == Cpu.current {
+            let saved = arch_interrupts_save()
+            function(argument)
+            arch_interrupts_restore(saved)
+            return true
+        }
+        return call(on: cpu, function, argument) == 1
+    }
+
+    /// Sends the reschedule kind to `cpu` (no waiting).
+    static func requestReschedule(_ cpu: Int) {
+        let record = unsafe UnsafePointer<PerCpu>(bitPattern: UInt(Smp.records[cpu]))!
+        _ = unsafe record.pointee.ipiPending.bitwiseOr(reschedule, ordering: .releasing)
+        unsafe Interrupts.sendIpi(record)
+    }
+
+    /// Runs `function` on CPU `only` (or every other ready CPU if -1).
+    private static func call(on only: Int, _ function: Function, _ argument: UInt64) -> Int {
         let saved = arch_interrupts_save()
         defer { arch_interrupts_restore(saved) }
 
@@ -35,13 +62,13 @@ enum Ipi {
         }
         let me = Cpu.current
         var targets = 0
-        for i in 0..<Smp.count where UInt32(i) != me && isReady(i) {
+        for i in 0..<Smp.count where UInt32(i) != me && isReady(i) && (only < 0 || i == only) {
             targets += 1
         }
         Self.function = function
         Self.argument = argument
         remaining.store(targets, ordering: .releasing)
-        for i in 0..<Smp.count where UInt32(i) != me && isReady(i) {
+        for i in 0..<Smp.count where UInt32(i) != me && isReady(i) && (only < 0 || i == only) {
             let record = unsafe UnsafePointer<PerCpu>(bitPattern: UInt(Smp.records[i]))!
             _ = unsafe record.pointee.ipiPending.bitwiseOr(call, ordering: .releasing)
             unsafe Interrupts.sendIpi(record)
@@ -68,6 +95,9 @@ enum Ipi {
         if pending & call != 0, let function {
             function(argument)
             remaining.subtract(1, ordering: .releasing)
+        }
+        if pending & reschedule != 0 {
+            Scheduler.requestPreemption()
         }
     }
 

@@ -112,7 +112,7 @@ enum Watchdog {
         return true
     }
 
-    private static let kickAndRearm: Timers.Callback = { _ in
+    private static let kickAndRearm: Timers.Callback = { _, _ in
         active?.kick()
         Timers.arm(deadline: Clock.now() + refreshNanoseconds, kickAndRearm, 0)
     }

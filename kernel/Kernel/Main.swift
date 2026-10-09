@@ -243,6 +243,10 @@ func kernel_main_continue() -> Never {
         }
         console.write(decimal: UInt64(CpuTopologies.distinct { $0.coreType }))
         console.write(" core type(s)\n")
+
+        // From here on the boot code is the "bootstrap" thread.
+        unsafe Scheduler.initializeBootCpu(stack: UnsafePointer<PerCpu>(bitPattern: UInt(Smp.records[0]))!.pointee.stack)
+        SchedulerSelfTest.run(console)
     } else {
         console.write("  cpus:   no ACPI tables; boot cpu only\n")
     }
@@ -256,6 +260,9 @@ func kernel_main_continue() -> Never {
     console.write(decimal: UInt64(Interrupts.unexpectedCount))
     console.write(" unexpected interrupts\n")
     console.write("croi kernel: boot complete, idling\n")
+    if Scheduler.readyCpuCount > 0 {
+        Scheduler.exit(0)  // CPU 0 goes on with its idle thread
+    }
     arch_idle()
 }
 
@@ -658,11 +665,11 @@ private enum TimerProbe {
     nonisolated(unsafe) static var firedInInterrupt = InlineArray<3, UInt64>(repeating: 0)
     static let cpusFired = Atomic<Int>(0)
 
-    static let record: Timers.Callback = { probe in
+    static let record: Timers.Callback = { probe, _ in
         firedAt[Int(probe)] = Clock.now()
         firedInInterrupt[Int(probe)] = Timers.interruptCount
     }
-    static let countCpu: Timers.Callback = { _ in
+    static let countCpu: Timers.Callback = { _, _ in
         cpusFired.add(1, ordering: .relaxed)
     }
     static let armOnThisCpu: Ipi.Function = { _ in

@@ -89,6 +89,17 @@ arch_idle:
     j       1b
 .size arch_idle, . - arch_idle
 
+// void arch_wait_for_interrupt(void): wfi wakes on a pending enabled
+// interrupt whatever sstatus.SIE says; setting SIE then takes it.
+.globl arch_wait_for_interrupt
+.type arch_wait_for_interrupt, %function
+arch_wait_for_interrupt:
+    wfi
+    csrsi   sstatus, 0x2
+    csrci   sstatus, 0x2
+    ret
+.size arch_wait_for_interrupt, . - arch_wait_for_interrupt
+
 // void arch_tlb_invalidate_all(void): this hart.
 .globl arch_tlb_invalidate_all
 .type arch_tlb_invalidate_all, %function

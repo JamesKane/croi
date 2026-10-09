@@ -107,6 +107,19 @@ arch_idle:
     b       1b
 .size arch_idle, . - arch_idle
 
+// void arch_wait_for_interrupt(void): wfi wakes on a pending interrupt
+// even while it is masked; unmasking then takes it.
+.globl arch_wait_for_interrupt
+.type arch_wait_for_interrupt, %function
+arch_wait_for_interrupt:
+    dsb     sy
+    wfi
+    msr     daifclr, #3
+    isb
+    msr     daifset, #3
+    ret
+.size arch_wait_for_interrupt, . - arch_wait_for_interrupt
+
 // void arch_tlb_invalidate_all(void): all CPUs (inner shareable).
 .globl arch_tlb_invalidate_all
 .type arch_tlb_invalidate_all, %function

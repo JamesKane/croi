@@ -14,6 +14,12 @@ creates a channel pair, passes a VMO across, waits on a port with a
 deadline timer, and prints over debuglog. This works on all three arches in
 QEMU.
 
+M2's exit also includes meeting Todhchai's kernel and IPC budgets under
+KVM (amd64), measured from croi's own trace (item 18 core, below). The
+proposed targets (todhchai docs/performance.md): null syscall < 100 ns,
+same-core `channel_call` with donation < 1 µs, cross-core port wake < 2 µs,
+real-time wake error p99 < 100 µs.
+
 ## Status against the requirements
 
 | # | Item | Status |
@@ -30,7 +36,8 @@ QEMU.
 | 10 | Channel, port, event(pair), futex with owner, timer | Todo (K7) |
 | 11 | Job, process, thread, exceptions, job policy | Todo (K7) |
 | 12 | userboot + bootfs | Todo (K8) |
-| 13–19 | Resources/interrupt objects, BTI/PMT + IOMMU, FIFO/counter/stream/socket/clock/debuglog, pager, rings, ktrace, debug syscalls | After M2 (K9+), with the designs constrained below |
+| 18 (core) | ktrace rings, categories, user marks, tick and PMU sampling, per-thread PMU counters | Before M2, staged K3–K6 (see "Trace" below) |
+| 13–19 | Resources/interrupt objects, BTI/PMT + IOMMU, FIFO/counter/stream/socket/clock/debuglog, pager, rings, debug syscalls | After M2 (K9+), with the designs constrained below |
 
 ## Milestones
 
@@ -95,6 +102,12 @@ shootdown, interrupts on in idle. ITS and AIA (APLIC/IMSIC) setup moves to the d
     for ext 9
 
 ### K3: Threads and scheduling (requirements 4, 5)
+Progress: **K3a done**: threads, context switch, per-CPU run queues,
+blocking with timeouts, wakeup placement, timeslice and wakeup
+preemption, join/detach/reaping. Next: K3b (owned wait queues with
+priority inheritance, kernel mutex), K3c (scheduling contexts, fair + EDF,
+capacity, admission), the trace core for `sched`/`irq`, and K3d
+(extended-state sizing).
 - Threads, context switch and kernel threads. Wait queues, and owned wait
   queues with priority inheritance from day one.
 - **Scheduling contexts are separate objects from threads** (seL4 MCS
@@ -110,6 +123,36 @@ shootdown, interrupts on in idle. ITS and AIA (APLIC/IMSIC) setup moves to the d
 - **Thread state** gets a per-thread extended-state area sized at boot from
   CPUID or the ID registers (XSAVE/AVX-512/AMX with lazy XFD; SVE/SME; RVV).
   Kernel threads never use it; user threads do from K6.
+
+### Trace: the core of requirement 18, staged K3–K6
+Todhchai measures its budgets from the first user process, so the trace
+comes before M2 (the NeoVectra lesson: budgets declared early, measured
+late, and missed). Model: NeoVectra ADR-0049 (kernel trace) and ADR-0050
+(`pmu_configure`).
+- **Format and cost, fixed in K3:** one ring per CPU of fixed 32-byte
+  records (counter timestamp, kind, CPU, thread, two words), written only by
+  its own CPU with interrupts masked, so no lock. Oneshot (drop and count)
+  or circular. A probe is one relaxed load of the category mask and a
+  branch, with arguments evaluated after the branch; an enabled event costs
+  under 30 ns. Stopping waits on per-CPU "writing" flags, with no IPI.
+  Records never hold kernel addresses: objects get trace ids.
+- **K3:** the rings and the `sched` category (switch, block, wake with the
+  waker, preempt, migrate), plus `irq`. The self-test checks the probe
+  cost on each arch.
+- **K4:** the ring memory becomes a VMO, plus the `vm` category (faults,
+  VMO commits).
+- **K5:** a root Resource carrying only a trace right, ahead of the
+  other resources from item 13. `trace_configure` (start, stop, rewind,
+  rings, mark) is gated on it.
+- **K6:** the syscall entry, marks from user space, the `syscall` category,
+  and sampling: a `SAMPLE` record plus frame-pointer `FRAMES`, kernel and
+  user, with user frames read by the fault-safe copy. Sampling runs on the
+  scheduler tick everywhere, at `sample_hz` on busy CPUs only, so idle
+  CPUs stay tickless. PMU overflow sampling writes the same records, and
+  per-thread PMU counters are saved at context switch. PMUs: x86
+  architectural PerfMon, arm64 PMUv3, rv64 Sscofpmf (where present).
+- **K7:** `ipc` (flow ids hashed from the channel's trace id and the txid,
+  so a call and its reply share a flow) and `futex` waits.
 
 ### K4: VMM phase A (requirement 7)
 - **VMOs:** anonymous, physical, contiguous, and **device-local**
@@ -165,8 +208,8 @@ shootdown, interrupts on in idle. ITS and AIA (APLIC/IMSIC) setup moves to the d
   the RISC-V IOMMU need designs from their specs.
 - FIFO, counter (ext), stream, socket, clock and debuglog. Debuglog may come
   earlier, since the M2 exit test prints over it.
-- Pager, IOB or SPSC ring VMOs with futex doorbells, ktrace and the sampler,
-  and debug syscalls.
+- Pager, IOB or SPSC ring VMOs with futex doorbells, and debug syscalls.
+  The trace core is pulled ahead of M2 (see "Trace").
 - Todhchai M4 needs **ext 1** (display timeline) and **ext 4** (admission
   with a reason). Their foundations are in K2, K3 and K5.
 

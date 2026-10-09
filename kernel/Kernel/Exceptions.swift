@@ -7,6 +7,7 @@ import Fmt
 func arch_exception(_ frame: UnsafeMutablePointer<arch_exception_frame_t>) {
     if unsafe ExceptionFrame.isInterrupt(frame.pointee) {
         unsafe Interrupts.handle(frame)
+        Scheduler.preemptIfRequested()
         return
     }
     #if arch(arm64)

@@ -50,9 +50,11 @@ struct SpinLock: ~Copyable {
     /// CPU spinning here from an interrupts-on context still answers IPIs:
     /// the holder may be waiting on it (TLB shootdown under `vmLock`).
     func acquire() -> InterruptState {
-        let me = Cpu.current + 1
         let saved = InterruptState(raw: arch_interrupts_save())
         while true {
+            // Read with interrupts masked: a thread waiting below with them
+            // on can be preempted and moved to another CPU.
+            let me = Cpu.current + 1
             if holder.compareExchange(expected: 0, desired: me, ordering: .acquiring).exchanged {
                 return saved
             }
@@ -74,6 +76,28 @@ struct SpinLock: ~Copyable {
         }
         holder.store(0, ordering: .releasing)
         arch_interrupts_restore(saved.raw)
+    }
+
+    /// Locks without touching interrupts: the caller has masked them and
+    /// restores them itself. For the scheduler, whose lock is handed across
+    /// context switches (the thread that resumes releases it).
+    func lockMasked() {
+        let me = Cpu.current + 1
+        while !holder.compareExchange(expected: 0, desired: me, ordering: .acquiring).exchanged {
+            if holder.load(ordering: .relaxed) == me {
+                panic("spinlock: recursive acquire")
+            }
+            while holder.load(ordering: .relaxed) != 0 {
+                arch_spin_pause()
+            }
+        }
+    }
+
+    func unlockMasked() {
+        guard holder.load(ordering: .relaxed) == Cpu.current + 1 else {
+            panic("spinlock: released by a CPU that doesn't hold it")
+        }
+        holder.store(0, ordering: .releasing)
     }
 
     var isHeldByCurrentCpu: Bool {
