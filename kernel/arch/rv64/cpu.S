@@ -136,3 +136,11 @@ arch_counter_read:
     rdtime  a0
     ret
 .size arch_counter_read, . - arch_counter_read
+
+// uint32_t arch_cpu_core_type(void): nothing to tell cores apart by yet.
+.globl arch_cpu_core_type
+.type arch_cpu_core_type, %function
+arch_cpu_core_type:
+    li      a0, 0
+    ret
+.size arch_cpu_core_type, . - arch_cpu_core_type

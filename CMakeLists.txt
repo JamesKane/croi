@@ -72,6 +72,15 @@ if(CROI_ARCH STREQUAL amd64)
   set_tests_properties(boot-smoke-apic-oneshot PROPERTIES TIMEOUT 120)
 endif()
 
+if(CROI_ARCH STREQUAL rv64)
+  # A hart without Svpbmt: memory types fall back to the platform's PMAs.
+  add_test(NAME boot-smoke-no-svpbmt
+    COMMAND ${CROI_QEMU} --test "croi kernel: boot complete"
+            ${CROI_ARCH} ${CROI_ESP_DIR} ${CMAKE_BINARY_DIR}/qemu ${CROI_EDK2_DIR}
+            -cpu rv64)
+  set_tests_properties(boot-smoke-no-svpbmt PROPERTIES TIMEOUT 120)
+endif()
+
 if(CROI_ARCH STREQUAL arm64)
   # Firmware at EL2 with a GICv3: the loader must drop to EL1.
   add_test(NAME boot-smoke-el2

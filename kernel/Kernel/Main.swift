@@ -149,6 +149,16 @@ nonisolated(unsafe) var bootThreadStack = StackRange()
 @c @implementation
 func kernel_main_continue() -> Never {
     guard let console = panicConsole else { arch_halt() }
+    let acpi = AcpiTables(rsdp: bootHandoff.acpi_rsdp)
+    #if arch(riscv64)
+    // Memory-type bits in page tables, before mapping anything uncached.
+    if let acpi, RiscvIsa.everyHartHas("svpbmt", acpi) {
+        PageTableFormat.svpbmt = true
+    }
+    console.write("  isa:    ")
+    if let acpi { RiscvIsa.writeBootIsa(acpi, to: console) }
+    console.write(PageTableFormat.svpbmt ? " (Svpbmt in use)\n" : " (no Svpbmt: PMAs decide memory types)\n")
+    #endif
     vmSelfTest()
     console.write("  vm:     kernel aspace at ")
     console.write(hex: KernelLayout.dynamicBase)
@@ -167,9 +177,17 @@ func kernel_main_continue() -> Never {
     #else
     let bootHardwareId = arch_cpu_hardware_id()
     #endif
-    Smp.initializeBootCpu(hardwareId: bootHardwareId, stack: bootThreadStack)
+    var bootAcpiUid: UInt32 = 0
+    if let acpi {
+        Madt.forEachCpu(acpi) { cpu in
+            if cpu.hardwareId == bootHardwareId { bootAcpiUid = cpu.acpiUid }
+        }
+    }
+    Smp.initializeBootCpu(hardwareId: bootHardwareId, acpiUid: bootAcpiUid, stack: bootThreadStack)
     guard Cpu.current == 0 else { panic("per-CPU register does not identify the boot CPU") }
-    if let acpi = AcpiTables(rsdp: bootHandoff.acpi_rsdp) {
+    CpuTopologies.recordThisCpuCoreType()
+    CpuStacks.installThisCpu()
+    if let acpi {
         // Interrupt controllers before anyone else starts.
         guard Interrupts.initializeBootCpu(acpi) else { panic("no usable interrupt controller") }
         guard Clock.initialize(acpi) else { panic("no usable clock") }  // interrupts still masked
@@ -198,6 +216,21 @@ func kernel_main_continue() -> Never {
         console.write(" contended lock increments, none lost\n")
         ipiSelfTest(expecting: online - 1, console)
         timeSelfTest(others: online - 1, console)
+        cpuStacksSelfTest(console)
+        ppttSelfTest()
+        console.write("  topo:   ")
+        if CpuTopologies.placeAll(acpi) {
+            console.write(decimal: UInt64(CpuTopologies.distinct { $0.package }))
+            console.write(" package(s), ")
+            console.write(decimal: UInt64(CpuTopologies.distinct { $0.core }))
+            console.write(" core(s), ")
+            console.write(decimal: UInt64(CpuTopologies.distinct { $0.lastLevelCache }))
+            console.write(" LLC domain(s), ")
+        } else {
+            console.write("no PPTT; ")
+        }
+        console.write(decimal: UInt64(CpuTopologies.distinct { $0.coreType }))
+        console.write(" core type(s)\n")
     } else {
         console.write("  cpus:   no ACPI tables; boot cpu only\n")
     }
@@ -511,7 +544,7 @@ private func framebufferSelfTest(_ console: Uart) {
         return
     }
     #if arch(riscv64)
-    let expected = CachePolicy.cached  // no Svpbmt yet: the PMAs decide
+    let expected: CachePolicy = PageTableFormat.svpbmt ? .writeCombining : .cached  // else the PMAs decide
     #else
     let expected = CachePolicy.writeCombining
     #endif
@@ -673,4 +706,88 @@ private func timeSelfTest(others: Int, _ console: Uart) {
     console.write(" us late; ")
     console.write(decimal: UInt64(others))
     console.write(" other CPUs' timers fire\n")
+}
+
+/// What each CPU reports about its exception stack.
+private enum StackProbe {
+    nonisolated(unsafe) static var field = InlineArray<64, UInt64>(repeating: 0)
+    nonisolated(unsafe) static var raw = InlineArray<64, UInt64>(repeating: 0)
+    nonisolated(unsafe) static var loaded = InlineArray<64, UInt64>(repeating: 0)
+
+    static let report: Ipi.Function = { _ in recordThisCpu() }
+
+    static func recordThisCpu() {
+        let cpu = Int(Cpu.current)
+        field[cpu] = CpuStacks.thisCpu
+        // What the exception entry reads: offset 0 of the PerCpu record.
+        raw[cpu] = unsafe UnsafePointer<UInt64>(bitPattern: UInt(arch_percpu()))!.pointee
+        #if arch(x86_64)
+        loaded[cpu] = arch_ist1_top()
+        #else
+        loaded[cpu] = raw[cpu]
+        #endif
+    }
+}
+
+/// Every CPU has its own exception stack, where the entry code (and on
+/// amd64 the loaded TSS) will find it.
+private func cpuStacksSelfTest(_ console: Uart) {
+    StackProbe.recordThisCpu()
+    Ipi.callOthers(StackProbe.report, 0)
+    for cpu in 0..<Smp.count {
+        let top = StackProbe.field[cpu]
+        guard top != 0, StackProbe.raw[cpu] == top, StackProbe.loaded[cpu] == top else {
+            panic("cpu stacks: exception stack not where the entry code looks")
+        }
+        for other in 0..<cpu where StackProbe.field[other] == top {
+            panic("cpu stacks: two CPUs share an exception stack")
+        }
+    }
+    console.write("  stacks: every CPU has its own guarded ")
+    #if arch(x86_64)
+    console.write("IST1 stack in its own TSS\n")
+    #else
+    console.write("emergency stack\n")
+    #endif
+}
+
+/// The PPTT walk against a hand-built table (QEMU's PPTTs have no cache
+/// nodes): one package, two cores, each with a private L1 whose next level
+/// is a shared L2. Both cores must land in the package, on their own core,
+/// with the L2 as their last-level cache.
+private func ppttSelfTest() {
+    var t = InlineArray<176, UInt8>(repeating: 0)
+    let package = 36, l2 = 56, l1a = 80, core0 = 104, core1 = 128, l1b = 152
+    // Processor nodes: type 0, flags @4, parent @8, ACPI ID @12, resources @16/@20.
+    // Cache nodes: type 1, next level @8.
+    pptt(&t, package, type: 0, length: 20); put32(&t, package + 4, 1)  // physical package
+    pptt(&t, l2, type: 1, length: 24)
+    pptt(&t, l1a, type: 1, length: 24); put32(&t, l1a + 8, UInt32(l2))
+    pptt(&t, l1b, type: 1, length: 24); put32(&t, l1b + 8, UInt32(l2))
+    for (core, uid, l1) in [(core0, UInt32(0), l1a), (core1, 1, l1b)] as InlineArray<2, (Int, UInt32, Int)> {
+        pptt(&t, core, type: 0, length: 24)
+        put32(&t, core + 4, 0b1010)  // ACPI ID valid, leaf
+        put32(&t, core + 8, UInt32(package))
+        put32(&t, core + 12, uid)
+        put32(&t, core + 16, 1)
+        put32(&t, core + 20, UInt32(l1))
+    }
+
+    for (uid, core) in [(UInt32(0), core0), (1, core1)] as InlineArray<2, (UInt32, Int)> {
+        var topology = CpuTopology()
+        topology.acpiUid = uid
+        let placed = Pptt.place(&topology, in: t.span.bytes)
+        guard placed, topology.package == UInt32(package), topology.core == UInt32(core),
+              topology.lastLevelCache == UInt32(l2), !topology.isThread
+        else { panic("pptt self-test: wrong placement") }
+    }
+}
+
+private func pptt(_ t: inout InlineArray<176, UInt8>, _ at: Int, type: UInt8, length: UInt8) {
+    t[at] = type
+    t[at + 1] = length
+}
+
+private func put32(_ t: inout InlineArray<176, UInt8>, _ at: Int, _ value: UInt32) {
+    for i in 0..<4 { t[at + i] = UInt8(truncatingIfNeeded: value >> (8 * i)) }
 }

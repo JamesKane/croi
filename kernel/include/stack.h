@@ -10,3 +10,15 @@
 
 #define CROI_KERNEL_STACK_SHIFT 14
 #define CROI_KERNEL_STACK_SIZE (1 << CROI_KERNEL_STACK_SHIFT)
+
+// The start of every PerCpu record (the per-CPU register points at it):
+// fields exception entry reads with nothing but that register.
+#define CROI_PERCPU_EMERGENCY_STACK 0  // top of this CPU's emergency stack, or 0
+
+#ifndef __ASSEMBLER__
+#include <stdint.h>
+
+typedef struct {
+  uint64_t emergency_stack_top;
+} croi_percpu_arch_t;
+#endif

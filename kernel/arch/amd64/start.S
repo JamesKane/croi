@@ -85,13 +85,21 @@ arch_load_page_tables:
 // accessed bits; the descriptor holds an absolute (relocated) address.
 .section .data.gdt, "aw", @progbits
 .balign 16
+// Layout fixed for syscall/sysret (STAR): kernel CS, kernel DS = CS + 8;
+// user CS32, user DS = CS32 + 8, user CS64 = CS32 + 16. Copied per CPU by
+// arch_install_cpu_descriptors, which fills in that CPU's TSS.
+.globl gdt
+.hidden gdt
 gdt:
     .quad   0
-    .quad   0x00af9a000000ffff      // KERNEL_CS: present, ring 0, code, long mode
-    .quad   0x00cf92000000ffff      // KERNEL_DS: present, ring 0, data, writable
+    .quad   0x00af9a000000ffff      // 0x08 KERNEL_CS: ring 0, long mode code
+    .quad   0x00cf92000000ffff      // 0x10 KERNEL_DS: ring 0 data
+    .quad   0x00cffa000000ffff      // 0x18 USER_CS32: ring 3, 32-bit code (sysret)
+    .quad   0x00cff2000000ffff      // 0x20 USER_DS: ring 3 data
+    .quad   0x00affa000000ffff      // 0x28 USER_CS64: ring 3, long mode code
 .globl gdt_tss
 .hidden gdt_tss
-gdt_tss:                            // 0x18: TSS, filled in by arch_init_exceptions
+gdt_tss:                            // 0x30 TSS (16 bytes)
     .quad   0
     .quad   0
 gdt_end:

@@ -1,6 +1,8 @@
 add_library(kernel-swift OBJECT
   Kernel/Acpi/AcpiTables.swift
   Kernel/Acpi/Madt.swift
+  Kernel/Acpi/Pptt.swift
+  Kernel/Acpi/Rhct.swift
   Kernel/BootAllocator.swift
   Kernel/BootOptions.swift
   Kernel/Exceptions.swift

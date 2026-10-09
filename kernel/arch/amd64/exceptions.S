@@ -6,7 +6,7 @@
 // arch_exception_frame_t (see kernel.h) and calls arch_exception.
 
 #define KERNEL_CS   0x08
-#define TSS_SEL     0x18
+#define TSS_SEL     0x30
 #define IST_STACK_SIZE 16384
 
 .section .text.isr, "ax", @progbits
@@ -105,7 +105,7 @@ arch_init_exceptions:
     mov     %rax, 36(%rdi)          // IST1
     movw    $104, 102(%rdi)         // I/O map base = sizeof(TSS)
 
-    // 64-bit TSS descriptor in GDT slots 3 and 4 (selector 0x18).
+    // 64-bit TSS descriptor at selector 0x30 of the boot GDT.
     lea     gdt_tss(%rip), %rsi
     mov     %rdi, %rax
     mov     $103, %rdx              // limit
@@ -167,3 +167,94 @@ tss:
 ist_stack:
     .skip   IST_STACK_SIZE
 ist_stack_top:
+
+#define GDT_SIZE    (8 * 8)         // 6 segments + the 16-byte TSS descriptor
+#define TSS_SIZE    104
+
+// void arch_install_cpu_descriptors(void *gdt, void *tss, uint64_t ist1_top)
+// This CPU's own GDT (a copy of the boot one) and TSS, with IST1 (NMI,
+// #DF, #MC) on its own stack. gdt: GDT_SIZE bytes, tss: TSS_SIZE bytes.
+.section .text.arch_install_cpu_descriptors, "ax", @progbits
+.globl arch_install_cpu_descriptors
+.type arch_install_cpu_descriptors, @function
+arch_install_cpu_descriptors:
+    // GDT: the six segment descriptors from the boot GDT.
+    push    %rdi
+    push    %rsi
+    lea     gdt(%rip), %rsi
+    mov     $(6 * 8), %ecx
+    rep movsb
+    pop     %rsi
+    pop     %rdi
+    // TSS: zeroed, IST1, no I/O bitmap.
+    push    %rdi
+    mov     %rsi, %rdi
+    xor     %eax, %eax
+    mov     $TSS_SIZE, %ecx
+    rep stosb
+    pop     %rdi
+    mov     %rdx, 36(%rsi)          // IST1
+    movw    $TSS_SIZE, 102(%rsi)    // I/O map base: none
+    // TSS descriptor at 0x30.
+    mov     %rsi, %rax
+    mov     $(TSS_SIZE - 1), %rdx
+    mov     %rax, %rcx
+    and     $0xffffff, %rcx
+    shl     $16, %rcx
+    or      %rcx, %rdx
+    mov     $0x89, %rcx
+    shl     $40, %rcx
+    or      %rcx, %rdx
+    mov     %rax, %rcx
+    shr     $24, %rcx
+    and     $0xff, %rcx
+    shl     $56, %rcx
+    or      %rcx, %rdx
+    mov     %rdx, 0x30(%rdi)
+    shr     $32, %rax
+    mov     %rax, 0x38(%rdi)
+    // Load it: lgdt from a descriptor on the stack, reload CS/DS/ES/SS
+    // (FS/GS are untouched: GS holds the per-CPU base), then the TR.
+    sub     $16, %rsp
+    movw    $(GDT_SIZE - 1), (%rsp)
+    mov     %rdi, 2(%rsp)
+    lgdt    (%rsp)
+    add     $16, %rsp
+    lea     1f(%rip), %rax
+    pushq   $0x08
+    pushq   %rax
+    lretq
+1:  mov     $0x10, %eax
+    mov     %eax, %ds
+    mov     %eax, %es
+    mov     %eax, %ss
+    mov     $TSS_SEL, %ax
+    ltr     %ax
+    ret
+.size arch_install_cpu_descriptors, . - arch_install_cpu_descriptors
+
+// uint64_t arch_ist1_top(void): IST1 of the TSS this CPU has loaded.
+.globl arch_ist1_top
+.type arch_ist1_top, @function
+arch_ist1_top:
+    sub     $16, %rsp
+    sgdt    (%rsp)
+    mov     2(%rsp), %rcx           // GDT base
+    add     $16, %rsp
+    str     %ax
+    movzwl  %ax, %eax
+    add     %rax, %rcx              // TSS descriptor
+    mov     (%rcx), %rax
+    mov     %rax, %rdx
+    shr     $16, %rdx
+    and     $0xffffff, %rdx         // base 23:0
+    mov     %rax, %rsi
+    shr     $56, %rsi
+    shl     $24, %rsi               // base 31:24
+    or      %rsi, %rdx
+    mov     8(%rcx), %rsi
+    shl     $32, %rsi               // base 63:32
+    or      %rsi, %rdx
+    mov     36(%rdx), %rax
+    ret
+.size arch_ist1_top, . - arch_ist1_top

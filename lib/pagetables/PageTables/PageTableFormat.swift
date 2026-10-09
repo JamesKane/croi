@@ -6,10 +6,10 @@
 /// The memory type of a mapping.
 ///
 /// Not every architecture can tell all four apart: amd64 maps `uncached`
-/// and `device` to the same UC type, arm64 maps `uncached` and
-/// `writeCombining` to Normal non-cacheable, and rv64 (no Svpbmt support
-/// yet) leaves everything to the platform's PMAs, i.e. `cached` in the
-/// page tables. Reading attributes back reports the type actually in use.
+/// and `device` to the same UC type, arm64 and rv64 (Svpbmt NC) map
+/// `uncached` and `writeCombining` to one non-cacheable type, and rv64
+/// without Svpbmt leaves everything to the platform's PMAs, i.e. `cached`
+/// in the page tables. Reading attributes back reports the type in use.
 public enum CachePolicy: UInt8, Sendable {
     /// Normal write-back memory.
     case cached
@@ -137,7 +137,14 @@ public enum PageTableFormat {
 
     #elseif arch(riscv64)
     // Sv39. Leaves allowed at every level (1 GiB, 2 MiB, 4 KiB). Memory
-    // types come from the platform PMAs until Svpbmt is detected (RHCT).
+    // types come from the platform PMAs unless `svpbmt` is set (the kernel
+    // sets it from the RHCT; the bits are reserved, and fault, without it).
+
+    /// Use Svpbmt's PBMT field: NC for uncached/WC, IO for device.
+    nonisolated(unsafe) public static var svpbmt = false
+    @inlinable static var pbmtNonCacheable: UInt64 { 1 << 61 }
+    @inlinable static var pbmtIo: UInt64 { 2 << 61 }
+    @inlinable static var pbmtMask: UInt64 { 3 << 61 }
     @inlinable public static var levels: Int { 3 }
     @inlinable public static var identityLimit: UInt64 { 1 << 38 }
     @inlinable static var valid: UInt64 { 1 << 0 }
@@ -155,6 +162,13 @@ public enum PageTableFormat {
         if a.writable { e |= write }
         if a.executable && a.cache != .device { e |= execute }
         if a.global { e |= globalBit }
+        if svpbmt {
+            switch a.cache {
+            case .cached: break
+            case .uncached, .writeCombining: e |= pbmtNonCacheable
+            case .device: e |= pbmtIo
+            }
+        }
         return e
     }
     @inlinable public static func isPresent(_ e: UInt64) -> Bool { e & valid != 0 }
@@ -163,8 +177,13 @@ public enum PageTableFormat {
     }
     @inlinable public static func address(_ e: UInt64) -> UInt64 { ((e >> 10) & ((1 << 44) - 1)) << 12 }
     @inlinable public static func attributes(_ e: UInt64, level: Int) -> MapAttributes {
-        MapAttributes(writable: e & write != 0, executable: e & execute != 0,
-                      cache: .cached, global: e & globalBit != 0)
+        let cache: CachePolicy = switch e & pbmtMask {
+        case pbmtNonCacheable: .writeCombining
+        case pbmtIo: .device
+        default: .cached
+        }
+        return MapAttributes(writable: e & write != 0, executable: e & execute != 0,
+                             cache: cache, global: e & globalBit != 0)
     }
     #endif
 

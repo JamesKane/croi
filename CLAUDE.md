@@ -70,8 +70,10 @@ Memory types (`CachePolicy` in lib/pagetables): cached, uncached,
 writeCombining, device. amd64: the kernel programs the PAT (WB, WC, UC-,
 UC) on every CPU (`arch_init_pat`); uncached = device = UC. arm64: MAIR set
 by the loader (Normal WB, Device-nGnRE, Normal-NC, Device-nGnRnE); WC =
-uncached = Normal-NC. rv64: PMAs decide until Svpbmt detection (RHCT)
-exists. The framebuffer (CROI_MEM_FRAMEBUFFER) is in no PMM arena and not
+uncached = Normal-NC. rv64: Svpbmt when every RHCT ISA string lists it
+(`PageTableFormat.svpbmt`, set by the kernel; NC for uncached/WC, IO for
+device), else the PMAs decide. QEMU runs rv64 with `-cpu max` (Svpbmt);
+`boot-smoke-no-svpbmt` covers `-cpu rv64`. The framebuffer (CROI_MEM_FRAMEBUFFER) is in no PMM arena and not
 in the cached physmap; `Framebuffer` maps it WC. The boot test draws a
 pattern and checks it with a QEMU screendump (`qemu.sh --screendump`,
 `tools/check-pixels.py`); arm64/rv64 get a framebuffer from
@@ -196,6 +198,13 @@ per CPU for now; K3's thread timers will need an intrusive structure.
 `lib/rt/int128.c` supplies `__udivti3`/`__umodti3`, which
 `dividingFullWidth` needs (there is no compiler-rt).
 
+Topology (`Kernel/Acpi/Pptt.swift`): `CpuTopology` in each PerCpu:
+package, core, thread, last-level cache from the PPTT (by ACPI UID from
+the MADT), and a core type each CPU reads itself (x86 hybrid CPUID 0x1A,
+Arm MIDR). QEMU only has a PPTT on arm64 and never cache nodes, so a
+boot self-test runs the walk on a hand-built table. This is the data for
+the topology page (ext 9).
+
 Exceptions: `arch/<arch>/exceptions.S` saves an `arch_exception_frame_t`
 (kernel.h) and calls Swift `arch_exception` (Kernel/Exceptions.swift);
 the handler may edit the frame to resume elsewhere. Installed at the top
@@ -214,8 +223,15 @@ and rv64 exception entry test bit CROI_KERNEL_STACK_SHIFT of the would-be
 frame address (clear on every valid stack thanks to the alignment) and
 switch to a .bss emergency stack (arm64 stashes x0 in TPIDRRO_EL0, rv64
 uses sscratch: both must be revisited when user mode arrives). Every stack
-the CPU runs on must keep this geometry. IST1 and the emergency stacks are
-still unguarded .bss, one per system until per-CPU data exists. A deliberate fault in kernel code must use a
+the CPU runs on must keep this geometry. Each CPU installs its own guarded
+exception stack (`CpuStacks.installThisCpu`): amd64 gets its own GDT copy
+and TSS with IST1 on it; arm64/rv64 store it in `croi_percpu_arch_t`
+(stack.h), the first field of PerCpu, which exception entry reads through
+TPIDR_EL1 / tp. The .bss emergency/IST stacks only cover early boot.
+amd64 GDT layout is fixed for syscall/sysret: 0x08 kernel CS, 0x10 kernel
+DS, 0x18 user CS32, 0x20 user DS, 0x28 user CS64, 0x30 TSS. A CPU must
+have its local interrupt controller up before it maps anything (mapping
+can trigger a TLB shootdown, which sends IPIs). A deliberate fault in kernel code must use a
 volatile access, or LLVM may delete it (e.g. stores to const symbols).
 
 Kernel enters on the loader's page tables with the handoff's physical

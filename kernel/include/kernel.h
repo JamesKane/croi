@@ -21,6 +21,11 @@
 // and calls kernel_main_continue; the old stack is abandoned.
 [[noreturn]] void arch_continue_on_stack(uint64_t top);
 
+// Assembly (arch/<arch>/cpu.S). This CPU's core type: amd64 hybrid core
+// type (CPUID 0x1A EAX[31:24]) or 0; arm64 MIDR implementer << 16 | part
+// number; rv64 0.
+uint32_t arch_cpu_core_type(void);
+
 // Assembly (arch/<arch>/start.S). Switches to new kernel page tables and
 // flushes the TLB. The kernel image must be mapped identically in the old
 // and new tables. amd64/rv64 use `root`; arm64 loads `root` into TTBR0 and
@@ -123,6 +128,13 @@ void arch_outb(uint16_t port, uint8_t value);
 
 // Assembly (arch/amd64/exceptions.S). The page-fault linear address.
 uint64_t arch_read_cr2(void);
+
+// Assembly (arch/amd64/exceptions.S). Loads this CPU's own GDT (64 bytes at
+// `gdt`, copied from the boot GDT) and TSS (104 bytes at `tss`, IST1 =
+// `ist1_top`). Both must stay mapped forever.
+void arch_install_cpu_descriptors(void *_Nonnull gdt, void *_Nonnull tss, uint64_t ist1_top);
+// IST1 of the TSS this CPU has loaded.
+uint64_t arch_ist1_top(void);
 #endif
 
 // Kernel image segment bounds (virtual), from ld/image.ld. Inline C because

@@ -7,8 +7,9 @@
 // they are written back before sret.
 //
 // Stack overflow: if the frame would land below a kernel stack (bit
-// CROI_KERNEL_STACK_SHIFT set, see stack.h), the entry switches to the
-// emergency stack first, since pushing on the overflowed stack would just
+// CROI_KERNEL_STACK_SHIFT set, see stack.h), the entry switches to this
+// CPU's emergency stack (PerCpu, via tp; a .bss one before per-CPU data
+// exists) first, since pushing on the overflowed stack would just
 // fault again. sscratch holds t0 while checking (it is unused while there
 // is no user mode; user traps will need it for the kernel stack).
 
@@ -40,8 +41,13 @@ trap_entry:
     addi    sp, sp, -FRAME_SIZE
     sd      zero, FRAME_OVERFLOW(sp)
     j       2f
-1:  lla     sp, emergency_stack_top
-    addi    sp, sp, -FRAME_SIZE
+1:  beqz    tp, 3f                  // this CPU's emergency stack, if it has one
+    ld      t0, CROI_PERCPU_EMERGENCY_STACK(tp)
+    beqz    t0, 3f
+    mv      sp, t0
+    j       4f
+3:  lla     sp, emergency_stack_top // boot-time fallback
+4:  addi    sp, sp, -FRAME_SIZE
     sd      sp, FRAME_OVERFLOW(sp)  // any nonzero value marks the overflow
     csrr    t0, sscratch
 2:  SAVE 1
@@ -73,8 +79,8 @@ trap_entry:
     addi    sp, sp, FRAME_SIZE
     sret
 
-// Stack for handling a trap taken on an overflowed stack. Same geometry as
-// a kernel stack so traps taken on it pass the check.
+// Emergency stack for overflows before a CPU has its own (boot only). Same
+// geometry as a kernel stack so traps taken on it pass the check.
 .section .bss.emergency_stack, "aw", %nobits
 .balign 2 * CROI_KERNEL_STACK_SIZE
 emergency_stack:

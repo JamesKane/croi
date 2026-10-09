@@ -7,8 +7,9 @@
 // spsr in the frame; they are written back before eret.
 //
 // Stack overflow: if the frame would land below a kernel stack (bit
-// CROI_KERNEL_STACK_SHIFT set, see stack.h), the vector switches to the
-// emergency stack first, since pushing on the overflowed stack would just
+// CROI_KERNEL_STACK_SHIFT set, see stack.h), the vector switches to this
+// CPU's emergency stack (PerCpu, via TPIDR_EL1; a .bss one before per-CPU
+// data exists) first, since pushing on the overflowed stack would just
 // fault again. The check needs a scratch register without touching memory,
 // hence the add/sub exchange of sp and x0 (as Linux does). TPIDRRO_EL0
 // briefly holds x0 on that path; it is unused while there is no user mode.
@@ -36,9 +37,13 @@
     b       exception_common
 1:  sub     x0, sp, x0              // x0 = original x0
     msr     tpidrro_el0, x0
-    adrp    x0, emergency_stack_top
+    mrs     x0, tpidr_el1           // this CPU's emergency stack, if it has one
+    cbz     x0, 2f
+    ldr     x0, [x0, #CROI_PERCPU_EMERGENCY_STACK]
+    cbnz    x0, 3f
+2:  adrp    x0, emergency_stack_top // boot-time fallback
     add     x0, x0, :lo12:emergency_stack_top
-    sub     sp, x0, #FRAME_SIZE
+3:  sub     sp, x0, #FRAME_SIZE
     mrs     x0, tpidrro_el0
     stp     x0, x1, [sp, #0]
     mov     x0, #(16 + \slot)
@@ -131,7 +136,7 @@ arch_ap_init_exceptions:
     ret
 .size arch_init_exceptions, . - arch_init_exceptions
 
-// Stack for handling an exception taken on an overflowed stack. Same
+// Emergency stack for overflows before a CPU has its own (boot only). Same
 // geometry as a kernel stack so exceptions taken on it pass the check.
 .section .bss.emergency_stack, "aw", %nobits
 .balign 2 * CROI_KERNEL_STACK_SIZE

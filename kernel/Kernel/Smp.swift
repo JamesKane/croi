@@ -5,6 +5,8 @@ import Synchronization
 /// One per CPU, heap-allocated at boot and never freed. A CPU finds its
 /// own through the per-CPU register (arch_set_percpu / arch_percpu).
 struct PerCpu: ~Copyable {
+    /// Read by assembly at fixed offsets (stack.h): must stay first.
+    var arch = croi_percpu_arch_t()
     /// Dense kernel CPU number; the boot CPU is 0.
     let number: UInt32
     /// Local APIC ID (amd64), MPIDR affinity (arm64), hart ID (rv64).
@@ -19,12 +21,15 @@ struct PerCpu: ~Copyable {
     let interruptsReady = Atomic<Bool>(false)
     /// This CPU's TimerQueue (heap; only this CPU touches it).
     let timerQueue: UInt64
+    /// Placement (filled from the PPTT by the boot CPU; coreType by itself).
+    var topology = CpuTopology()
 
-    init(number: UInt32, hardwareId: UInt64, stack: StackRange, timerQueue: UInt64) {
+    init(number: UInt32, hardwareId: UInt64, acpiUid: UInt32, stack: StackRange, timerQueue: UInt64) {
         self.number = number
         self.hardwareId = hardwareId
         self.stack = stack
         self.timerQueue = timerQueue
+        topology.acpiUid = acpiUid
     }
 }
 
@@ -38,8 +43,8 @@ enum Smp {
     nonisolated(unsafe) private(set) static var count = 0
 
     /// Installs CPU 0's record. `stack` is the stack it now runs on.
-    static func initializeBootCpu(hardwareId: UInt64, stack: StackRange) {
-        let record = makeRecord(hardwareId: hardwareId, stack: stack)
+    static func initializeBootCpu(hardwareId: UInt64, acpiUid: UInt32, stack: StackRange) {
+        let record = makeRecord(hardwareId: hardwareId, acpiUid: acpiUid, stack: stack)
         unsafe UnsafePointer<PerCpu>(bitPattern: UInt(record))!.pointee.online.store(true, ordering: .releasing)
         arch_set_percpu(record)
     }
@@ -70,7 +75,7 @@ enum Smp {
         } catch {
             return false
         }
-        let record = makeRecord(hardwareId: cpu.hardwareId, stack: stack)
+        let record = makeRecord(hardwareId: cpu.hardwareId, acpiUid: cpu.acpiUid, stack: stack)
 
         // The startup block is read by physical address with the MMU off.
         guard let raw = unsafe heap.allocate(size: Int(CROI_AP_SIZE), alignment: 64) else { return false }
@@ -115,7 +120,7 @@ enum Smp {
         #endif
     }
 
-    private static func makeRecord(hardwareId: UInt64, stack: StackRange) -> UInt64 {
+    private static func makeRecord(hardwareId: UInt64, acpiUid: UInt32, stack: StackRange) -> UInt64 {
         guard let raw = unsafe heap.allocate(size: MemoryLayout<PerCpu>.size, alignment: 64) else {
             panic("smp: out of memory for a PerCpu record")
         }
@@ -124,8 +129,8 @@ enum Smp {
         }
         unsafe queueRaw.bindMemory(to: TimerQueue.self, capacity: 1).initialize(to: TimerQueue())
         let record = unsafe raw.bindMemory(to: PerCpu.self, capacity: 1)
-        unsafe record.initialize(to: PerCpu(number: UInt32(count), hardwareId: hardwareId, stack: stack,
-                                            timerQueue: UInt64(UInt(bitPattern: queueRaw))))
+        unsafe record.initialize(to: PerCpu(number: UInt32(count), hardwareId: hardwareId, acpiUid: acpiUid,
+                                            stack: stack, timerQueue: UInt64(UInt(bitPattern: queueRaw))))
         let address = UInt64(UInt(bitPattern: raw))
         records[count] = address
         count += 1
@@ -173,7 +178,11 @@ func kernel_ap_main(_ percpu: UInt64) -> Never {
     results |= SmpSelfTest.contended
     unsafe record.pointee.checkedIn.store(results, ordering: .releasing)
 
+    CpuTopologies.recordThisCpuCoreType()
+    // The local interrupt controller first: mapping the stacks below can
+    // trigger a TLB shootdown, which sends IPIs through it.
     Interrupts.initializeThisCpu()
+    CpuStacks.installThisCpu()
     Timers.initializeThisCpu()
     unsafe record.pointee.interruptsReady.store(true, ordering: .releasing)
     arch_idle()
@@ -290,3 +299,66 @@ enum X86ApStartup {
 }
 
 #endif
+
+/// This CPU's own stacks for faults that can't use the current one: amd64
+/// IST1 (NMI, #DF, #MC) in its own TSS and GDT, arm64/rv64 the emergency
+/// stack the exception entry switches to on overflow. Guarded, permanent.
+enum CpuStacks {
+    static func installThisCpu() {
+        let stack: StackRange
+        do throws(VmError) {
+            stack = try KernelStack().keepForever()
+        } catch {
+            panic("cpu: no memory for an exception stack")
+        }
+        let record = unsafe UnsafeMutablePointer<PerCpu>(bitPattern: UInt(arch_percpu()))!
+        unsafe record.pointee.arch.emergency_stack_top = stack.top
+        #if arch(x86_64)
+        // GDT (8 entries) and TSS (104 bytes), never freed.
+        guard let gdt = unsafe heap.allocate(size: 64, alignment: 16),
+              let tss = unsafe heap.allocate(size: 104, alignment: 16)
+        else { panic("cpu: no memory for GDT/TSS") }
+        unsafe arch_install_cpu_descriptors(gdt, tss, stack.top)
+        #endif
+    }
+
+    /// The stack installed for this CPU (0 before `installThisCpu`).
+    static var thisCpu: UInt64 {
+        unsafe UnsafePointer<PerCpu>(bitPattern: UInt(arch_percpu()))!.pointee.arch.emergency_stack_top
+    }
+}
+
+/// CPU placement from the PPTT, plus each CPU's own core type.
+enum CpuTopologies {
+    /// Fills every record's placement. False if there is no PPTT.
+    static func placeAll(_ acpi: AcpiTables) -> Bool {
+        var placed = false
+        for i in 0..<Smp.count {
+            let record = unsafe UnsafeMutablePointer<PerCpu>(bitPattern: UInt(Smp.records[i]))!
+            if unsafe Pptt.place(&record.pointee.topology, acpi) { placed = true }
+        }
+        return placed
+    }
+
+    /// Runs on each CPU (it must read its own ID registers).
+    static func recordThisCpuCoreType() {
+        let record = unsafe UnsafeMutablePointer<PerCpu>(bitPattern: UInt(arch_percpu()))!
+        unsafe record.pointee.topology.coreType = arch_cpu_core_type()
+    }
+
+    /// How many distinct values `key` takes across all CPUs.
+    static func distinct(_ key: (CpuTopology) -> UInt32) -> Int {
+        var count = 0
+        for i in 0..<Smp.count {
+            let value = key(topology(i))
+            var seen = false
+            for j in 0..<i where key(topology(j)) == value { seen = true }
+            if !seen { count += 1 }
+        }
+        return count
+    }
+
+    static func topology(_ cpu: Int) -> CpuTopology {
+        unsafe UnsafePointer<PerCpu>(bitPattern: UInt(Smp.records[cpu]))!.pointee.topology
+    }
+}

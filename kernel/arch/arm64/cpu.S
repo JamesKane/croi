@@ -210,3 +210,14 @@ arch_timer_disarm:
     isb
     ret
 .size arch_timer_disarm, . - arch_timer_disarm
+
+// uint32_t arch_cpu_core_type(void): MIDR implementer << 16 | part number.
+.globl arch_cpu_core_type
+.type arch_cpu_core_type, %function
+arch_cpu_core_type:
+    mrs     x1, midr_el1
+    ubfx    x0, x1, #24, #8         // implementer
+    ubfx    x1, x1, #4, #12         // part number
+    orr     x0, x1, x0, lsl #16
+    ret
+.size arch_cpu_core_type, . - arch_cpu_core_type

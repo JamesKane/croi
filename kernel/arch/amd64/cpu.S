@@ -164,3 +164,29 @@ arch_counter_read:
     or      %rdx, %rax
     ret
 .size arch_counter_read, . - arch_counter_read
+
+// uint32_t arch_cpu_core_type(void): CPUID 0x1A EAX[31:24] on hybrid
+// parts (CPUID 7 EDX bit 15), else 0.
+.globl arch_cpu_core_type
+.type arch_cpu_core_type, @function
+arch_cpu_core_type:
+    push    %rbx
+    xor     %eax, %eax
+    cpuid
+    cmp     $0x1a, %eax
+    jb      1f
+    mov     $7, %eax
+    xor     %ecx, %ecx
+    cpuid
+    bt      $15, %edx               // hybrid
+    jnc     1f
+    mov     $0x1a, %eax
+    xor     %ecx, %ecx
+    cpuid
+    shr     $24, %eax
+    pop     %rbx
+    ret
+1:  xor     %eax, %eax
+    pop     %rbx
+    ret
+.size arch_cpu_core_type, . - arch_cpu_core_type

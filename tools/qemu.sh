@@ -59,7 +59,8 @@ case $arch in
       cp "$edk2/riscv/RISCV_VIRT_CODE.fd" "$work/rv64-code.fd"
       truncate -s 32M "$work/rv64-code.fd"
     fi
-    qemu=(qemu-system-riscv64 -machine virt,acpi=on -device ramfb
+    # -cpu max has Svpbmt (memory types in page tables); the default CPU doesn't.
+    qemu=(qemu-system-riscv64 -machine virt,acpi=on -cpu max -device ramfb
           -drive "if=pflash,format=raw,unit=0,readonly=on,file=$work/rv64-code.fd"
           -drive "if=pflash,format=raw,unit=1,file=$(vars "$edk2/riscv/RISCV_VIRT_VARS.fd" rv64-vars.fd 32M)")
     ;;

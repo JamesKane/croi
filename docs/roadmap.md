@@ -19,11 +19,11 @@ QEMU.
 | # | Item | Status |
 |---|---|---|
 | 1 | Handoff: bootfs, GOP framebuffer, command line | **Done** (K1): handoff v3. The bootfs format itself comes with userboot (K8) |
-| 2 | Interrupt controllers, tickless timer, monotonic clock | Todo (K2) |
+| 2 | Interrupt controllers, tickless timer, monotonic clock | **Done** (K2). ITS and AIA set up with the first MSI driver |
 | 3 | PMM (contiguous, reclaim), heap, slab | **Done**, except ACPI-reclaim memory, which stays wired until ACPI parsing is finished |
 | 4 | Threads, wait queues, PI owned wait queues, timers | Todo (K3) |
 | 5 | Scheduler: fair + EDF | Todo (K3) |
-| 6 | SMP: AP bring-up, IPIs, TLB shootdown, per-CPU data | **Done** except per-CPU TSS/IST and emergency stacks (K2c) |
+| 6 | SMP: AP bring-up, IPIs, TLB shootdown, per-CPU data | **Done** |
 | 7 | VMM phase A: VMARs, VMOs, faults, cache policy, huge pages | **Partial**: ArchAspace (map/unmap/protect/query, large pages), the kernel aspace, and the cache policy (K1; rv64 Svpbmt pending) exist. The rest is in K4 |
 | 8 | Handles, rights, koids, dispatchers, signals, waits | Todo (K5) |
 | 9 | Syscalls, user-copy, vDSO, user FP/SIMD | Todo (K6) |
@@ -53,12 +53,13 @@ with K2's ACPI work), and a text console on the framebuffer (needs a font).
   and the cache policy change gets harder the more mappings exist.
 
 ### K2: Interrupts, IPIs, clock and timers (requirements 2, 6)
-Progress: **K2b done**: monotonic clock with a vDSO-ready time page,
+Progress: **K2 done.** K2c: per-CPU guarded exception stacks (amd64 own
+GDT/TSS/IST1 with the syscall-ready GDT layout), Svpbmt from the RHCT,
+PPTT topology and core types per CPU. **K2b**: monotonic clock with a vDSO-ready time page,
 tickless per-CPU timers with deadline + slack coalescing, calibrated
 delays. **K2a done**: controllers (x2APIC/xAPIC + IOAPIC masked, GICv3,
 SBI IPIs with AIA/PLIC discovered), dispatch, IPIs, `Ipi.callOthers`, TLB
-shootdown, interrupts on in idle. Next: **K2c** per-CPU TSS/IST and
-emergency stacks, PPTT topology, RHCT and Svpbmt. ITS and AIA (APLIC/IMSIC) setup moves to the drivers phase
+shootdown, interrupts on in idle. ITS and AIA (APLIC/IMSIC) setup moves to the drivers phase
 (requirement 13), when the first MSI-capable device needs them.
 
 - **Controllers.** Pick the MSI-capable controller on each arch now, because
