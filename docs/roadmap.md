@@ -113,8 +113,10 @@ reasons and per-user accounts, capacity defaults by core type, reserved
 CPUs, power hints. Not yet: IPC donation (ext 2, with channels in K7),
 overrun port packets (K5 ports), the frame intent's display alignment
 (ext 1/10), load balancing of fair threads between CPUs beyond wakeup
-placement. Next: the trace core for `sched`/`irq`, then K3d (extended-state
-sizing).
+placement. **Trace core for K3 done**: per-CPU rings, `sched` and `irq`
+categories, probe cost checked under KVM (`boot-smoke-kvm`: ~19 ns per
+enabled event, a disabled probe one load and a branch). Next: K3d
+(extended-state sizing).
 - Threads, context switch and kernel threads. Wait queues, and owned wait
   queues with priority inheritance from day one.
 - **Scheduling contexts are separate objects from threads** (seL4 MCS

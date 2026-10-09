@@ -86,6 +86,7 @@ enum Scheduler {
     static let threadCount = Atomic<Int>(0)
     /// Every thread record, linked through `allNext` (scheduler lock).
     nonisolated(unsafe) private static var allThreads: ThreadPointer?
+    nonisolated(unsafe) private static var nextTraceId: UInt32 = 0
     /// Every scheduling context, linked through `next`.
     nonisolated(unsafe) private static var contexts: SchedContextPointer?
 
@@ -122,6 +123,7 @@ enum Scheduler {
             cpus[cpu].capacity = max(1, estimates[cpu] * SchedScale.capacityOne / biggest)
         }
         cpus[0].current = bootstrap
+        unsafe UnsafeMutablePointer<PerCpu>(bitPattern: UInt(arch_percpu()))!.pointee.traceThread = bootstrap.pointee.traceId
         cpus[0].idle = idle
         cpus[0].ready = true
         bootstrap.pointee.runStart = Clock.now()
@@ -300,6 +302,7 @@ enum Scheduler {
         let me = Int(Cpu.current)
         let thread = cpus[me].current!
         guard !thread.pointee.isIdle else { panic("sched: the idle thread blocked") }
+        Trace.event(CROI_TRACE_SCHED, UInt16(CROI_TK_BLOCK), deadline)
         thread.pointee.state = .blocked
         thread.pointee.waitResult = .woken
         thread.pointee.waitQueue = queue
@@ -910,7 +913,13 @@ enum Scheduler {
         if thread.pointee.effective.discipline == .deadline {
             replenishOnWake(thread, now)
         }
+        let from = thread.pointee.cpu
         let cpu = place(thread)
+        Trace.event(CROI_TRACE_SCHED, UInt16(CROI_TK_WAKE), UInt64(thread.pointee.traceId), UInt64(cpu))
+        if cpu != from {
+            Trace.event(CROI_TRACE_SCHED, UInt16(CROI_TK_MIGRATE), UInt64(thread.pointee.traceId),
+                        UInt64(from) << 32 | UInt64(cpu))
+        }
         if thread.pointee.effective.discipline == .fair {
             // Its lag, carried to this CPU; a sleeper gets at most half the
             // target latency of credit.
@@ -984,6 +993,9 @@ enum Scheduler {
         armSlice(for: next, on: me, now)
         guard next != current else { return }
 
+        Trace.event(CROI_TRACE_SCHED, UInt16(CROI_TK_SWITCH), UInt64(next.pointee.traceId),
+                    UInt64(stateCode(current.pointee.state)))
+        unsafe UnsafeMutablePointer<PerCpu>(bitPattern: UInt(arch_percpu()))!.pointee.traceThread = next.pointee.traceId
         next.pointee.cpu = me
         next.pointee.cpusSeen |= 1 << UInt64(me)
         next.pointee.switchesIn += 1
@@ -1019,6 +1031,7 @@ enum Scheduler {
     private static func overrun(_ thread: ThreadPointer) {
         guard let context = thread.pointee.context else { return }
         context.pointee.overruns += 1
+        Trace.event(CROI_TRACE_SCHED, UInt16(CROI_TK_OVERRUN), context.pointee.overruns)
         if let hook = context.pointee.overrunHook {
             hook(context.pointee.overrunArgument, context.pointee.overruns)
         }
@@ -1116,16 +1129,24 @@ enum Scheduler {
             let current = cpus[me].current!
             charge(current, me, now)
             var give = false
+            var reason: UInt64 = 0
             if current.pointee.isIdle {
                 give = cpus[me].hasRunnable
             } else if current.pointee.effective.discipline == .deadline, current.pointee.remaining <= 0 {
                 give = true
+                reason = CROI_TRACE_PREEMPT_BUDGET
             } else if let first = cpus[me].deadline.head, preempts(first, current) {
                 give = true
+                reason = CROI_TRACE_PREEMPT_DEADLINE
             } else if current.pointee.effective.discipline == .fair, cpus[me].sliceTimer == 0 {
                 give = !cpus[me].fair.isEmpty
+                reason = CROI_TRACE_PREEMPT_SLICE
             } else if !allowed(current, on: me) {
                 give = true  // reserved away from it
+                reason = CROI_TRACE_PREEMPT_RESERVED
+            }
+            if give, reason != 0 {
+                Trace.event(CROI_TRACE_SCHED, UInt16(CROI_TK_PREEMPT), reason)
             }
             if give {
                 if !current.pointee.isIdle { current.pointee.state = .ready }
@@ -1154,6 +1175,10 @@ enum Scheduler {
         threadCount.add(1, ordering: .relaxed)
         let thread = ThreadPointer(address: UInt64(UInt(bitPattern: raw)))
         locked {
+            if !isIdle {
+                nextTraceId = nextTraceId % 0xFFF + 1  // 1...4095, task 0
+                thread.pointee.traceId = nextTraceId
+            }
             thread.pointee.allNext = allThreads
             allThreads = thread
         }
@@ -1199,6 +1224,15 @@ enum Scheduler {
             arch_interrupts_restore(saved)
             guard let zombie else { return }
             free(zombie)
+        }
+    }
+
+    private static func stateCode(_ state: Thread.State) -> Int {
+        switch state {
+        case .ready: 0
+        case .running: 1
+        case .blocked: 2
+        case .dead: 3
         }
     }
 

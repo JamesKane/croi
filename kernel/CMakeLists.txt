@@ -28,6 +28,8 @@ add_library(kernel-swift OBJECT
   Kernel/Sched/MutexSelfTest.swift
   Kernel/Sched/DeadlineSelfTest.swift
   Kernel/SpinLock.swift
+  Kernel/Trace/Trace.swift
+  Kernel/Trace/TraceSelfTest.swift
   Kernel/Uart.swift
   Kernel/Vm/ArchAspace.swift
   Kernel/Vm/KernelAspace.swift)
@@ -40,7 +42,8 @@ add_executable(kernel
   arch/${CROI_ARCH}/cpu.S
   arch/${CROI_ARCH}/exceptions.S
   arch/${CROI_ARCH}/smp.S
-  arch/${CROI_ARCH}/thread.S)
+  arch/${CROI_ARCH}/thread.S
+  trace.c)
 target_include_directories(kernel PRIVATE include)
 target_link_libraries(kernel PRIVATE kernel-swift croi-rt)
 set_target_properties(kernel PROPERTIES OUTPUT_NAME kernel.elf)

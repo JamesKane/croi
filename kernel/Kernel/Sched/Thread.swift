@@ -69,6 +69,9 @@ struct Thread: ~Copyable {
     /// Dead and switched off its stack: safe to free.
     var switchedOut = false
     var detached = false
+    /// Its name in trace records: task << 12 | thread; kernel threads are
+    /// task 0, idle threads 0.
+    var traceId: UInt32 = 0
     /// Link in the list of every thread (`Scheduler.dump`).
     var allNext: ThreadPointer?
     /// CPUs it has run on, one bit each (tests, observability).

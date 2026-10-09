@@ -81,6 +81,16 @@ if(CROI_ARCH STREQUAL rv64)
   set_tests_properties(boot-smoke-no-svpbmt PROPERTIES TIMEOUT 120)
 endif()
 
+if(CROI_ARCH STREQUAL amd64 AND EXISTS /dev/kvm)
+  # Under KVM timing is real: the trace self-test enforces its probe-cost
+  # budget, as Todhchai's M2 budgets will be measured.
+  add_test(NAME boot-smoke-kvm
+    COMMAND ${CROI_QEMU} --test "croi kernel: boot complete"
+            ${CROI_ARCH} ${CROI_ESP_DIR} ${CMAKE_BINARY_DIR}/qemu ${CROI_EDK2_DIR}
+            -accel kvm -cpu host)
+  set_tests_properties(boot-smoke-kvm PROPERTIES TIMEOUT 120)
+endif()
+
 if(CROI_ARCH STREQUAL arm64)
   # The DBG2 console path (QEMU's SPCR can't be turned off): an ESP whose
   # command line makes the loader try DBG2 first.

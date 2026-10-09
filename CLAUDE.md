@@ -257,6 +257,24 @@ the owner instead, as Zircon does). A thread may not exit holding one.
 `Scheduler.dump` prints every CPU and thread (all are on `allThreads`);
 the boot self-tests arm a 20 s deadman that calls it.
 
+Trace (Kernel/Trace/, include/trace.h; roadmap "Trace", K3 part):
+per-CPU rings (header page + power-of-two records of 32 bytes,
+`croi_trace_record_t`: raw counter time, kind, CPU, thread trace id
+`task << 12 | thread`, two words), written only by their own CPU with
+interrupts masked, no lock; oneshot (drop + count) or circular. Probes are
+`Trace.event(category, kind, a, b)`, inlined: the mask
+(`croi_trace_mask`, a C global in kernel/trace.c because Swift globals
+initialize lazily and would add a guard) is one relaxed load and a branch;
+arguments are evaluated only when on. `stop()` clears the mask and waits
+for each CPU's `traceWriting` flag (seq_cst on both sides, no IPI).
+Categories now: `sched` (switch, wake with the waker, block, preempt with a
+reason, migrate, overrun) and `irq` (enter/exit). The self-test enforces
+an enabled event < 30 ns only when not emulated (CPUID hypervisor
+signature isn't TCG): `boot-smoke-kvm` (amd64, when /dev/kvm exists) runs
+it, ~19 ns today. amd64 `arch_percpu` is a %gs-relative load of the
+record's `self` field (CROI_PERCPU_SELF), not rdmsr; GS points at a
+zeroed dummy record until a CPU has its own.
+
 Bring-up aids (K2 follow-ups from the board review in docs/roadmap.md):
 - Console: the loader takes SPCR, then DBG2 (CIX Sky1 has no SPCR), then
   COM1 on PCs; `loader.console=dbg2` in `\croi\cmdline` tries DBG2 first

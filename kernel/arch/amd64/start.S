@@ -38,10 +38,8 @@ _start:
     call    arch_init_pat
 
     // No per-CPU record yet (arch_percpu reads 0).
-    mov     $0xc0000101, %ecx       // IA32_GS_BASE
-    xor     %eax, %eax
-    xor     %edx, %edx
-    wrmsr
+    xor     %edi, %edi
+    call    arch_set_percpu
     mov     %r12, %rdi
 
     call    kernel_main

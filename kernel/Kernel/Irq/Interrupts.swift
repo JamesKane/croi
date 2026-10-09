@@ -64,6 +64,8 @@ enum Interrupts {
     static func handle(_ frame: UnsafeMutablePointer<arch_exception_frame_t>) {
         #if arch(x86_64)
         let vector = unsafe frame.pointee.vector
+        Trace.event(CROI_TRACE_IRQ, UInt16(CROI_TK_IRQ_ENTER), vector)
+        defer { Trace.event(CROI_TRACE_IRQ, UInt16(CROI_TK_IRQ_EXIT), vector) }
         switch vector {
         case UInt64(LocalApic.spuriousVector):
             return  // no EOI for spurious interrupts
@@ -80,6 +82,8 @@ enum Interrupts {
         #elseif arch(arm64)
         let intid = arch_gicv3_ack() & 0xFF_FFFF
         guard intid < 1020 else { return }  // spurious
+        Trace.event(CROI_TRACE_IRQ, UInt16(CROI_TK_IRQ_ENTER), intid)
+        defer { Trace.event(CROI_TRACE_IRQ, UInt16(CROI_TK_IRQ_EXIT), intid) }
         if intid == GicV3.ipiSgi {
             Ipi.handle()
         } else if intid == Timers.intid {
@@ -90,6 +94,8 @@ enum Interrupts {
         arch_gicv3_eoi(intid)
         #elseif arch(riscv64)
         let code = unsafe frame.pointee.scause & ~(1 << 63)
+        Trace.event(CROI_TRACE_IRQ, UInt16(CROI_TK_IRQ_ENTER), code)
+        defer { Trace.event(CROI_TRACE_IRQ, UInt16(CROI_TK_IRQ_EXIT), code) }
         if code == 1 {  // supervisor software interrupt
             arch_rv_sip_clear(1 << 1)
             Ipi.handle()

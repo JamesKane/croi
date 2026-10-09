@@ -14,11 +14,13 @@
 // The start of every PerCpu record (the per-CPU register points at it):
 // fields exception entry reads with nothing but that register.
 #define CROI_PERCPU_EMERGENCY_STACK 0  // top of this CPU's emergency stack, or 0
+#define CROI_PERCPU_SELF 8             // the record's own address (amd64: read via %gs)
 
 #ifndef __ASSEMBLER__
 #include <stdint.h>
 
 typedef struct {
   uint64_t emergency_stack_top;
+  uint64_t self;  // set by arch_set_percpu
 } croi_percpu_arch_t;
 #endif

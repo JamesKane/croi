@@ -1,3 +1,4 @@
+#include "stack.h"
 // amd64 CPU primitives Swift can't express: interrupt masking and the
 // spin-wait hint. See kernel.h.
 
@@ -53,14 +54,22 @@ arch_tlb_invalidate_page:
 
 #define MSR_GS_BASE 0xc0000101
 
-// void arch_set_percpu(uint64_t percpu)
+// void arch_set_percpu(uint64_t percpu): GS base points at the record,
+// whose `self` field (CROI_PERCPU_SELF) holds its own address, so
+// arch_percpu is one %gs-relative load instead of an rdmsr (~100 cycles,
+// on every Cpu.current). 0 points GS at a record whose `self` is 0.
 .globl arch_set_percpu
 .type arch_set_percpu, @function
 arch_set_percpu:
-    mov     $MSR_GS_BASE, %ecx
-    mov     %edi, %eax
-    mov     %rdi, %rdx
+    test    %rdi, %rdi
+    jnz     1f
+    lea     no_percpu(%rip), %rax
+    jmp     2f
+1:  mov     %rdi, CROI_PERCPU_SELF(%rdi)
+    mov     %rdi, %rax
+2:  mov     %rax, %rdx
     shr     $32, %rdx
+    mov     $MSR_GS_BASE, %ecx
     wrmsr
     ret
 .size arch_set_percpu, . - arch_set_percpu
@@ -69,10 +78,7 @@ arch_set_percpu:
 .globl arch_percpu
 .type arch_percpu, @function
 arch_percpu:
-    mov     $MSR_GS_BASE, %ecx
-    rdmsr
-    shl     $32, %rdx
-    or      %rdx, %rax
+    mov     %gs:CROI_PERCPU_SELF, %rax
     ret
 .size arch_percpu, . - arch_percpu
 
@@ -201,3 +207,9 @@ arch_cpu_core_type:
     pop     %rbx
     ret
 .size arch_cpu_core_type, . - arch_cpu_core_type
+
+// GS points here until a CPU has its PerCpu record: `self` reads 0.
+.section .bss.no_percpu, "aw", @nobits
+.balign 16
+no_percpu:
+    .zero 16
