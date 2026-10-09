@@ -18,6 +18,8 @@ add_library(kernel-swift OBJECT
   Kernel/Pmm.swift
   Kernel/Ref.swift
   Kernel/Smp.swift
+  Kernel/User/Syscalls.swift
+  Kernel/User/UserSelfTest.swift
   Kernel/Object/Status.swift
   Kernel/Object/KernelObject.swift
   Kernel/Object/Wait.swift
@@ -67,6 +69,7 @@ add_executable(kernel
   arch/${CROI_ARCH}/smp.S
   arch/${CROI_ARCH}/thread.S
   arch/${CROI_ARCH}/usercopy.S
+  arch/${CROI_ARCH}/usertest.S
   trace.c)
 target_include_directories(kernel PRIVATE include)
 target_link_libraries(kernel PRIVATE kernel-swift croi-rt)

@@ -1,11 +1,22 @@
 // amd64 exception entry. Assembly because it is the CPU's interrupt
-// interface: IDT/TSS formats, per-vector stubs, iretq.
+// interface: IDT/TSS formats, per-vector stubs, iretq, SYSCALL/SYSRET.
 //
 // Every vector has a 16-byte stub that pushes a zero error code if the CPU
 // didn't, then the vector number, and joins isr_common, which completes an
 // arch_exception_frame_t (see kernel.h) and calls arch_exception.
+//
+// From user mode (the saved CS has RPL 3) the CPU has already switched to
+// the TSS's RSP0 (the thread's kernel stack top) and the entry swaps GS to
+// the kernel's (swapgs); returning there swaps it back. While in the
+// kernel GS_BASE is the PerCpu record and KERNEL_GS_BASE the user's; in
+// user mode the other way round.
+
+#include "stack.h"
 
 #define KERNEL_CS   0x08
+#define USER_DS     0x23
+#define USER_CS64   0x2b
+#define SYSCALL_VECTOR 0x100
 #define TSS_SEL     0x30
 #define IST_STACK_SIZE 16384
 
@@ -26,7 +37,10 @@ isr_stubs:
 .endr
 
 isr_common:
-    pushq   %rax
+    testb   $3, 24(%rsp)            // the interrupted CS: from user mode?
+    jz      1f
+    swapgs
+1:  pushq   %rax
     pushq   %rbx
     pushq   %rcx
     pushq   %rdx
@@ -62,7 +76,132 @@ isr_common:
     popq    %rbx
     popq    %rax
     add     $16, %rsp               // vector, error code
+    testb   $3, 8(%rsp)             // back to user mode?
+    jz      2f
+    swapgs
+2:  iretq
+
+// SYSCALL from user mode: rcx = return rip, r11 = rflags, rax = number,
+// arguments in rdi, rsi, rdx, r10, r8, r9. Interrupts are masked (FMASK).
+// Builds the same frame as an interrupt (vector SYSCALL_VECTOR) on the
+// thread's kernel stack, calls arch_syscall, and returns with sysretq. The
+// rip it returns to is the one SYSCALL saved, so it is canonical (Swift
+// must keep it so if it ever changes it).
+.section .text.syscall_entry, "ax", @progbits
+.globl syscall_entry
+.type syscall_entry, @function
+syscall_entry:
+    swapgs
+    mov     %rsp, %gs:CROI_PERCPU_USER_SP
+    mov     %gs:CROI_PERCPU_KERNEL_SP, %rsp
+    pushq   $USER_DS                // ss
+    pushq   %gs:CROI_PERCPU_USER_SP // rsp
+    pushq   %r11                    // rflags
+    pushq   $USER_CS64              // cs
+    pushq   %rcx                    // rip
+    pushq   $0                      // error code
+    pushq   $SYSCALL_VECTOR
+    pushq   %rax
+    pushq   %rbx
+    pushq   %rcx
+    pushq   %rdx
+    pushq   %rsi
+    pushq   %rdi
+    pushq   %rbp
+    pushq   %r8
+    pushq   %r9
+    pushq   %r10
+    pushq   %r11
+    pushq   %r12
+    pushq   %r13
+    pushq   %r14
+    pushq   %r15
+    mov     %rsp, %rdi
+    cld
+    call    arch_syscall
+    cli
+    popq    %r15
+    popq    %r14
+    popq    %r13
+    popq    %r12
+    popq    %r11
+    popq    %r10
+    popq    %r9
+    popq    %r8
+    popq    %rbp
+    popq    %rdi
+    popq    %rsi
+    popq    %rdx
+    popq    %rcx
+    popq    %rbx
+    popq    %rax
+    add     $16, %rsp               // vector, error code
+    mov     0(%rsp), %rcx           // rip
+    mov     16(%rsp), %r11          // rflags
+    mov     24(%rsp), %rsp          // the user stack
+    swapgs
+    sysretq
+.size syscall_entry, . - syscall_entry
+
+// void arch_enter_user(pc, sp, arg0, arg1, kernel_top)
+.globl arch_enter_user
+.type arch_enter_user, @function
+arch_enter_user:
+    cli
+    mov     %r8, %rsp
+    pushq   $USER_DS                // ss
+    pushq   %rsi                    // rsp
+    pushq   $0x202                  // rflags: IF
+    pushq   $USER_CS64              // cs
+    pushq   %rdi                    // rip
+    mov     %rdx, %rdi
+    mov     %rcx, %rsi
+    xor     %eax, %eax
+    xor     %ebx, %ebx
+    xor     %ecx, %ecx
+    xor     %edx, %edx
+    xor     %ebp, %ebp
+    xor     %r8d, %r8d
+    xor     %r9d, %r9d
+    xor     %r10d, %r10d
+    xor     %r11d, %r11d
+    xor     %r12d, %r12d
+    xor     %r13d, %r13d
+    xor     %r14d, %r14d
+    xor     %r15d, %r15d
+    swapgs
     iretq
+.size arch_enter_user, . - arch_enter_user
+
+// void arch_syscall_init(void): EFER.SCE; STAR kernel CS 0x08 (SS 0x10),
+// SYSRET base 0x18 (CS 0x28 | 3, SS 0x20 | 3); LSTAR; FMASK clears IF,
+// DF, TF and AC on entry.
+.globl arch_syscall_init
+.type arch_syscall_init, @function
+arch_syscall_init:
+    mov     $0xc0000080, %ecx       // EFER
+    rdmsr
+    or      $1, %eax                // SCE
+    wrmsr
+    mov     $0xc0000081, %ecx       // STAR
+    xor     %eax, %eax
+    mov     $((0x18 | 3) << 16 | KERNEL_CS), %edx
+    wrmsr
+    mov     $0xc0000082, %ecx       // LSTAR
+    lea     syscall_entry(%rip), %rax
+    mov     %rax, %rdx
+    shr     $32, %rdx
+    wrmsr
+    mov     $0xc0000084, %ecx       // FMASK
+    mov     $((1 << 9) | (1 << 10) | (1 << 8) | (1 << 18)), %eax
+    xor     %edx, %edx
+    wrmsr
+    mov     $0xc0000102, %ecx       // KERNEL_GS_BASE: the user's GS, 0
+    xor     %eax, %eax
+    xor     %edx, %edx
+    wrmsr
+    ret
+.size arch_syscall_init, . - arch_syscall_init
 
 // void arch_init_exceptions(void)
 .section .text.arch_init_exceptions, "ax", @progbits

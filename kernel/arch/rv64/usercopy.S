@@ -49,3 +49,49 @@ arch_user_store_u64:
     ret
 FIXUP 1b, 2b
 .size arch_user_store_u64, . - arch_user_store_u64
+
+// int arch_copy_from_user(void *dst, uint64_t src, uint64_t len)
+.globl arch_copy_from_user
+.type arch_copy_from_user, %function
+arch_copy_from_user:
+    li      t0, SSTATUS_SUM
+    csrs    sstatus, t0
+    beqz    a2, 3f
+1:  lbu     t1, 0(a1)
+    sb      t1, 0(a0)
+    addi    a0, a0, 1
+    addi    a1, a1, 1
+    addi    a2, a2, -1
+    bnez    a2, 1b
+3:  csrc    sstatus, t0
+    li      a0, 0
+    ret
+2:  li      t0, SSTATUS_SUM
+    csrc    sstatus, t0
+    li      a0, -1
+    ret
+FIXUP 1b, 2b
+.size arch_copy_from_user, . - arch_copy_from_user
+
+// int arch_copy_to_user(uint64_t dst, const void *src, uint64_t len)
+.globl arch_copy_to_user
+.type arch_copy_to_user, %function
+arch_copy_to_user:
+    li      t0, SSTATUS_SUM
+    csrs    sstatus, t0
+    beqz    a2, 3f
+4:  lbu     t1, 0(a1)
+1:  sb      t1, 0(a0)
+    addi    a0, a0, 1
+    addi    a1, a1, 1
+    addi    a2, a2, -1
+    bnez    a2, 4b
+3:  csrc    sstatus, t0
+    li      a0, 0
+    ret
+2:  li      t0, SSTATUS_SUM
+    csrc    sstatus, t0
+    li      a0, -1
+    ret
+FIXUP 1b, 2b
+.size arch_copy_to_user, . - arch_copy_to_user

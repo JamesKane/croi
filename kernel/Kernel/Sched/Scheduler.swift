@@ -1019,6 +1019,7 @@ enum Scheduler {
             cpus[me].activeAspace = next.pointee.aspace
         }
         loadPkru(next.pointee.pkru, me)
+        setKernelStack(next.pointee.stack.top)
         unsafe arch_context_switch(UnsafeMutablePointer<UInt64>(bitPattern: UInt(current.address))!,
                                    next.pointee.savedSp)
         finishSwitch()
@@ -1375,6 +1376,18 @@ enum Scheduler {
             if writable { thread.pointee.pkru &= ~bit } else { thread.pointee.pkru |= bit }
             loadPkru(thread.pointee.pkru, me)
         }
+    }
+
+    /// Where this CPU enters the kernel from user mode: the running
+    /// thread's kernel stack top (per-CPU; amd64 also the TSS's RSP0).
+    static func setKernelStack(_ top: UInt64) {
+        let percpu = unsafe UnsafeMutablePointer<PerCpu>(bitPattern: UInt(arch_percpu()))!
+        unsafe percpu.pointee.arch.kernel_sp = top
+        #if arch(x86_64)
+        if unsafe percpu.pointee.arch.tss != 0 {
+            unsafe UnsafeMutableRawPointer(bitPattern: UInt(percpu.pointee.arch.tss + 4))!.storeBytes(of: top, as: UInt64.self)
+        }
+        #endif
     }
 
     private static func loadPkru(_ value: UInt32, _ me: Int) {

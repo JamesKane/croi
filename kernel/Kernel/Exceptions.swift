@@ -5,6 +5,10 @@ import Fmt
 /// the instruction; anything else is unexpected this early and is fatal.
 @c @implementation
 func arch_exception(_ frame: UnsafeMutablePointer<arch_exception_frame_t>) {
+    if unsafe ExceptionFrame.fromUser(frame.pointee) {
+        unsafe UserTraps.handle(frame)
+        return
+    }
     if unsafe ExceptionFrame.isInterrupt(frame.pointee) {
         unsafe Interrupts.handle(frame)
         Scheduler.preemptIfRequested()
@@ -72,6 +76,20 @@ enum ExceptionFrame {
     }
     static func programCounter(_ f: arch_exception_frame_t) -> UInt64 { f.rip }
     static func interruptsWereEnabled(_ f: arch_exception_frame_t) -> Bool { f.rflags & (1 << 9) != 0 }  // IF
+    static func fromUser(_ f: arch_exception_frame_t) -> Bool { f.cs & 3 == 3 }
+    static func isSyscall(_ f: arch_exception_frame_t) -> Bool { f.vector == 0x100 }
+    static func syscallNumber(_ f: arch_exception_frame_t) -> UInt64 { f.rax }
+    static func syscallArgument(_ f: arch_exception_frame_t, _ i: Int) -> UInt64 {
+        switch i {
+        case 0: f.rdi
+        case 1: f.rsi
+        case 2: f.rdx
+        case 3: f.r10
+        case 4: f.r8
+        default: f.r9
+        }
+    }
+    static func setSyscallResult(_ f: inout arch_exception_frame_t, _ value: UInt64) { f.rax = value }
     static func setProgramCounter(_ f: inout arch_exception_frame_t, _ pc: UInt64) { f.rip = pc }
     static func isInterrupt(_ f: arch_exception_frame_t) -> Bool { f.vector >= 32 }
 
@@ -155,10 +173,18 @@ enum ExceptionFrame {
     }
     static func programCounter(_ f: arch_exception_frame_t) -> UInt64 { f.elr }
     static func interruptsWereEnabled(_ f: arch_exception_frame_t) -> Bool { f.spsr & (1 << 7) == 0 }  // PSTATE.I
+    /// Slots 8-15: from a lower EL.
+    static func fromUser(_ f: arch_exception_frame_t) -> Bool { f.slot >= 8 && f.slot < 16 }
+    static func isSyscall(_ f: arch_exception_frame_t) -> Bool { f.slot == 8 && exceptionClass(f) == 0x15 }  // SVC64
+    static func syscallNumber(_ f: arch_exception_frame_t) -> UInt64 { f.x.16 }  // x16, as Zircon
+    static func syscallArgument(_ f: arch_exception_frame_t, _ i: Int) -> UInt64 {
+        withUnsafeBytes(of: f.x) { unsafe $0.load(fromByteOffset: 8 * i, as: UInt64.self) }
+    }
+    static func setSyscallResult(_ f: inout arch_exception_frame_t, _ value: UInt64) { f.x.0 = value }
     static func setProgramCounter(_ f: inout arch_exception_frame_t, _ pc: UInt64) { f.elr = pc }
 
-    /// IRQ from the current EL (SP_EL0 or SP_ELx).
-    static func isInterrupt(_ f: arch_exception_frame_t) -> Bool { f.slot == 1 || f.slot == 5 }
+    /// IRQ, from the current EL or from EL0 (slots 1, 5, 9, 13).
+    static func isInterrupt(_ f: arch_exception_frame_t) -> Bool { f.slot < 16 && f.slot & 3 == 1 }  // IRQ, any EL
 
     /// The vector found the stack overflowed and switched stacks (slot + 16).
     static func isStackOverflow(_ f: arch_exception_frame_t) -> Bool { f.slot >= 16 }
@@ -231,6 +257,18 @@ enum ExceptionFrame {
     }
     static func programCounter(_ f: arch_exception_frame_t) -> UInt64 { f.sepc }
     static func interruptsWereEnabled(_ f: arch_exception_frame_t) -> Bool { f.sstatus & (1 << 5) != 0 }  // SPIE
+    /// sstatus.SPP clear: the trap came from U-mode.
+    static func fromUser(_ f: arch_exception_frame_t) -> Bool { f.sstatus & (1 << 8) == 0 }
+    static func isSyscall(_ f: arch_exception_frame_t) -> Bool { f.scause == 8 }  // ecall from U
+    static func syscallNumber(_ f: arch_exception_frame_t) -> UInt64 { f.x.17 }  // a7
+    static func syscallArgument(_ f: arch_exception_frame_t, _ i: Int) -> UInt64 {
+        withUnsafeBytes(of: f.x) { unsafe $0.load(fromByteOffset: 8 * (10 + i), as: UInt64.self) }  // a0...
+    }
+    /// a0, and past the ecall.
+    static func setSyscallResult(_ f: inout arch_exception_frame_t, _ value: UInt64) {
+        f.x.10 = value
+        f.sepc += 4
+    }
     static func setProgramCounter(_ f: inout arch_exception_frame_t, _ pc: UInt64) { f.sepc = pc }
     static func isInterrupt(_ f: arch_exception_frame_t) -> Bool { f.scause >> 63 != 0 }
 

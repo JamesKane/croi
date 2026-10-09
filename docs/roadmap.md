@@ -219,6 +219,14 @@ interrupt/timer packets (with those objects).
   dispatchers later.
 
 ### K6: Syscalls and user mode (requirement 9)
+Progress: **K6a done**: user mode on all three arches (amd64 SYSCALL/
+SYSRET + swapgs, arm64 EL0 vectors + svc, rv64 sscratch swap + ecall),
+syscall dispatch, user faults and preemption, fault-recovering copies, a
+built-in user test program; null syscall ~40 ns under KVM (budget 100).
+Next: K6b (SMAP/PAN/SUM discipline, the object syscall surface, the
+`syscall` trace category and user marks), K6c (vDSO and shared pages,
+with the kernel/user build split), K6d (user FP/SIMD), K6e (sampling and
+PMU).
 - Syscall entry/exit per arch, user-copy with fault recovery, and SMAP, PAN
   and SUM discipline.
 - **vDSO** plus the shared read-only pages: clock, topology and power

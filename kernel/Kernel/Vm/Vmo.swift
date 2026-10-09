@@ -324,6 +324,21 @@ struct Vmo: ~Copyable {
               offset <= self.size, size <= self.size - offset else { throw .invalidArgument }
     }
 
+    /// Kernel-side write of `count` bytes from `source` at `offset`,
+    /// committing pages (loading user programs until K8's loader).
+    func writeBytes(at offset: UInt64, from source: UInt64, count: UInt64) {
+        var done: UInt64 = 0
+        while done < count {
+            let at = offset + done
+            guard let phys = record.commit(at: at) else { panic("vmo: out of memory") }
+            let within = at % KernelLayout.pageSize
+            let chunk = min(count - done, KernelLayout.pageSize - within)
+            unsafe UnsafeMutableRawPointer(bitPattern: UInt(KernelLayout.physmap(phys) + within))!
+                .copyMemory(from: UnsafeRawPointer(bitPattern: UInt(source + done))!, byteCount: Int(chunk))
+            done += chunk
+        }
+    }
+
     /// Kernel-side write of a word, committing its page (tests; K6 copies).
     func writeWord(at offset: UInt64, _ value: UInt64) {
         guard let phys = record.commit(at: offset) else { panic("vmo: out of memory") }

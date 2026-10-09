@@ -192,6 +192,35 @@ User address spaces and VMOs (K4a, Kernel/Vm/):
 - Lock order: aspace -> vmo -> account -> heap -> pmm (and vm for the
   kernel aspace).
 
+User mode (K6a, Kernel/User/, include/user.h): a user thread's registers
+are an arch_exception_frame_t at the top of its kernel stack while it is in
+the kernel; `UserTraps.enter` (setAspace, `Scheduler.setKernelStack`,
+`arch_enter_user`) drops to user mode, and traps/syscalls/interrupts come
+back through `arch_exception` (`ExceptionFrame.fromUser`) to
+`UserTraps.handle`: interrupts preempt as usual, syscalls go to
+`Syscalls.dispatch` (interrupts on), user page faults resolve through the
+VM or kill the thread, anything else kills it (exit codes
+`killedByFault`/`killedByException` until K7's exception channels).
+switchAway keeps PerCpu `kernel_sp` (and the amd64 TSS RSP0) at the next
+thread's stack top.
+- amd64: swapgs on every user entry/exit (in the kernel GS_BASE is the
+  PerCpu, KERNEL_GS_BASE the user's); SYSCALL (LSTAR `syscall_entry`,
+  number in rax, args rdi rsi rdx r10 r8 r9) builds the same frame
+  (vector 0x100) and returns with sysretq (the rip is SYSCALL's, so
+  canonical); STAR/FMASK in `arch_syscall_init`, per CPU.
+- arm64: EL0 vectors (slots 8-15) skip the overflow check and save/restore
+  SP_EL0; SP_EL1 is the stack top because user frames sit there; svc #0
+  with the number in x16 (Zircon's); TPIDRRO_EL0 is kernel scratch and 0
+  for user mode. IRQs from EL0 are slot 9.
+- rv64: sscratch is 0 in S-mode (set in arch_init_exceptions: firmware
+  leaves anything) and the PerCpu in U-mode; the entry swaps it with tp
+  to tell the origins apart; ecall with the number in a7.
+- `arch_copy_from_user`/`to_user`: byte loops listed in .croi_fixups
+  (arm64 ldtrb/sttrb; rv64 with SUM).
+- The boot test runs `usertest.S` (per arch) from a VMO: registers kept
+  across syscalls, a message, a fault and a privileged instruction killed,
+  preemption of user code; it reports the null syscall time (KVM: ~40 ns).
+
 Kernel objects (K5, Kernel/Object/; Zircon's status codes, rights,
 signals and object types, so the ABI matches):
 - Every object record starts with an `ObjectHeader` (type, koid from 1024,

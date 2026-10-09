@@ -36,3 +36,38 @@ arch_user_store_u64:
     ret
 FIXUP 1b, 2b
 .size arch_user_store_u64, . - arch_user_store_u64
+
+// int arch_copy_from_user(void *dst, uint64_t src, uint64_t len): ldtrb, so
+// the access is checked as EL0's.
+.globl arch_copy_from_user
+.type arch_copy_from_user, %function
+arch_copy_from_user:
+    cbz     x2, 3f
+1:  ldtrb   w3, [x1]
+    strb    w3, [x0], #1
+    add     x1, x1, #1
+    subs    x2, x2, #1
+    b.ne    1b
+3:  mov     w0, #0
+    ret
+2:  mov     w0, #-1
+    ret
+FIXUP 1b, 2b
+.size arch_copy_from_user, . - arch_copy_from_user
+
+// int arch_copy_to_user(uint64_t dst, const void *src, uint64_t len)
+.globl arch_copy_to_user
+.type arch_copy_to_user, %function
+arch_copy_to_user:
+    cbz     x2, 3f
+4:  ldrb    w3, [x1], #1
+1:  sttrb   w3, [x0]
+    add     x0, x0, #1
+    subs    x2, x2, #1
+    b.ne    4b
+3:  mov     w0, #0
+    ret
+2:  mov     w0, #-1
+    ret
+FIXUP 1b, 2b
+.size arch_copy_to_user, . - arch_copy_to_user

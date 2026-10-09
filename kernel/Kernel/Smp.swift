@@ -324,6 +324,8 @@ enum CpuStacks {
               let tss = unsafe heap.allocate(size: 104, alignment: 16)
         else { panic("cpu: no memory for GDT/TSS") }
         unsafe arch_install_cpu_descriptors(gdt, tss, stack.top)
+        unsafe record.pointee.arch.tss = UInt64(UInt(bitPattern: tss))
+        arch_syscall_init()
         #endif
     }
 

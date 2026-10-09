@@ -35,3 +35,43 @@ arch_user_store_u64:
     ret
 FIXUP 1b, 2b
 .size arch_user_store_u64, . - arch_user_store_u64
+
+// int arch_copy_from_user(void *dst, uint64_t src, uint64_t len)
+.globl arch_copy_from_user
+.type arch_copy_from_user, @function
+arch_copy_from_user:
+    test    %rdx, %rdx
+    jz      3f
+1:  movb    (%rsi), %al
+    movb    %al, (%rdi)
+    inc     %rsi
+    inc     %rdi
+    dec     %rdx
+    jnz     1b
+3:  xor     %eax, %eax
+    ret
+2:  mov     $-1, %eax
+    ret
+FIXUP 1b, 2b
+.size arch_copy_from_user, . - arch_copy_from_user
+
+// int arch_copy_to_user(uint64_t dst, const void *src, uint64_t len)
+.globl arch_copy_to_user
+.type arch_copy_to_user, @function
+arch_copy_to_user:
+    test    %rdx, %rdx
+    jz      3f
+    movb    (%rsi), %al
+1:  movb    %al, (%rdi)
+    inc     %rsi
+    inc     %rdi
+    dec     %rdx
+    jz      3f
+    movb    (%rsi), %al
+    jmp     1b
+3:  xor     %eax, %eax
+    ret
+2:  mov     $-1, %eax
+    ret
+FIXUP 1b, 2b
+.size arch_copy_to_user, . - arch_copy_to_user
