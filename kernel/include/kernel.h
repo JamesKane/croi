@@ -98,3 +98,13 @@ CROI_IMAGE_SYMBOL(rodata_end)
 CROI_IMAGE_SYMBOL(data_start)
 CROI_IMAGE_SYMBOL(image_end)
 #undef CROI_IMAGE_SYMBOL
+
+// --- Heap ---------------------------------------------------------------------
+//
+// Swift (Kernel/Heap.swift). The C allocation interface; the Embedded Swift
+// runtime allocates through posix_memalign and free. Usable once the heap
+// is up (after the PMM); before that, allocation fails.
+#include <stddef.h>
+int posix_memalign(void *_Nullable *_Nonnull memptr, size_t alignment, size_t size);
+void *_Nullable malloc(size_t size);
+void free(void *_Nullable ptr);

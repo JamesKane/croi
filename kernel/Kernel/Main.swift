@@ -95,6 +95,11 @@ func kernel_main(_ handoffAddress: UInt64) -> Never {
     console.write(decimal: reclaimed)
     console.write(" handoff pages reclaimed)\n")
 
+    heapSelfTest()
+    swiftAllocationSelfTest()
+    refSelfTest()
+    console.write("  heap:   slabs + large pages; UniqueBox, UniqueArray and Ref allocate and free\n")
+
     // Exception round trip: take a breakpoint and resume after it.
     arch_breakpoint()
     guard breakpointsHandled == 1 else { panic("breakpoint did not round-trip") }
@@ -166,3 +171,101 @@ private func pmmSelfTest() {
     pmm.free(run, count: runPages)
     guard pmm.freePages == before, pmm.state(of: a) == .free else { panic("pmm self-test: free") }
 }
+
+/// Exercises the heap directly: every size class, large sizes, large
+/// alignments; checks alignment, independence of allocations, and that
+/// everything (including emptied slabs) is returned.
+private func heapSelfTest() {
+    guard MemoryLayout<Page>.stride == 32 else { panic("Page record is not 32 bytes") }
+    let bytesBefore = heap.bytesInUse
+    let pagesBefore = pmm.freePages
+
+    // (size, alignment) cases: classes, class edges, large, aligned.
+    var cases = InlineArray<12, (size: Int, alignment: Int)>(repeating: (0, 16))
+    cases[0] = (1, 16); cases[1] = (16, 16); cases[2] = (17, 16); cases[3] = (48, 16)
+    cases[4] = (100, 16); cases[5] = (2048, 16); cases[6] = (2049, 16); cases[7] = (10_000, 16)
+    cases[8] = (48, 64); cases[9] = (100, 4096); cases[10] = (5000, 0x1_0000); cases[11] = (0, 16)
+
+    var pointers = InlineArray<12, UInt>(repeating: 0)
+    for i in 0..<cases.count {
+        guard let p = unsafe heap.allocate(size: cases[i].size, alignment: cases[i].alignment) else {
+            panic("heap self-test: allocation failed")
+        }
+        let address = UInt(bitPattern: p)
+        guard address % UInt(cases[i].alignment) == 0 else { panic("heap self-test: misaligned") }
+        unsafe p.initializeMemory(as: UInt8.self, repeating: UInt8(i), count: max(cases[i].size, 1))
+        pointers[i] = address
+    }
+    // No allocation overwrote another.
+    for i in 0..<cases.count {
+        let p = unsafe UnsafeRawPointer(bitPattern: pointers[i])!
+        for b in 0..<max(cases[i].size, 1) where unsafe p.load(fromByteOffset: b, as: UInt8.self) != UInt8(i) {
+            panic("heap self-test: allocations overlap")
+        }
+    }
+    for i in 0..<cases.count {
+        unsafe heap.free(UnsafeMutableRawPointer(bitPattern: pointers[i])!)
+    }
+    guard heap.bytesInUse == bytesBefore, pmm.freePages == pagesBefore else {
+        panic("heap self-test: memory not returned")
+    }
+}
+
+/// Ownership-based allocation (no refcounting) must allocate on the heap
+/// and give everything back when values are consumed or go out of scope.
+/// Refcounted storage (classes, Array, String, Dictionary) does not work in
+/// the kernel: see "Embedded Swift and the higher half" in CLAUDE.md.
+private func swiftAllocationSelfTest() {
+    let bytesBefore = heap.bytesInUse
+    do {
+        var box = UniqueBox(41)
+        box.value += 1
+        var numbers = UniqueArray<Int>(capacity: 8)
+        for i in 0..<1000 {
+            numbers.append(i)
+        }
+        var sum = 0
+        for i in 0..<numbers.count {
+            sum += numbers[i]
+        }
+        guard box.value == 42, numbers.count == 1000, sum == 499_500 else {
+            panic("Swift allocation self-test: wrong values")
+        }
+        guard heap.bytesInUse > bytesBefore else { panic("Swift allocation self-test: nothing allocated") }
+    }
+    guard heap.bytesInUse == bytesBefore else { panic("Swift allocation self-test: leak") }
+}
+
+/// A value whose destruction the Ref self-test can observe.
+private struct RefProbe: ~Copyable {
+    let id: Int
+    deinit { refProbesDestroyed += 1 }
+}
+nonisolated(unsafe) private var refProbesDestroyed = 0
+
+/// Ref<T>: sharing counts owners, the value outlives all but the last
+/// owner, and the last drop destroys it and returns its memory.
+private func refSelfTest() {
+    let bytesBefore = heap.bytesInUse
+    let first = Ref(RefProbe(id: 7))
+    let second = first.share()
+    let owners = first.ownerCount
+    let id = second.value.id
+    guard owners == 2, id == 7 else { panic("Ref self-test: sharing") }
+
+    drop(first)
+    let ownersAfter = second.ownerCount
+    let idAfter = second.value.id
+    let destroyedEarly = refProbesDestroyed
+    guard destroyedEarly == 0, ownersAfter == 1, idAfter == 7 else {
+        panic("Ref self-test: value died with a remaining owner")
+    }
+
+    drop(second)
+    let destroyed = refProbesDestroyed
+    guard destroyed == 1, heap.bytesInUse == bytesBefore else {
+        panic("Ref self-test: last owner did not free the value")
+    }
+}
+
+private func drop<T: ~Copyable>(_ value: consuming T) {}

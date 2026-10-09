@@ -11,17 +11,29 @@ enum PageState: UInt8 {
     case wired
     /// Page tables.
     case mmu
+    /// Kernel heap (see Heap.swift for the heap* fields).
+    case heap
 }
 
 /// Per-page metadata, one for every 4 KiB page in every arena (Zircon's
 /// vm_page_t). Lives in the arena's page array, reached via the physmap.
 struct Page {
-    /// Free-list links: physmap addresses of the neighbouring `Page`s, 0 for none.
-    fileprivate var next: UInt64 = 0
-    fileprivate var prev: UInt64 = 0
+    /// List links: physmap addresses of the neighbouring `Page`s, 0 for
+    /// none. The PMM's free list while free; the owner's lists otherwise
+    /// (e.g. the heap's partial-slab lists).
+    var next: UInt64 = 0
+    var prev: UInt64 = 0
     /// The page this describes.
     private(set) var physical: UInt64 = 0
     fileprivate(set) var state = PageState.wired
+
+    // Owned by the heap while `state == .heap` (fits in the record's padding).
+    /// Slab size class, or `Heap.largeHead` / `Heap.largeTail`.
+    var heapClass: UInt8 = 0
+    /// Slab: objects allocated. Large head: pages in the allocation.
+    var heapInUse: UInt16 = 0
+    /// Slab: offset of the first free object, or `Heap.endOfList`.
+    var heapFree: UInt16 = 0
 
     fileprivate init(physical: UInt64) {
         self.physical = physical

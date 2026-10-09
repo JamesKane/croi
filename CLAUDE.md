@@ -68,6 +68,14 @@ data and boot page tables; nothing may read the handoff afterwards). No
 lock yet: single CPU, interrupts masked. ACPI reclaim stays wired until
 ACPI is parsed. Boot runs a PMM self-test.
 
+Kernel heap (`Kernel/Heap.swift`, global `heap`): PMM pages (state `.heap`)
+through the physmap, like Zircon's. Requests up to 2 KiB use one-page slabs
+in 13 size classes (per-slab free lists; empty slabs go back to the PMM);
+larger or >2 KiB-aligned requests get contiguous PMM pages. Bookkeeping is
+in the `Page` records (no headers). `free` validates, catches double frees
+and poisons. `posix_memalign`/`malloc`/`free` are `@c @implementation`
+(the Swift runtime allocates through them). Not locked yet.
+
 Exceptions: `arch/<arch>/exceptions.S` saves an `arch_exception_frame_t`
 (kernel.h) and calls Swift `arch_exception` (Kernel/Exceptions.swift);
 the handler may edit the frame to resume elsewhere. Installed at the top
@@ -106,10 +114,26 @@ kernel must not use PAC until it does.
   Span-returning properties need `@_lifetime(...)` (Lifetimes feature is on).
 - No floating point in kernel code. On amd64 Swift can't be built with x87
   disabled, so `Double` would compile silently to x87; don't use it.
-- Loader and kernel have no heap: there is no malloc, so any hidden
-  allocation fails the link (find it with `ld.lld --why-live=swift_slowAlloc`).
+- The loader has no heap: there is no malloc, so any hidden allocation
+  fails the link (find it with `ld.lld --why-live=swift_slowAlloc`).
   `withTemporaryAllocation` can fall back to the heap; use `InlineArray`
   stack buffers instead.
+- **The kernel is ownership-only: no ARC.** Embedded Swift (64-bit) treats
+  any object whose address has bit 63 set as immortal
+  (`HeapObject.immortalObjectPointerBit` in EmbeddedRuntime.swift), and
+  every higher-half address has it. So `swift_retain`/`swift_release` are
+  no-ops for kernel objects and uniqueness checks fail: classes, boxes for
+  captured vars, existentials and Array/String/Dictionary/Set storage would
+  leak (and CoW would copy on every mutation). Use `~Copyable` types,
+  `UniqueBox`/`UniqueArray`, and `Ref<T>` (Kernel/Ref.swift: intrusive
+  atomic count like Zircon's fbl::RefPtr; `share()` adds an owner, the last
+  drop frees). `cmake/CheckNoArc.cmake` fails the kernel link if any
+  refcounting entry point survives --gc-sections.
+- Reading a `~Copyable` value through an `unsafeAddress` accessor makes the
+  owner unconsumable afterwards in 6.4.0; use `_read { yield ... }` (the
+  SE-0474 `yielding borrow` spelling is still experimental). `borrow`
+  accessors can't return through a raw pointer's `pointee`, and key paths
+  don't support `~Copyable` types.
 - Swift precedence trap: `<<`/`>>` bind tighter than `*`, so write
   `(pages * pageSize) >> 20`, never `pages * pageSize >> 20`.
 - C constants Swift must see are typed C23 enums (`enum : uint64_t {...}`),
