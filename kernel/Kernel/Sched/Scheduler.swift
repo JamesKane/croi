@@ -1,4 +1,5 @@
 import CKernel
+import Fmt
 import Synchronization
 
 /// One CPU's scheduling state (scheduler lock).
@@ -44,6 +45,8 @@ enum Scheduler {
     private static let started = Atomic<Bool>(false)
     /// Thread records allocated and not yet freed (idle threads included).
     static let threadCount = Atomic<Int>(0)
+    /// Every thread record, linked through `allNext` (scheduler lock).
+    nonisolated(unsafe) private static var allThreads: ThreadPointer?
 
     // MARK: Bring-up
 
@@ -52,7 +55,7 @@ enum Scheduler {
     static func initializeBootCpu(stack: StackRange) {
         exitWaiters = QueuePointer.allocate()
         let bootstrap = makeRecord(name: "bootstrap", stack: stack, ownsStack: false, entry: nil, argument: 0,
-                                   isIdle: false, affinity: allCpus, cpu: 0)
+                                   isIdle: false, priority: Thread.defaultPriority, affinity: allCpus, cpu: 0)
         bootstrap.pointee.state = .running
         bootstrap.pointee.detached = true
         bootstrap.pointee.cpusSeen = 1
@@ -63,7 +66,7 @@ enum Scheduler {
             panic("sched: no memory for an idle stack")
         }
         let idle = makeRecord(name: "idle", stack: idleStack, ownsStack: false, entry: idleEntry, argument: 0,
-                              isIdle: true, affinity: 1, cpu: 0)
+                              isIdle: true, priority: -1, affinity: 1, cpu: 0)
         idle.pointee.savedSp = arch_thread_prepare(idleStack.top, idle.address)
         let saved = arch_interrupts_save()
         lock.lockMasked()
@@ -79,7 +82,7 @@ enum Scheduler {
     static func becomeIdle(stack: StackRange) -> Never {
         let me = Int(Cpu.current)
         let idle = makeRecord(name: "idle", stack: stack, ownsStack: false, entry: nil, argument: 0,
-                              isIdle: true, affinity: 1 << UInt64(me), cpu: me)
+                              isIdle: true, priority: -1, affinity: 1 << UInt64(me), cpu: me)
         idle.pointee.state = .running
         _ = arch_interrupts_save()
         lock.lockMasked()
@@ -102,7 +105,10 @@ enum Scheduler {
         while true {
             reapZombies()
             lock.lockMasked()
-            if !cpus[me].queue.isEmpty {
+            // Loop: coming back here, `finishSwitch` may have just made a
+            // thread ready on this CPU (a joiner woken by an exit), with
+            // only a local request and no IPI to end the wait below.
+            while !cpus[me].queue.isEmpty {
                 switchAway()
             }
             lock.unlockMasked()
@@ -118,8 +124,9 @@ enum Scheduler {
 
     /// Starts a kernel thread running `entry(argument)` on a new stack. With
     /// `cpu`, it only ever runs there.
-    static func spawn(_ name: StaticString, cpu: Int? = nil, _ entry: Thread.Entry,
-                      _ argument: UInt64) throws(VmError) -> ThreadHandle {
+    static func spawn(_ name: StaticString, cpu: Int? = nil, priority: Int = Thread.defaultPriority,
+                      _ entry: Thread.Entry, _ argument: UInt64) throws(VmError) -> ThreadHandle {
+        guard (0...Thread.maxPriority).contains(priority) else { panic("sched: priority out of range") }
         reapZombies()
         let stack = try KernelStack().keepForever()
         var affinity = allCpus
@@ -128,13 +135,9 @@ enum Scheduler {
             affinity = 1 << UInt64(cpu)
         }
         let thread = makeRecord(name: name, stack: stack, ownsStack: true, entry: entry, argument: argument,
-                                isIdle: false, affinity: affinity, cpu: Int(Cpu.current))
+                                isIdle: false, priority: priority, affinity: affinity, cpu: Int(Cpu.current))
         thread.pointee.savedSp = arch_thread_prepare(stack.top, thread.address)
-        let saved = arch_interrupts_save()
-        lock.lockMasked()
-        makeReady(thread)
-        lock.unlockMasked()
-        arch_interrupts_restore(saved)
+        locked { makeReady(thread) }
         return ThreadHandle(thread: thread)
     }
 
@@ -152,6 +155,7 @@ enum Scheduler {
         let me = Int(Cpu.current)
         let thread = cpus[me].current!
         guard !thread.pointee.isIdle else { panic("sched: the idle thread exited") }
+        guard thread.pointee.ownedQueues == nil else { panic("sched: a thread exited holding a mutex") }
         thread.pointee.exitCode = code
         thread.pointee.state = .dead
         switchAway()
@@ -162,8 +166,8 @@ enum Scheduler {
     static func yield() {
         locked {
             let me = Int(Cpu.current)
-            guard !cpus[me].queue.isEmpty else { return }
             let thread = cpus[me].current!
+            guard cpus[me].queue.topPriority >= thread.pointee.effectivePriority else { return }
             thread.pointee.state = .ready
             cpus[me].queue.push(thread)
             switchAway()
@@ -203,12 +207,18 @@ enum Scheduler {
 
     /// Runs `body` with the scheduler lock held and interrupts masked.
     /// `body` may block (`block`); the lock is held again when it resumes.
+    ///
+    /// Leaving it is a preemption point when the caller had interrupts on:
+    /// a wakeup or priority change in `body` may have made another thread
+    /// on this CPU more deserving.
     static func locked<R>(_ body: () -> R) -> R {
+        let preemptible = arch_interrupts_enabled()
         let saved = arch_interrupts_save()
         lock.lockMasked()
         let result = body()
         lock.unlockMasked()
         cancelTimeout()
+        if preemptible { preemptIfRequested() }
         arch_interrupts_restore(saved)
         return result
     }
@@ -223,6 +233,7 @@ enum Scheduler {
         thread.pointee.waitResult = .woken
         thread.pointee.waitQueue = queue
         queue?.pointee.push(thread)
+        if let owner = queue?.pointee.owner { updateEffectivePriority(owner) }  // lend it our priority
         // Waiting again for the same deadline (a condition loop) keeps the
         // timer already armed, and with it the generation it checks.
         if deadline == .max || thread.pointee.timeoutTimer == 0 || thread.pointee.timeoutDeadline != deadline {
@@ -251,6 +262,7 @@ enum Scheduler {
         guard let thread = queue.pointee.pop() else { return false }
         thread.pointee.waitQueue = nil
         makeReady(thread)
+        if let owner = queue.pointee.owner { updateEffectivePriority(owner) }
         return true
     }
 
@@ -269,6 +281,7 @@ enum Scheduler {
             if let queue = thread.pointee.waitQueue {
                 queue.pointee.remove(thread)
                 thread.pointee.waitQueue = nil
+                if let owner = queue.pointee.owner { updateEffectivePriority(owner) }
             }
             thread.pointee.waitResult = .timedOut
             makeReady(thread)
@@ -314,6 +327,128 @@ enum Scheduler {
         Timers.cancel(UInt32(id))
     }
 
+    // MARK: Priority inheritance (lock held)
+
+    /// A thread's effective priority: its base, or the best waiter on any
+    /// owned wait queue it holds.
+    private static func inheritedPriority(_ thread: ThreadPointer) -> Int {
+        var priority = thread.pointee.basePriority
+        var owned = thread.pointee.ownedQueues
+        while let queue = owned {
+            priority = max(priority, queue.pointee.topPriority)
+            owned = queue.pointee.nextOwned
+        }
+        return priority
+    }
+
+    /// Recomputes `thread`'s effective priority and carries a change along
+    /// the chain: its position in the queue it is on, and the owner of the
+    /// owned queue it waits on, and so on.
+    static func updateEffectivePriority(_ start: ThreadPointer) {
+        var thread = start
+        for _ in 0..<1024 {
+            let priority = inheritedPriority(thread)
+            let old = thread.pointee.effectivePriority
+            guard priority != old else { return }
+            thread.pointee.effectivePriority = priority
+            switch thread.pointee.state {
+            case .ready:
+                let cpu = thread.pointee.cpu
+                cpus[cpu].queue.remove(thread)
+                cpus[cpu].queue.push(thread)
+                if priority > cpus[cpu].current!.pointee.effectivePriority { requestPreemption(on: cpu) }
+                return
+            case .running:
+                let cpu = thread.pointee.cpu
+                if priority < old, cpus[cpu].queue.topPriority > priority { requestPreemption(on: cpu) }
+                return
+            case .blocked:
+                guard let queue = thread.pointee.waitQueue else { return }
+                queue.pointee.remove(thread)
+                queue.pointee.push(thread)
+                guard let owner = queue.pointee.owner else { return }
+                thread = owner
+            case .dead:
+                return
+            }
+        }
+        panic("sched: priority inheritance chain too long")
+    }
+
+    private static func addOwned(_ queue: QueuePointer, to owner: ThreadPointer) {
+        queue.pointee.owner = owner
+        queue.pointee.nextOwned = owner.pointee.ownedQueues
+        owner.pointee.ownedQueues = queue
+    }
+
+    private static func removeOwned(_ queue: QueuePointer, from owner: ThreadPointer) {
+        var previous: QueuePointer? = nil
+        var cursor = owner.pointee.ownedQueues
+        while let current = cursor {
+            if current == queue {
+                if let previous {
+                    previous.pointee.nextOwned = current.pointee.nextOwned
+                } else {
+                    owner.pointee.ownedQueues = current.pointee.nextOwned
+                }
+                break
+            }
+            previous = current
+            cursor = current.pointee.nextOwned
+        }
+        queue.pointee.owner = nil
+        queue.pointee.nextOwned = nil
+    }
+
+    /// Whether `queue`'s owner chain (owner, what it waits on, its owner,
+    /// ...) reaches `thread`: blocking there would be a deadlock.
+    static func ownerChainReaches(_ queue: QueuePointer, _ thread: ThreadPointer) -> Bool {
+        var cursor = queue.pointee.owner
+        for _ in 0..<1024 {
+            guard let owner = cursor else { return false }
+            if owner == thread { return true }
+            guard owner.pointee.state == .blocked, let next = owner.pointee.waitQueue else { return false }
+            cursor = next.pointee.owner
+        }
+        return true
+    }
+
+    // MARK: Mutex
+
+    static func lockMutex(_ queue: QueuePointer) {
+        locked {
+            let me = cpus[Int(Cpu.current)].current!
+            guard let owner = queue.pointee.owner else {
+                addOwned(queue, to: me)
+                return
+            }
+            if owner == me { panic("mutex: recursive lock") }
+            if ownerChainReaches(queue, me) { panic("mutex: deadlock") }
+            // Unlock hands the mutex over, so one wakeup means we own it.
+            _ = block(on: queue, deadline: .max)
+            guard queue.pointee.owner == me else { panic("mutex: woken without ownership") }
+        }
+    }
+
+    static func unlockMutex(_ queue: QueuePointer) {
+        locked {
+            let me = cpus[Int(Cpu.current)].current!
+            guard queue.pointee.owner == me else { panic("mutex: unlocked by a thread that doesn't hold it") }
+            removeOwned(queue, from: me)
+            if let next = queue.pointee.pop() {
+                next.pointee.waitQueue = nil
+                addOwned(queue, to: next)
+                updateEffectivePriority(next)  // it inherits the remaining waiters
+                makeReady(next)
+            }
+            updateEffectivePriority(me)  // drop what we inherited through it
+        }
+    }
+
+    static func effectivePriority(of thread: ThreadPointer) -> Int {
+        locked { thread.pointee.effectivePriority }
+    }
+
     // MARK: Switching (lock held, interrupts masked)
 
     /// Queues a ready thread on the CPU chosen for it, and makes that CPU
@@ -324,9 +459,10 @@ enum Scheduler {
         thread.pointee.cpu = cpu
         cpus[cpu].queue.push(thread)
         let me = Int(Cpu.current)
-        if cpus[cpu].current == cpus[cpu].idle {
+        let running = cpus[cpu].current!.pointee.effectivePriority
+        if cpus[cpu].current == cpus[cpu].idle || thread.pointee.effectivePriority > running {
             if cpu == me { requestPreemption() } else { Ipi.requestReschedule(cpu) }
-        } else if cpus[cpu].sliceTimer == 0 {
+        } else if thread.pointee.effectivePriority == running, cpus[cpu].sliceTimer == 0 {
             // Its thread has used up a slice already: preempt it. Here, in
             // thread context nothing would act on a request, so start a
             // fresh slice instead.
@@ -335,23 +471,33 @@ enum Scheduler {
     }
 
     /// Where a ready thread should run: its last CPU if that is idle, else
-    /// an idle CPU it may use, else the least loaded one.
+    /// an idle CPU it may use, else one running something of lower
+    /// priority (the lowest), else the least loaded one.
     private static func place(_ thread: ThreadPointer) -> Int {
         let affinity = thread.pointee.affinity
         let last = thread.pointee.cpu
+        let priority = thread.pointee.effectivePriority
         var best = -1
         var bestLoad = Int.max
+        var preemptible = -1
+        var preemptiblePriority = priority
         for step in 0..<Smp.count {
             let cpu = (last + step) % Smp.count
             guard cpus[cpu].ready, affinity & (1 << UInt64(cpu)) != 0 else { continue }
             let busy = cpus[cpu].current != cpus[cpu].idle ? 1 : 0
             let load = cpus[cpu].queue.count + busy
             if load == 0 { return cpu }
+            let running = cpus[cpu].current!.pointee.effectivePriority
+            if running < preemptiblePriority, cpus[cpu].queue.topPriority < priority {
+                preemptible = cpu
+                preemptiblePriority = running
+            }
             if load < bestLoad {
                 best = cpu
                 bestLoad = load
             }
         }
+        if preemptible >= 0 { return preemptible }
         guard best >= 0 else { panic("sched: no CPU a thread may run on") }
         return best
     }
@@ -417,28 +563,43 @@ enum Scheduler {
 
     // MARK: Preemption
 
+    /// Asks `cpu` to reschedule: this one at its next preemption point,
+    /// another by IPI.
+    private static func requestPreemption(on cpu: Int) {
+        if cpu == Int(Cpu.current) { requestPreemption() } else { Ipi.requestReschedule(cpu) }
+    }
+
     /// Asks this CPU to reschedule when the current interrupt returns.
     /// Interrupts masked (IPI and timer handlers).
     static func requestPreemption() {
         _ = preemptPending.bitwiseOr(1 << UInt64(Cpu.current), ordering: .relaxed)
     }
 
-    /// Called as an interrupt returns: switches threads if asked to and
-    /// another thread is waiting for this CPU.
+    /// Called as an interrupt returns (and at `locked`'s exit): switches
+    /// threads if asked to and a thread that should preempt is waiting.
     static func preemptIfRequested() {
         guard started.load(ordering: .acquiring) else { return }
         let me = Int(Cpu.current)
         guard preemptPending.load(ordering: .relaxed) & (1 << UInt64(me)) != 0 else { return }
         lock.lockMasked()
-        if cpus[me].ready, !cpus[me].queue.isEmpty {
+        // Loop: the thread switched to may raise a new request in
+        // `finishSwitch` (a wakeup onto this CPU).
+        while preemptPending.load(ordering: .relaxed) & (1 << UInt64(me)) != 0 {
+            let running = cpus[me].current?.pointee.effectivePriority ?? -1
+            let waiting = cpus[me].queue.topPriority
+            // A higher priority waiting, or an equal one once the slice is used up.
+            guard cpus[me].ready, !cpus[me].queue.isEmpty,
+                  cpus[me].current == cpus[me].idle || waiting > running
+                    || (waiting == running && cpus[me].sliceTimer == 0) else {
+                _ = preemptPending.bitwiseAnd(~(1 << UInt64(me)), ordering: .relaxed)
+                break
+            }
             let current = cpus[me].current!
             if !current.pointee.isIdle {
                 current.pointee.state = .ready
                 cpus[me].queue.push(current)
             }
             switchAway()
-        } else {
-            _ = preemptPending.bitwiseAnd(~(1 << UInt64(me)), ordering: .relaxed)
         }
         lock.unlockMasked()
     }
@@ -446,20 +607,40 @@ enum Scheduler {
     // MARK: Records
 
     private static func makeRecord(name: StaticString, stack: StackRange, ownsStack: Bool, entry: Thread.Entry?,
-                                   argument: UInt64, isIdle: Bool, affinity: UInt64, cpu: Int) -> ThreadPointer {
+                                   argument: UInt64, isIdle: Bool, priority: Int, affinity: UInt64,
+                                   cpu: Int) -> ThreadPointer {
         guard let raw = unsafe heap.allocate(size: MemoryLayout<Thread>.size,
                                              alignment: max(16, MemoryLayout<Thread>.alignment)) else {
             panic("sched: out of memory for a thread")
         }
         unsafe raw.bindMemory(to: Thread.self, capacity: 1).initialize(
             to: Thread(name: name, stack: stack, ownsStack: ownsStack, entry: entry, argument: argument,
-                       isIdle: isIdle, affinity: affinity, cpu: cpu))
+                       isIdle: isIdle, priority: priority, affinity: affinity, cpu: cpu))
         threadCount.add(1, ordering: .relaxed)
-        return ThreadPointer(address: UInt64(UInt(bitPattern: raw)))
+        let thread = ThreadPointer(address: UInt64(UInt(bitPattern: raw)))
+        locked {
+            thread.pointee.allNext = allThreads
+            allThreads = thread
+        }
+        return thread
     }
 
     /// Frees a thread that is dead and off its stack.
     private static func free(_ thread: ThreadPointer) {
+        locked {
+            if allThreads == thread {
+                allThreads = thread.pointee.allNext
+            } else {
+                var cursor = allThreads
+                while let current = cursor {
+                    if current.pointee.allNext == thread {
+                        current.pointee.allNext = thread.pointee.allNext
+                        break
+                    }
+                    cursor = current.pointee.allNext
+                }
+            }
+        }
         if thread.pointee.ownsStack {
             do throws(VmError) {
                 try kernelAspace.free(thread.pointee.stack.base)
@@ -486,7 +667,76 @@ enum Scheduler {
         }
     }
 
-    // MARK: Statistics
+    // MARK: Statistics and debugging
+
+    /// Prints every CPU's and thread's scheduling state. For lockups: it
+    /// takes the lock without waiting forever, and reads other CPUs' state
+    /// as it finds it.
+    static func dump(to out: some TextOutput) {
+        var tries = 0
+        while !lock.tryLockMasked() {
+            tries += 1
+            if tries > 10_000_000 {
+                out.write("sched dump: lock held by cpu+1 = ")
+                out.write(decimal: UInt64(lock.holderForDebugging))
+                out.write(", reading anyway\n")
+                break
+            }
+        }
+        let pending = preemptPending.load(ordering: .relaxed)
+        for cpu in 0..<Smp.count {
+            out.write("cpu ")
+            out.write(decimal: UInt64(cpu))
+            out.write(": current ")
+            out.write(hex: cpus[cpu].current?.address ?? 0)
+            out.write(cpus[cpu].current == cpus[cpu].idle ? " (idle)" : "")
+            out.write(", queued ")
+            out.write(decimal: UInt64(cpus[cpu].queue.count))
+            out.write(", slice ")
+            out.write(decimal: UInt64(cpus[cpu].sliceTimer))
+            out.write(pending & (1 << UInt64(cpu)) != 0 ? ", preempt pending" : "")
+            out.write(", switches ")
+            out.write(decimal: cpus[cpu].switches)
+            out.write(", ipi mailbox ")
+            out.write(hex: UInt64(unsafe UnsafePointer<PerCpu>(bitPattern: UInt(Smp.records[cpu]))!.pointee.ipiPending.load(ordering: .relaxed)))
+            out.write("\n")
+        }
+        var cursor = allThreads
+        while let thread = cursor {
+            out.write("thread ")
+            out.write(hex: thread.address)
+            out.write(" ")
+            out.write(thread.pointee.name)
+            switch thread.pointee.state {
+            case .ready: out.write(" ready")
+            case .running: out.write(" running")
+            case .blocked: out.write(" blocked")
+            case .dead: out.write(" dead")
+            }
+            out.write(" cpu ")
+            out.write(decimal: UInt64(thread.pointee.cpu))
+            out.write(" prio ")
+            out.write(decimal: UInt64(thread.pointee.effectivePriority + 1))
+            out.write("-1 queue ")
+            out.write(hex: thread.pointee.waitQueue?.address ?? 0)
+            out.write(" timer ")
+            out.write(decimal: UInt64(thread.pointee.timeoutTimer))
+            out.write("@")
+            out.write(decimal: UInt64(thread.pointee.timeoutCpu))
+            out.write(" deadline ")
+            out.write(decimal: thread.pointee.timeoutDeadline)
+            out.write(" gen ")
+            out.write(decimal: thread.pointee.waitGeneration)
+            out.write(" switchedOut ")
+            out.write(thread.pointee.switchedOut ? "y" : "n")
+            out.write("\n")
+            cursor = thread.pointee.allNext
+        }
+        out.write("now ")
+        out.write(decimal: Clock.now())
+        out.write("\n")
+        if lock.isHeldByCurrentCpu { lock.unlockMasked() }
+    }
 
     /// CPUs that have an idle thread and take threads.
     static var readyCpuCount: Int {

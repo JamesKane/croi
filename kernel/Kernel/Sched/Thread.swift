@@ -20,6 +20,12 @@ struct Thread: ~Copyable {
     let entry: Entry?
     let argument: UInt64
     let isIdle: Bool
+    /// Priority, 0...31 (Zircon's range; 16 is the default). The effective
+    /// priority adds what it inherits from waiters on the owned wait queues
+    /// it holds (`ownedQueues`), transitively. Idle threads are -1.
+    var basePriority: Int
+    var effectivePriority: Int
+    var ownedQueues: QueuePointer?
     /// CPUs it may run on, one bit each.
     var affinity: UInt64
     /// The CPU it last ran or is queued on.
@@ -43,12 +49,19 @@ struct Thread: ~Copyable {
     /// Dead and switched off its stack: safe to free.
     var switchedOut = false
     var detached = false
+    /// Link in the list of every thread (`Scheduler.dump`).
+    var allNext: ThreadPointer?
     /// CPUs it has run on, one bit each (tests, observability).
     var cpusSeen: UInt64 = 0
     var switchesIn: UInt64 = 0
 
+    static var defaultPriority: Int { 16 }
+    static var maxPriority: Int { 31 }
+
     init(name: StaticString, stack: StackRange, ownsStack: Bool, entry: Entry?, argument: UInt64,
-         isIdle: Bool, affinity: UInt64, cpu: Int) {
+         isIdle: Bool, priority: Int, affinity: UInt64, cpu: Int) {
+        self.basePriority = isIdle ? -1 : priority
+        self.effectivePriority = isIdle ? -1 : priority
         self.name = name
         self.stack = stack
         self.ownsStack = ownsStack
@@ -71,19 +84,42 @@ struct Thread: ~Copyable {
     }
 }
 
-/// An intrusive FIFO of threads, linked through `Thread.next`. Scheduler
-/// lock.
+/// An intrusive queue of threads, linked through `Thread.next`, highest
+/// effective priority first and FIFO among equals. Scheduler lock.
+///
+/// A queue with an `owner` is an owned wait queue (Zircon's
+/// OwnedWaitQueue): its waiters lend their priority to the owner, and on
+/// through whatever the owner is blocked on.
 struct QueueHead {
     private(set) var head: ThreadPointer?
     private var tail: ThreadPointer?
     private(set) var count = 0
+    var owner: ThreadPointer?
+    /// Link in the owner's `ownedQueues`.
+    var nextOwned: QueuePointer?
 
     var isEmpty: Bool { head == nil }
 
+    /// The highest effective priority waiting, or -1.
+    var topPriority: Int { head?.pointee.effectivePriority ?? -1 }
+
     mutating func push(_ thread: ThreadPointer) {
         thread.pointee.next = nil
-        if let tail { tail.pointee.next = thread } else { head = thread }
-        tail = thread
+        let priority = thread.pointee.effectivePriority
+        guard let first = head, first.pointee.effectivePriority >= priority else {
+            thread.pointee.next = head
+            head = thread
+            if tail == nil { tail = thread }
+            count += 1
+            return
+        }
+        var after = first
+        while let next = after.pointee.next, next.pointee.effectivePriority >= priority {
+            after = next
+        }
+        thread.pointee.next = after.pointee.next
+        after.pointee.next = thread
+        if tail == after { tail = thread }
         count += 1
     }
 
@@ -168,4 +204,35 @@ func kernel_thread_main(_ thread: UInt64) -> Never {
     let thread = ThreadPointer(address: thread)
     let code = thread.pointee.entry!(thread.pointee.argument)
     Scheduler.exit(code)
+}
+
+/// A kernel mutex with priority inheritance (Zircon's kernel Mutex): a
+/// blocking lock whose waiters lend their priority to the holder. Unlock
+/// hands the lock straight to the highest-priority waiter, so nothing can
+/// barge in ahead of it. Recursion and deadlock cycles panic. Not for
+/// interrupt context.
+struct Mutex: ~Copyable {
+    let queue = QueuePointer.allocate()
+
+    init() {}
+
+    func lock() { Scheduler.lockMutex(queue) }
+    func unlock() { Scheduler.unlockMutex(queue) }
+
+    func withLock<R>(_ body: () -> R) -> R {
+        lock()
+        defer { unlock() }
+        return body()
+    }
+
+    /// The holder, if any (racy unless the caller is it).
+    var owner: ThreadPointer? { Scheduler.locked { queue.pointee.owner } }
+    var waiters: Int { Scheduler.locked { queue.pointee.count } }
+
+    deinit {
+        Scheduler.locked {
+            guard queue.pointee.owner == nil, queue.pointee.isEmpty else { panic("mutex: destroyed while held") }
+        }
+        queue.deallocate()
+    }
 }

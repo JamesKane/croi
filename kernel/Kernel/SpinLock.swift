@@ -93,6 +93,13 @@ struct SpinLock: ~Copyable {
         }
     }
 
+    /// One attempt at `lockMasked`.
+    func tryLockMasked() -> Bool {
+        holder.compareExchange(expected: 0, desired: Cpu.current + 1, ordering: .acquiring).exchanged
+    }
+
+    var holderForDebugging: UInt32 { holder.load(ordering: .relaxed) }
+
     func unlockMasked() {
         guard holder.load(ordering: .relaxed) == Cpu.current + 1 else {
             panic("spinlock: released by a CPU that doesn't hold it")

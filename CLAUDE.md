@@ -220,7 +220,21 @@ thread. Preemption: a timeslice (10 ms), or a wakeup onto an idle CPU,
 sets a per-CPU request that is acted on when an interrupt returns.
 Interrupt frames don't restore the per-CPU register (rv64 `tp` is skipped),
 because a preempted thread can resume on another CPU. Policy is
-round-robin for now; fair + EDF on scheduling contexts is K3c.
+priority (0...31, default 16) with round-robin among equals; fair + EDF on
+scheduling contexts replaces it in K3c, keeping the inheritance machinery.
+Run and wait queues are priority ordered (`QueueHead`). Leaving `locked`
+with interrupts on is a preemption point. A wakeup aimed at the local
+CPU only sets a request bit, so the idle loop and `preemptIfRequested`
+recheck after every switch (`finishSwitch` can make a thread ready here).
+
+Priority inheritance (K3b): a `QueueHead` with an `owner` is an owned wait
+queue. Its waiters lend their effective priority to the owner and on down
+the chain (`updateEffectivePriority`). `Mutex` (Thread.swift) is the
+kernel's blocking lock on one: unlock hands it to the highest-priority
+waiter, and recursion or a deadlock cycle panics (K7's futex will refuse
+the owner instead, as Zircon does). A thread may not exit holding one.
+`Scheduler.dump` prints every CPU and thread (all are on `allThreads`);
+the boot self-tests arm a 20 s deadman that calls it.
 
 Bring-up aids (K2 follow-ups from the board review in docs/roadmap.md):
 - Console: the loader takes SPCR, then DBG2 (CIX Sky1 has no SPCR), then

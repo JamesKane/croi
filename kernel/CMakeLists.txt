@@ -24,6 +24,7 @@ add_library(kernel-swift OBJECT
   Kernel/Sched/Thread.swift
   Kernel/Sched/Scheduler.swift
   Kernel/Sched/SchedulerSelfTest.swift
+  Kernel/Sched/MutexSelfTest.swift
   Kernel/SpinLock.swift
   Kernel/Uart.swift
   Kernel/Vm/ArchAspace.swift

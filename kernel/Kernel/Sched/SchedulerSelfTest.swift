@@ -9,6 +9,9 @@ enum SchedulerSelfTest {
     static let cpusUsed = Atomic<UInt64>(0)
     static let started = Atomic<Bool>(false)
     static let flag = Atomic<Bool>(false)
+    /// Workers wait for this, so all are runnable at once and placement
+    /// (not spawn speed) decides where they go.
+    static let go = Atomic<Bool>(false)
     static var iterations: Int { 2000 }
     nonisolated(unsafe) static var queue = QueuePointer(address: 0)
     /// Whose turn it is in the ping-pong (scheduler lock).
@@ -32,6 +35,7 @@ enum SchedulerSelfTest {
         for i in 0..<workers {
             handles.append(spawn("worker", nil, worker, UInt64(i)))
         }
+        go.store(true, ordering: .releasing)
         var index = workers - 1
         while let handle = handles.popLast() {
             guard handle.join() == index * 3 else { panic("sched self-test: wrong exit code") }
@@ -102,6 +106,7 @@ enum SchedulerSelfTest {
 
     private static let worker: Thread.Entry = { index in
         guard index < 1000 else { return 0 }
+        while !go.load(ordering: .acquiring) { arch_spin_pause() }  // runnable, not blocked
         for i in 0..<iterations {
             lock.withLock {
                 counter.store(counter.load(ordering: .relaxed) + 1, ordering: .relaxed)
@@ -138,5 +143,29 @@ enum SchedulerSelfTest {
     private static let setFlag: Thread.Entry = { _ in
         flag.store(true, ordering: .releasing)
         return 0
+    }
+}
+
+/// Debugging aid for the boot self-tests: if they haven't finished 20 s
+/// after starting, timers on CPU 0 and the last CPU dump the scheduler
+/// state to the panic console (a hang otherwise shows only idle CPUs).
+enum SelfTestDeadman {
+    static let done = Atomic<Bool>(false)
+
+    static func arm() {
+        Ipi.call(onCpu: 0, armHere, 0)
+        Ipi.call(onCpu: Smp.count - 1, armHere, 0)
+    }
+
+    private static let armHere: Ipi.Function = { _ in
+        Timers.arm(deadline: Clock.now() + 20_000_000_000, fire, 0)
+    }
+
+    private static let fire: Timers.Callback = { _, _ in
+        guard !done.load(ordering: .relaxed), let console = panicConsole else { return }
+        console.write("\nself-tests stuck; scheduler state from cpu ")
+        console.write(decimal: UInt64(Cpu.current))
+        console.write(":\n")
+        Scheduler.dump(to: console)
     }
 }

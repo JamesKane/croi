@@ -104,8 +104,9 @@ shootdown, interrupts on in idle. ITS and AIA (APLIC/IMSIC) setup moves to the d
 ### K3: Threads and scheduling (requirements 4, 5)
 Progress: **K3a done**: threads, context switch, per-CPU run queues,
 blocking with timeouts, wakeup placement, timeslice and wakeup
-preemption, join/detach/reaping. Next: K3b (owned wait queues with
-priority inheritance, kernel mutex), K3c (scheduling contexts, fair + EDF,
+preemption, join/detach/reaping. **K3b done**: priorities, owned wait
+queues with transitive priority inheritance, kernel `Mutex` with handoff
+by priority, a scheduler state dump. Next: K3c (scheduling contexts, fair + EDF,
 capacity, admission), the trace core for `sched`/`irq`, and K3d
 (extended-state sizing).
 - Threads, context switch and kernel threads. Wait queues, and owned wait
