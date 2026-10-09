@@ -63,6 +63,15 @@ add_test(NAME framebuffer-pixels
           0,0,16,48,96 40,30,240,192,32 100,100,16,48,96)
 set_tests_properties(framebuffer-pixels PROPERTIES FIXTURES_REQUIRED framebuffer)
 
+if(CROI_ARCH STREQUAL amd64)
+  # No TSC-deadline mode: timers fall back to local APIC one-shot mode.
+  add_test(NAME boot-smoke-apic-oneshot
+    COMMAND ${CROI_QEMU} --test "croi kernel: boot complete"
+            ${CROI_ARCH} ${CROI_ESP_DIR} ${CMAKE_BINARY_DIR}/qemu ${CROI_EDK2_DIR}
+            -cpu max,-tsc-deadline)
+  set_tests_properties(boot-smoke-apic-oneshot PROPERTIES TIMEOUT 120)
+endif()
+
 if(CROI_ARCH STREQUAL arm64)
   # Firmware at EL2 with a GICv3: the loader must drop to EL1.
   add_test(NAME boot-smoke-el2

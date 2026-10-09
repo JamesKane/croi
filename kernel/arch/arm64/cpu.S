@@ -173,3 +173,40 @@ arch_interrupts_enable:
     msr     daifclr, #3
     ret
 .size arch_interrupts_enable, . - arch_interrupts_enable
+
+// uint64_t arch_counter_read(void): CNTVCT_EL0, after earlier instructions.
+.globl arch_counter_read
+.type arch_counter_read, %function
+arch_counter_read:
+    isb
+    mrs     x0, cntvct_el0
+    ret
+.size arch_counter_read, . - arch_counter_read
+
+// uint64_t arch_counter_frequency(void)
+.globl arch_counter_frequency
+.type arch_counter_frequency, %function
+arch_counter_frequency:
+    mrs     x0, cntfrq_el0
+    ret
+.size arch_counter_frequency, . - arch_counter_frequency
+
+// void arch_timer_arm(uint64_t deadline): virtual timer, enabled, unmasked.
+.globl arch_timer_arm
+.type arch_timer_arm, %function
+arch_timer_arm:
+    msr     cntv_cval_el0, x0
+    mov     x1, #1                  // ENABLE, IMASK clear
+    msr     cntv_ctl_el0, x1
+    isb
+    ret
+.size arch_timer_arm, . - arch_timer_arm
+
+// void arch_timer_disarm(void)
+.globl arch_timer_disarm
+.type arch_timer_disarm, %function
+arch_timer_disarm:
+    msr     cntv_ctl_el0, xzr
+    isb
+    ret
+.size arch_timer_disarm, . - arch_timer_disarm

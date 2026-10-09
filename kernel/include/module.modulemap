@@ -3,5 +3,6 @@ module CKernel {
   header "stack.h"
   header "smp.h"
   header "irq.h"
+  header "time.h"
   export *
 }

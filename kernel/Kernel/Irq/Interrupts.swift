@@ -69,6 +69,8 @@ enum Interrupts {
             return  // no EOI for spurious interrupts
         case UInt64(LocalApic.ipiVector):
             Ipi.handle()
+        case UInt64(Timers.vector):
+            Timers.handleInterrupt()
         case UInt64(LocalApic.errorVector):
             LocalApic.clearErrors()
         default:
@@ -80,6 +82,8 @@ enum Interrupts {
         guard intid < 1020 else { return }  // spurious
         if intid == GicV3.ipiSgi {
             Ipi.handle()
+        } else if intid == Timers.intid {
+            Timers.handleInterrupt()
         } else {
             unexpected(intid)
         }
@@ -89,6 +93,8 @@ enum Interrupts {
         if code == 1 {  // supervisor software interrupt
             arch_rv_sip_clear(1 << 1)
             Ipi.handle()
+        } else if code == 5 {  // supervisor timer interrupt (set_timer clears it)
+            Timers.handleInterrupt()
         } else {
             unexpected(code)
         }
@@ -116,6 +122,10 @@ enum LocalApic {
     private static var apicBaseMsr: UInt32 { 0x1B }
 
     // Register indices (xAPIC offset / 16; x2APIC MSR - 0x800).
+    static var lvtTimer: UInt32 { 0x32 }
+    static var timerInitial: UInt32 { 0x38 }
+    static var timerCurrent: UInt32 { 0x39 }
+    static var timerDivide: UInt32 { 0x3E }
     private static var tpr: UInt32 { 0x08 }
     private static var eoi: UInt32 { 0x0B }
     private static var svr: UInt32 { 0x0F }
@@ -186,12 +196,19 @@ enum LocalApic {
         return false
     }
 
-    private static func write(_ register: UInt32, _ value: UInt32) {
+    static func write(_ register: UInt32, _ value: UInt32) {
         if x2apic {
             arch_wrmsr(0x800 + register, UInt64(value))
         } else {
             unsafe VolatileMappedRegister<UInt32>(unsafeBitPattern: UInt(mmio + UInt64(register) * 16)).store(value)
         }
+    }
+
+    static func read(_ register: UInt32) -> UInt32 {
+        if x2apic {
+            return UInt32(truncatingIfNeeded: arch_rdmsr(0x800 + register))
+        }
+        return unsafe VolatileMappedRegister<UInt32>(unsafeBitPattern: UInt(mmio + UInt64(register) * 16)).load()
     }
 }
 
@@ -309,6 +326,12 @@ enum GicV3 {
             arch_spin_pause()
         }
         arch_gicv3_cpu_init()
+    }
+
+    /// Unmasks private interrupt (SGI/PPI) `intid` on this CPU.
+    static func enablePrivate(_ intid: UInt64) {
+        guard intid < 32, let frame = redistributorFrame() else { return }
+        write32(frame + 0x1_0000 + 0x100, 1 << UInt32(intid))  // ISENABLER0
     }
 
     /// Sends SGI `intid` to the CPU with MPIDR affinity `target` (as in

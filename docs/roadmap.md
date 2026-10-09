@@ -53,11 +53,12 @@ with K2's ACPI work), and a text console on the framebuffer (needs a font).
   and the cache policy change gets harder the more mappings exist.
 
 ### K2: Interrupts, IPIs, clock and timers (requirements 2, 6)
-Progress: **K2a done**: controllers (x2APIC/xAPIC + IOAPIC masked, GICv3,
+Progress: **K2b done**: monotonic clock with a vDSO-ready time page,
+tickless per-CPU timers with deadline + slack coalescing, calibrated
+delays. **K2a done**: controllers (x2APIC/xAPIC + IOAPIC masked, GICv3,
 SBI IPIs with AIA/PLIC discovered), dispatch, IPIs, `Ipi.callOthers`, TLB
-shootdown, interrupts on in idle. Next: **K2b** clock and tickless timers,
-then **K2c** per-CPU TSS/IST and emergency stacks, PPTT topology, RHCT and
-Svpbmt. ITS and AIA (APLIC/IMSIC) setup moves to the drivers phase
+shootdown, interrupts on in idle. Next: **K2c** per-CPU TSS/IST and
+emergency stacks, PPTT topology, RHCT and Svpbmt. ITS and AIA (APLIC/IMSIC) setup moves to the drivers phase
 (requirement 13), when the first MSI-capable device needs them.
 
 - **Controllers.** Pick the MSI-capable controller on each arch now, because

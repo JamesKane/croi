@@ -17,11 +17,14 @@ struct PerCpu: ~Copyable {
     let ipiPending = Atomic<UInt32>(0)
     /// This CPU's interrupt controller is set up: it can take IPIs.
     let interruptsReady = Atomic<Bool>(false)
+    /// This CPU's TimerQueue (heap; only this CPU touches it).
+    let timerQueue: UInt64
 
-    init(number: UInt32, hardwareId: UInt64, stack: StackRange) {
+    init(number: UInt32, hardwareId: UInt64, stack: StackRange, timerQueue: UInt64) {
         self.number = number
         self.hardwareId = hardwareId
         self.stack = stack
+        self.timerQueue = timerQueue
     }
 }
 
@@ -116,8 +119,13 @@ enum Smp {
         guard let raw = unsafe heap.allocate(size: MemoryLayout<PerCpu>.size, alignment: 64) else {
             panic("smp: out of memory for a PerCpu record")
         }
+        guard let queueRaw = unsafe heap.allocate(size: MemoryLayout<TimerQueue>.size, alignment: 16) else {
+            panic("smp: out of memory for a timer queue")
+        }
+        unsafe queueRaw.bindMemory(to: TimerQueue.self, capacity: 1).initialize(to: TimerQueue())
         let record = unsafe raw.bindMemory(to: PerCpu.self, capacity: 1)
-        unsafe record.initialize(to: PerCpu(number: UInt32(count), hardwareId: hardwareId, stack: stack))
+        unsafe record.initialize(to: PerCpu(number: UInt32(count), hardwareId: hardwareId, stack: stack,
+                                            timerQueue: UInt64(UInt(bitPattern: queueRaw))))
         let address = UInt64(UInt(bitPattern: raw))
         records[count] = address
         count += 1
@@ -166,6 +174,7 @@ func kernel_ap_main(_ percpu: UInt64) -> Never {
     unsafe record.pointee.checkedIn.store(results, ordering: .releasing)
 
     Interrupts.initializeThisCpu()
+    Timers.initializeThisCpu()
     unsafe record.pointee.interruptsReady.store(true, ordering: .releasing)
     arch_idle()
 }
@@ -259,10 +268,10 @@ enum X86ApStartup {
 
         let vector = trampoline >> 12
         guard sendIpi(apicId, 0x4500) else { return false }                  // INIT, assert
-        delay(10_000_000)
+        Clock.delay(nanoseconds: 10_000_000)                                  // 10 ms
         for _ in 0..<2 {
             guard sendIpi(apicId, 0x4600 | vector) else { return false }     // STARTUP
-            delay(200_000)
+            Clock.delay(nanoseconds: 200_000)                                 // 200 us
         }
         // Wait here, while the bootstrap tables still exist.
         let percpu = unsafe blockPointer.pointee.percpu
@@ -277,13 +286,6 @@ enum X86ApStartup {
 
     private static func sendIpi(_ apicId: UInt64, _ command: UInt64) -> Bool {
         LocalApic.sendCommand(apicId: apicId, command)
-    }
-
-    /// A crude busy wait. Real hardware needs calibrated delays (timer TBD).
-    private static func delay(_ spins: Int) {
-        for _ in 0..<spins {
-            arch_spin_pause()
-        }
     }
 }
 

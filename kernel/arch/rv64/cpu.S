@@ -127,3 +127,12 @@ arch_interrupts_enable:
     csrsi   sstatus, 0x2
     ret
 .size arch_interrupts_enable, . - arch_interrupts_enable
+
+// uint64_t arch_counter_read(void): the time CSR.
+.globl arch_counter_read
+.type arch_counter_read, %function
+arch_counter_read:
+    fence   iorw, iorw
+    rdtime  a0
+    ret
+.size arch_counter_read, . - arch_counter_read

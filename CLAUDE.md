@@ -180,6 +180,22 @@ still answers the shootdown from the holder. Secondaries idle in
 The boot test checks sync calls and that a remapped page is seen by every
 CPU (verified to fail without remote flushes).
 
+Time (`Kernel/Time/`, K2b): `Clock` gives monotonic ns from the arch
+counter (amd64 TSC calibrated by CPUID 0x15 or the HPET; arm64 CNTVCT_EL0
+at CNTFRQ_EL0; rv64 `time` at the RHCT timebase). Its parameters live in
+a `croi_time_page_t` (include/time.h, a PMM page) that K6 maps into user
+space for the vDSO: ns = ((counter - base) * mult) >> 32, 128-bit product.
+`Clock.delay` is the calibrated busy wait (INIT/SIPI use it). `Timers`:
+tickless per-CPU one-shot timers, `arm(deadline:slack:callback, arg)` /
+`cancel`, run on the arming CPU in interrupt context. Hardware is armed
+for the earliest deadline+slack; when it fires every due timer runs, so
+overlapping windows coalesce and zero slack is exact. amd64 TSC-deadline
+(LAPIC one-shot fallback, tested with `-cpu max,-tsc-deadline`), arm64
+virtual timer (GTDT PPI), rv64 SBI set_timer. The queue is a fixed array
+per CPU for now; K3's thread timers will need an intrusive structure.
+`lib/rt/int128.c` supplies `__udivti3`/`__umodti3`, which
+`dividingFullWidth` needs (there is no compiler-rt).
+
 Exceptions: `arch/<arch>/exceptions.S` saves an `arch_exception_frame_t`
 (kernel.h) and calls Swift `arch_exception` (Kernel/Exceptions.swift);
 the handler may edit the frame to resume elsewhere. Installed at the top

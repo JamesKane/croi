@@ -172,6 +172,8 @@ func kernel_main_continue() -> Never {
     if let acpi = AcpiTables(rsdp: bootHandoff.acpi_rsdp) {
         // Interrupt controllers before anyone else starts.
         guard Interrupts.initializeBootCpu(acpi) else { panic("no usable interrupt controller") }
+        guard Clock.initialize(acpi) else { panic("no usable clock") }  // interrupts still masked
+        Timers.initialize(acpi)
         unsafe UnsafePointer<PerCpu>(bitPattern: UInt(Smp.records[0]))!.pointee.interruptsReady
             .store(true, ordering: .releasing)
         arch_interrupts_enable()
@@ -195,6 +197,7 @@ func kernel_main_continue() -> Never {
         console.write(decimal: UInt64(online * SmpSelfTest.iterations))
         console.write(" contended lock increments, none lost\n")
         ipiSelfTest(expecting: online - 1, console)
+        timeSelfTest(others: online - 1, console)
     } else {
         console.write("  cpus:   no ACPI tables; boot cpu only\n")
     }
@@ -602,4 +605,72 @@ private func ipiSelfTest(expecting others: Int, _ console: Uart) {
     console.write("  ipi:    sync calls reach ")
     console.write(decimal: UInt64(others))
     console.write(" CPUs; remapped page seen everywhere after shootdown\n")
+}
+
+/// Results reported by timer callbacks (C function pointers: no captures).
+private enum TimerProbe {
+    nonisolated(unsafe) static var firedAt = InlineArray<3, UInt64>(repeating: 0)
+    nonisolated(unsafe) static var firedInInterrupt = InlineArray<3, UInt64>(repeating: 0)
+    static let cpusFired = Atomic<Int>(0)
+
+    static let record: Timers.Callback = { probe in
+        firedAt[Int(probe)] = Clock.now()
+        firedInInterrupt[Int(probe)] = Timers.interruptCount
+    }
+    static let countCpu: Timers.Callback = { _ in
+        cpusFired.add(1, ordering: .relaxed)
+    }
+    static let armOnThisCpu: Ipi.Function = { _ in
+        Timers.arm(deadline: Clock.now() + 3_000_000, countCpu, 0)
+    }
+}
+
+/// The clock never goes backwards; timers fire no earlier than their
+/// deadline, overlapping windows coalesce into one interrupt, cancelled
+/// timers don't fire, and every CPU's timer hardware works.
+private func timeSelfTest(others: Int, _ console: Uart) {
+    var last = Clock.now()
+    for _ in 0..<10_000 {
+        let now = Clock.now()
+        guard now >= last else { panic("clock self-test: went backwards") }
+        last = now
+    }
+
+    let ms: UInt64 = 1_000_000
+    let start = Clock.now()
+    // A may fire anywhere in [2 ms, 12 ms], B exactly at 5 ms: one interrupt.
+    guard Timers.arm(deadline: start + 2 * ms, slack: 10 * ms, TimerProbe.record, 0) != nil,
+          Timers.arm(deadline: start + 5 * ms, TimerProbe.record, 1) != nil,
+          let cancelled = Timers.arm(deadline: start + 20 * ms, TimerProbe.record, 2),
+          Timers.cancel(cancelled)
+    else { panic("timer self-test: arm/cancel") }
+
+    while Clock.now() < start + 40 * ms {
+        arch_spin_pause()
+    }
+    let a = TimerProbe.firedAt[0], b = TimerProbe.firedAt[1]
+    guard a >= start + 2 * ms, b >= start + 5 * ms else { panic("timer self-test: early or missing") }
+    guard TimerProbe.firedInInterrupt[0] == TimerProbe.firedInInterrupt[1] else {
+        panic("timer self-test: overlapping windows did not coalesce")
+    }
+    guard TimerProbe.firedAt[2] == 0 else { panic("timer self-test: cancelled timer fired") }
+
+    Ipi.callOthers(TimerProbe.armOnThisCpu, 0)
+    let deadline = Clock.now() + 1_000 * ms
+    while TimerProbe.cpusFired.load(ordering: .relaxed) < others, Clock.now() < deadline {
+        arch_spin_pause()
+    }
+    guard TimerProbe.cpusFired.load(ordering: .relaxed) == others else {
+        panic("timer self-test: a CPU's timer never fired")
+    }
+
+    console.write("  time:   ")
+    console.write(decimal: Clock.frequency / 1_000_000)
+    console.write(" MHz counter (")
+    console.write(Clock.source)
+    console.write("); timers coalesce, exact one ")
+    console.write(decimal: (b - (start + 5 * ms)) / 1000)
+    console.write(" us late; ")
+    console.write(decimal: UInt64(others))
+    console.write(" other CPUs' timers fire\n")
 }

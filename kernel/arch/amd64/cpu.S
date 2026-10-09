@@ -153,3 +153,14 @@ arch_cpuid:
     pop     %rbx
     ret
 .size arch_cpuid, . - arch_cpuid
+
+// uint64_t arch_counter_read(void): TSC, not reordered with earlier loads.
+.globl arch_counter_read
+.type arch_counter_read, @function
+arch_counter_read:
+    lfence
+    rdtsc
+    shl     $32, %rdx
+    or      %rdx, %rax
+    ret
+.size arch_counter_read, . - arch_counter_read
