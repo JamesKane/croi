@@ -1051,6 +1051,10 @@ enum Scheduler {
         if let hook = context.pointee.overrunHook {
             hook(context.pointee.overrunArgument, context.pointee.overruns)
         }
+        if context.pointee.overrunSource != 0 {
+            PacketSourcePointer(address: context.pointee.overrunSource)
+                .fire(value: context.pointee.overruns, schedulerLocked: true)
+        }
     }
 
     private static func advanceMinVruntime(_ cpu: Int, _ running: ThreadPointer) {

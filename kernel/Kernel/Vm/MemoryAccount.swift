@@ -19,6 +19,8 @@ struct MemoryAccountRecord: ~Copyable {
     var pressureHook: Timers.Callback?
     var hookArgument: UInt64 = 0
     var pressureEvents = 0
+    /// Ext 6: a port reporting pressure (a PacketSource), or 0.
+    var pressureSource: UInt64 = 0
     let references = Atomic<Int>(1)
 }
 
@@ -35,6 +37,7 @@ struct MemoryAccountRecord: ~Copyable {
     func release() {
         guard pointee.references.subtract(1, ordering: .acquiringAndReleasing).newValue == 0 else { return }
         guard pointee.charged == 0 else { panic("account: freed with memory charged") }
+        if pointee.pressureSource != 0 { PacketSourcePointer(address: pointee.pressureSource).retire() }
         let raw = unsafe UnsafeMutablePointer<MemoryAccountRecord>(bitPattern: UInt(address))!
         unsafe raw.deinitialize(count: 1)
         unsafe heap.free(UnsafeMutableRawPointer(raw))
@@ -43,7 +46,7 @@ struct MemoryAccountRecord: ~Copyable {
     /// Charges `bytes`; false (nothing charged) if it would exceed the limit.
     func charge(_ bytes: UInt64) -> Bool {
         var hook: Timers.Callback? = nil
-        var argument: UInt64 = 0, now: UInt64 = 0
+        var argument: UInt64 = 0, now: UInt64 = 0, source: UInt64 = 0
         let ok = pointee.lock.withLock { () -> Bool in
             guard pointee.charged + bytes <= pointee.limit else { return false }
             pointee.charged += bytes
@@ -53,10 +56,12 @@ struct MemoryAccountRecord: ~Copyable {
                 pointee.pressureEvents += 1
                 hook = pointee.pressureHook
                 argument = pointee.hookArgument
+                source = pointee.pressureSource
             }
             return true
         }
         if let hook { hook(argument, now) }  // outside the lock
+        if source != 0 { PacketSourcePointer(address: source).fire(value: now) }
         return ok
     }
 
@@ -89,6 +94,18 @@ struct MemoryAccount: ~Copyable {
 
     var charged: UInt64 { record.pointee.lock.withLock { record.pointee.charged } }
     var pressureEvents: Int { record.pointee.lock.withLock { record.pointee.pressureEvents } }
+
+    /// Ext 6: reports pressure to `port` (memoryPressure packets with `key`,
+    /// payload[1] the bytes charged).
+    func bindPressurePort(_ port: borrowing ObjectRef, key: UInt64) throws(Status) {
+        let source = try PacketSourcePointer.make(port: port, key: key, type: PortPacket.memoryPressure)
+        let old = record.pointee.lock.withLock { () -> UInt64 in
+            let old = record.pointee.pressureSource
+            record.pointee.pressureSource = source.address
+            return old
+        }
+        if old != 0 { PacketSourcePointer(address: old).retire() }
+    }
 
     func setPressureHook(_ hook: Timers.Callback?, _ argument: UInt64) {
         record.pointee.lock.withLock {

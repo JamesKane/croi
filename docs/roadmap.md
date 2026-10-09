@@ -201,6 +201,15 @@ other mapping. K4 is complete apart from page loaning and phase B
   (phase B) follow; the pager comes after M2.
 
 ### K5: Kernel objects (requirement 8)
+Progress: **K5 done**: objects with koids, signals and observers; handle
+tables with rights and generations; events; object_wait_one/many and
+async waits; ports with user packets, cancel, and kernel packet sources
+for budget overruns (ext 3) and memory pressure (ext 6); VMO and resource
+objects; trace_configure gated by the tracing resource, rings handed out
+as read-only VMOs (the trace plan's K5 step). Not yet: the counter
+waitable at a value (item 15) and the display timeline (ext 1), which
+the observer design leaves room for (per-observer triggers), and
+interrupt/timer packets (with those objects).
 - Handles (`~Copyable` in Swift), rights, koids, dispatchers (built on
   `Ref<T>`), signals and observers, and `object_wait_one/many/async`.
 - **Ports** carry packets for IRQs, timers, signals and ext 3 overrun

@@ -18,6 +18,15 @@ add_library(kernel-swift OBJECT
   Kernel/Pmm.swift
   Kernel/Ref.swift
   Kernel/Smp.swift
+  Kernel/Object/Status.swift
+  Kernel/Object/KernelObject.swift
+  Kernel/Object/Wait.swift
+  Kernel/Object/HandleTable.swift
+  Kernel/Object/Port.swift
+  Kernel/Object/VmoObject.swift
+  Kernel/Object/ObjectSelfTest.swift
+  Kernel/Object/PortSelfTest.swift
+  Kernel/Object/ResourceSelfTest.swift
   Kernel/Time/Clock.swift
   Kernel/Time/Timers.swift
   Kernel/Time/Watchdog.swift

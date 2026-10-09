@@ -192,6 +192,8 @@ struct SchedContextRecord {
     /// until ports exist to carry the ext 3 packet.
     var overrunHook: Timers.Callback?
     var overrunArgument: UInt64 = 0
+    /// Ext 3: a port reporting overruns (a PacketSource), or 0.
+    var overrunSource: UInt64 = 0
     var next: SchedContextPointer?
 }
 
@@ -230,6 +232,18 @@ struct SchedContext: ~Copyable {
         Scheduler.locked { record.pointee.intent = intent }
     }
 
+    /// Ext 3: reports overruns to `port` (budgetOverrun packets with `key`;
+    /// the count says how many since the last one was read).
+    func bindOverrunPort(_ port: borrowing ObjectRef, key: UInt64) throws(Status) {
+        let source = try PacketSourcePointer.make(port: port, key: key, type: PortPacket.budgetOverrun)
+        let old = Scheduler.locked { () -> UInt64 in
+            let old = record.pointee.overrunSource
+            record.pointee.overrunSource = source.address
+            return old
+        }
+        if old != 0 { PacketSourcePointer(address: old).retire() }
+    }
+
     func setOverrunHook(_ hook: Timers.Callback?, _ argument: UInt64) {
         Scheduler.locked {
             record.pointee.overrunHook = hook
@@ -238,7 +252,9 @@ struct SchedContext: ~Copyable {
     }
 
     deinit {
+        let source = record.pointee.overrunSource
         Scheduler.destroyContext(record)
+        if source != 0 { PacketSourcePointer(address: source).retire() }
     }
 }
 

@@ -192,6 +192,36 @@ User address spaces and VMOs (K4a, Kernel/Vm/):
 - Lock order: aspace -> vmo -> account -> heap -> pmm (and vm for the
   kernel aspace).
 
+Kernel objects (K5, Kernel/Object/; Zircon's status codes, rights,
+signals and object types, so the ABI matches):
+- Every object record starts with an `ObjectHeader` (type, koid from 1024,
+  signals, observers, lock, atomic refcount); `ObjectPointer` reaches it,
+  `Objects.destroy` frees by type. Not `Ref<T>`: objects mutate under
+  their own lock, like VMOs and aspaces. `ObjectRef` (~Copyable) is a
+  reference held by kernel code; handles hold one each.
+- `HandleTable` (per process from K7): slots of (object, rights); a value
+  is slot + 8-bit generation + Zircon's fixed low bits, so stale handles
+  fail. get (bad handle, wrong type, access denied, in that order),
+  duplicate/replace (rights subset or sameRights), close (cancels waits
+  through the handle). `HandleTable.withBorrowed` for threads sharing one.
+- Waiting: observers on an object's list; `updateSignals` runs them under
+  the object lock. `ObjectWait.one/many` (deadlines, canceled on close;
+  WaitState on the heap so no trigger outlives it). Ports (`PortObject`):
+  FIFO of `PortPacket` (zx_port_packet_t layout), `Ports.queue/wait/
+  cancel`; `Observers.waitAsync` is one-shot with EDGE and TIMESTAMP,
+  its packet allocated at registration. Lock order: object -> scheduler
+  -> port packets (object locks may be held while taking the scheduler
+  lock; nothing takes them under it).
+- `PacketSource`: kernel events reporting to a port with one owned,
+  coalescing packet (count): budget overruns (ext 3,
+  `SchedContext.bindOverrunPort`, fired under the scheduler lock) and
+  memory pressure (ext 6, `MemoryAccount.bindPressurePort`).
+- `VmoObject` (default rights as ZX_DEFAULT_VMO_RIGHTS; `forMapping`
+  needs map plus read/write/execute per access). `ResourceObject`: root
+  (made at boot) mints system resources; the tracing one (base 6, as
+  Zircon) gates `TraceControl` (start, stop, rewind, mark, rings as
+  read/map-only VMO handles).
+
 ACPI (`Kernel/Acpi/`, after Zircon's acpi_lite): `AcpiTables` validates
 RSDP/XSDT and finds tables by signature; `withPhysicalBytes` reads through
 the physmap or a temporary mapping. `Madt.forEachCpu` yields local APIC /

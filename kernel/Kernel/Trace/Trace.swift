@@ -129,6 +129,23 @@ enum Trace {
 
     static var categories: UInt32 { croi_trace_categories() }
 
+    /// Stops and empties every ring (keeping its memory).
+    static func rewind() {
+        stop()
+        for cpu in 0..<Smp.count {
+            guard let ring = unsafe ring(cpu) else { continue }
+            unsafe ring.pointee.head = 0
+            unsafe ring.pointee.drops = 0
+            unsafe ring.pointee.first_drop = 0
+            unsafe ring.pointee.last_drop = 0
+        }
+    }
+
+    /// A CPU's ring VMO (for handing out), if rings exist.
+    static func ringVmo(_ cpu: Int) -> VmoPointer? {
+        ringVmos[cpu] == 0 ? nil : VmoPointer(address: ringVmos[cpu])
+    }
+
     /// A CPU's ring header (stop first for a stable view).
     static func header(_ cpu: Int) -> croi_trace_ring_t? {
         unsafe ring(cpu)?.pointee

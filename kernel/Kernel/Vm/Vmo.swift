@@ -338,6 +338,16 @@ struct Vmo: ~Copyable {
         return unsafe UnsafePointer<UInt64>(bitPattern: UInt(address))!.pointee
     }
 
+    /// A handle over a VMO someone else holds a reference to (no reference
+    /// of its own): `keep()` it when done, never drop it.
+    static func borrowing(_ record: VmoPointer) -> Vmo {
+        Vmo(borrowed: record)
+    }
+
+    private init(borrowed record: VmoPointer) {
+        self.record = record
+    }
+
     /// Gives up the handle without releasing the VMO: for kernel-held
     /// objects whose owner keeps the pointer (release it later).
     @export(interface)
