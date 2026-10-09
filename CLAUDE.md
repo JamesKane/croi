@@ -243,8 +243,21 @@ thread's stack top.
   only RAM a physical VMO may cover, never writable). User counter
   access per CPU (`arch_user_counter_enable`: arm64 CNTKCTL_EL1.EL0VCTEN,
   rv64 scounteren.TM). User binaries come from `croi_user_binary`
-  (cmake/CroiUser.cmake) with `CROI_USER_CFLAGS` (cmake/arch: general
-  registers only until K6d).
+  (cmake/CroiUser.cmake) with `CROI_USER_CFLAGS` (cmake/arch).
+- K6d: user FP/SIMD. Every user thread gets an ExtendedState area at
+  `UserTraps.enter`; `Scheduler` saves the outgoing and restores the
+  incoming thread's state at each switch (`arch_xstate_save/restore`,
+  arch cpu.S; kernel threads have none, and the kernel never uses FP, so
+  traps and syscalls don't save it). `croi_xstate_config` picks the
+  format: amd64 XSAVE with XCR0 = the shared features less PKRU (the
+  scheduler switches it) and AMX tiles; arm64 Neon, or SVE Z/P/FFR at the
+  boot vector length; rv64 F/D, plus V at vlenb (sstatus FS/VS on for
+  user threads). Not yet: lazy AMX via XFD, SME/streaming mode (trapped),
+  per-thread SVE vector length. User code is built for the baseline ISA
+  with FP/SIMD (`CROI_USER_CFLAGS`: x86-64, Armv8, rv64gc; SVE, V and
+  AVX are run-time options); amd64 `_start` realigns its stack.
+- User threads killed by a fault or exception are logged (cause and PC)
+  until K7's exception channels report them.
 - The boot test runs `usertest.S` (per arch) from a VMO: registers kept
   across syscalls, a message, a fault and a privileged instruction killed,
   preemption of user code; it reports the null syscall time (KVM: ~40 ns).

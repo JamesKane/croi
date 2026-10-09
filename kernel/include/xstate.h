@@ -6,6 +6,18 @@
 
 #include <stdint.h>
 
+// User threads' extended state (K6d): enabled on each CPU, then saved and
+// restored around context switches by threads with an area. `area` is
+// ExtendedState.eagerSize bytes, 64-byte aligned.
+void arch_xstate_enable(void);
+void arch_xstate_save(void *_Nonnull area);
+void arch_xstate_restore(const void *_Nonnull area);
+
+// What arch_xstate_* use, set by ExtendedState before enabling:
+// amd64: the XCR0 feature mask (0: FXSAVE only); arm64: SVE vector length
+// in bytes (0: FP/SIMD only); rv64: vlenb (0: no V; F/D always).
+extern uint64_t croi_xstate_config;
+
 #if defined(__aarch64__)
 enum : uint32_t {
   CROI_ID_AA64PFR0 = 0,

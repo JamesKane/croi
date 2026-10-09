@@ -141,7 +141,7 @@ arch_enter_user:
     csrw    sepc, a0
     li      t0, (1 << 8) | (1 << 18)    // SPP, SUM
     csrc    sstatus, t0
-    li      t0, (1 << 5)                // SPIE
+    li      t0, (1 << 5) | (1 << 13) | (1 << 9)  // SPIE; FS and VS Initial
     csrs    sstatus, t0
     mv      sp, a1
     mv      a0, a2

@@ -21,6 +21,7 @@ add_library(kernel-swift OBJECT
   Kernel/User/Syscalls.swift
   Kernel/User/Vdso.swift
   Kernel/User/VdsoSelfTest.swift
+  Kernel/User/FpSelfTest.swift
   Kernel/User/UserSelfTest.swift
   Kernel/User/SyscallSelfTest.swift
   Kernel/Object/Status.swift

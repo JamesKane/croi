@@ -3,8 +3,8 @@ set(CROI_SWIFT_TRIPLE aarch64-none-none-elf)
 set(CROI_CLANG_TRIPLE aarch64-unknown-none-elf)
 # No FP/SIMD register use in the kernel.
 set(CROI_ARCH_CFLAGS -mgeneral-regs-only)
-# User mode (K6c split): general registers only until K6d.
-set(CROI_USER_CFLAGS -mgeneral-regs-only)
+# User mode (K6c split): Armv8 with FP/SIMD (saved since K6d).
+set(CROI_USER_CFLAGS)
 set(CROI_EFI_BOOT_NAME BOOTAA64.EFI)
 # Link address of the kernel image (a PIE; the loader may relocate it).
 set(CROI_KERNEL_BASE 0xffffffff80000000)

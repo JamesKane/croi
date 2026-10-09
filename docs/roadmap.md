@@ -231,8 +231,11 @@ waits, events, ports, VMOs, trace_configure with user marks); the
 ~13 ns vs 62 under KVM) with the time, topology and power pages (ext 9),
 seqlocked and read only; user counter access; the kernel/user build
 split (`croi_user_binary`, `CROI_USER_CFLAGS`). The vblank page (ext 1)
-joins the same mechanism with the display driver. Next: K6d (user
-FP/SIMD), K6e (sampling and PMU).
+joins the same mechanism with the display driver. **K6d done**: user
+FP/SIMD state switched with threads (XSAVE, Neon/SVE, F/D/RVV), user code
+built for the baseline ISA with FP/SIMD. Deferred: lazy AMX through XFD and SME streaming
+mode (neither available under QEMU TCG; both stay disabled/trapped), and
+per-thread SVE vector lengths. Next: K6e (sampling and PMU).
 - Syscall entry/exit per arch, user-copy with fault recovery, and SMAP, PAN
   and SUM discipline.
 - **vDSO** plus the shared read-only pages: clock, topology and power

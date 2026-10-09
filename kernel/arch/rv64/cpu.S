@@ -292,3 +292,93 @@ arch_user_counter_enable:
     csrsi   scounteren, 2
     ret
 .size arch_user_counter_enable, . - arch_user_counter_enable
+
+// --- User extended state (xstate.h) ---------------------------------------
+// Layout: f0-f31, fcsr (264 bytes); with V (vlenb bytes per register):
+// v0-v31, then vstart, vl, vtype, vcsr (8 bytes each). The kernel turns FS
+// and VS on to save and restore; user threads run with them on.
+
+.option push
+.option arch, +d, +v
+
+#define SSTATUS_FS_DIRTY (3 << 13)
+#define SSTATUS_VS_DIRTY (3 << 9)
+
+// void arch_xstate_enable(void): nothing per hart beyond FS/VS, which
+// save/restore and user entry set.
+.globl arch_xstate_enable
+.type arch_xstate_enable, %function
+arch_xstate_enable:
+    ret
+.size arch_xstate_enable, . - arch_xstate_enable
+
+// void arch_xstate_save(void *area)
+.globl arch_xstate_save
+.type arch_xstate_save, %function
+arch_xstate_save:
+    li      t0, SSTATUS_FS_DIRTY | SSTATUS_VS_DIRTY
+    csrs    sstatus, t0
+    .irp n, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31
+    fsd     f\n, (\n * 8)(a0)
+    .endr
+    frcsr   t1
+    sd      t1, 256(a0)
+    la      t2, croi_xstate_config
+    ld      t2, 0(t2)                       // vlenb, or 0
+    beqz    t2, 1f
+    csrr    t3, vstart
+    csrr    t4, vl
+    csrr    t5, vtype
+    csrr    t6, vcsr
+    addi    a1, a0, 264
+    vs8r.v  v0, (a1)
+    slli    t0, t2, 3
+    add     a1, a1, t0
+    vs8r.v  v8, (a1)
+    add     a1, a1, t0
+    vs8r.v  v16, (a1)
+    add     a1, a1, t0
+    vs8r.v  v24, (a1)
+    add     a1, a1, t0
+    sd      t3, 0(a1)
+    sd      t4, 8(a1)
+    sd      t5, 16(a1)
+    sd      t6, 24(a1)
+1:  ret
+.size arch_xstate_save, . - arch_xstate_save
+
+// void arch_xstate_restore(const void *area)
+.globl arch_xstate_restore
+.type arch_xstate_restore, %function
+arch_xstate_restore:
+    li      t0, SSTATUS_FS_DIRTY | SSTATUS_VS_DIRTY
+    csrs    sstatus, t0
+    .irp n, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31
+    fld     f\n, (\n * 8)(a0)
+    .endr
+    ld      t1, 256(a0)
+    fscsr   t1
+    la      t2, croi_xstate_config
+    ld      t2, 0(t2)
+    beqz    t2, 1f
+    addi    a1, a0, 264
+    slli    t0, t2, 3
+    vl8re8.v v0, (a1)
+    add     a1, a1, t0
+    vl8re8.v v8, (a1)
+    add     a1, a1, t0
+    vl8re8.v v16, (a1)
+    add     a1, a1, t0
+    vl8re8.v v24, (a1)
+    add     a1, a1, t0
+    ld      t4, 8(a1)                       // vl
+    ld      t5, 16(a1)                      // vtype
+    vsetvl  zero, t4, t5
+    ld      t3, 0(a1)
+    csrw    vstart, t3
+    ld      t6, 24(a1)
+    csrw    vcsr, t6
+1:  ret
+.size arch_xstate_restore, . - arch_xstate_restore
+
+.option pop

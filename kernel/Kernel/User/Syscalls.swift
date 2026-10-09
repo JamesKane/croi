@@ -28,16 +28,49 @@ enum UserTraps {
                                                    protectionKey: fault.protectionKey)
             _ = arch_interrupts_save()
             if resolved { return }
+            unsafe killed("page fault", frame.pointee)
             Scheduler.exit(killedByFault)
         }
+        unsafe killed("exception", frame.pointee)
         Scheduler.exit(killedByException)
+    }
+
+    /// Logs why a user thread dies (until K7's exception channels report it).
+    private static func killed(_ what: StaticString, _ f: arch_exception_frame_t) {
+        guard let console = panicConsole else { return }
+        console.write("  user:   thread killed by ")
+        console.write(what)
+        #if arch(x86_64)
+        console.write(", vector ")
+        console.write(decimal: f.vector)
+        console.write(" at ")
+        console.write(hex: f.rip)
+        #elseif arch(arm64)
+        console.write(", ESR ")
+        console.write(hex: f.esr)
+        console.write(" at ")
+        console.write(hex: f.elr)
+        #elseif arch(riscv64)
+        console.write(", scause ")
+        console.write(decimal: f.scause)
+        console.write(" at ")
+        console.write(hex: f.sepc)
+        #endif
+        console.write("\n")
     }
 
     /// Starts the calling thread in user mode in `aspace`, its syscalls
     /// using the handle table at `handles` (0: none). Never returns.
     static func enter(_ aspace: UserAspacePointer, handles: UInt64 = 0, pc: UInt64, sp: UInt64, arg0: UInt64,
                       arg1: UInt64) -> Never {
-        Scheduler.current.pointee.handleTable = handles
+        let thread = Scheduler.current
+        thread.pointee.handleTable = handles
+        // Every user thread has FP/SIMD state (K6d), loaded before it runs.
+        if thread.pointee.extendedState == 0 { thread.pointee.extendedState = ExtendedState.allocate() }
+        if thread.pointee.extendedState != 0 {
+            _ = arch_interrupts_save()  // no switch between loading and entering
+            unsafe arch_xstate_restore(UnsafeRawPointer(bitPattern: UInt(thread.pointee.extendedState))!)
+        }
         Scheduler.setAspace(aspace)
         let top = Scheduler.current.pointee.stack.top
         Scheduler.setKernelStack(top)

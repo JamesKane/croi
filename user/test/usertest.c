@@ -148,6 +148,102 @@ static int64_t vdso(uint64_t base) {
   return 0x600D;
 }
 
+// Mode 3: FP/SIMD state survives switches. `arg` bits 0-15: a seed;
+// bit 16: the vector extension is present (arm64 SVE, rv64 V). Loads seed-derived values into vector/FP
+// registers, then 16 times spins (preemptible) and sleeps 300 us (so the
+// other thread on this CPU runs in between, whatever the timeslice), and
+// checks them, all in one asm block; then a double-precision
+// computation across sleeps whose result the kernel compares between runs.
+// Exit: 0x10000000 | hash of the result, or 0x200 + register number.
+static int64_t registers(uint64_t seed, uint64_t sve) {
+  uint64_t bad = 0;
+#if defined(__x86_64__)
+  __asm__ volatile(
+      "mov %[s], %%rax\n"
+      ".irp n, 8, 9, 10, 11, 12, 13, 14, 15\n movq %%rax, %%xmm\\n\n add $1, %%rax\n .endr\n"
+      "mov $16, %%r12\n"
+      "1: mov $50000, %%rcx\n"
+      "2: dec %%rcx\n jnz 2b\n"
+      "mov $3, %%eax\n syscall\n"  // clock, then sleep until 300 us on
+      "lea 300000(%%rax), %%rdi\n mov $4, %%eax\n syscall\n"
+      "dec %%r12\n jnz 1b\n"
+      "mov %[s], %%rdx\n xor %[bad], %[bad]\n"
+      ".irp n, 8, 9, 10, 11, 12, 13, 14, 15\n movq %%xmm\\n, %%rax\n cmp %%rdx, %%rax\n je 3f\n mov $\\n, %[bad]\n 3: add $1, %%rdx\n .endr\n"
+      : [bad] "=&r"(bad)
+      : [s] "r"(seed)
+      : "rax", "rcx", "rdx", "rdi", "r11", "r12", "memory", "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14",
+        "xmm15");
+  (void)sve;
+#elif defined(__aarch64__)
+  uint64_t lanes = 0, last = 0;
+  __asm__ volatile(
+      "mov x9, %[s]\n"
+      ".irp n, 8, 9, 10, 11, 12, 13, 14, 15\n fmov d\\n, x9\n add x9, x9, #1\n .endr\n"
+      "cbz %[sve], 4f\n"
+      ".arch_extension sve\n"
+      "index z16.d, %[s], #1\n"  // every lane: seed + its number
+      "4: mov x10, #16\n"
+      "1: movz x11, #50000\n"
+      "2: subs x11, x11, #1\n b.ne 2b\n"
+      "mov x16, #3\n svc #0\n"
+      "movz x11, #0x93e0\n movk x11, #0x4, lsl #16\n add x0, x0, x11\n"  // + 300000
+      "mov x16, #4\n svc #0\n"
+      "subs x10, x10, #1\n b.ne 1b\n"
+      "mov x9, %[s]\n mov %[bad], #0\n"
+      ".irp n, 8, 9, 10, 11, 12, 13, 14, 15\n fmov x12, d\\n\n cmp x12, x9\n b.eq 3f\n mov %[bad], #\\n\n 3: add x9, x9, #1\n .endr\n"
+      "cbz %[sve], 5f\n"
+      "cntd %[lanes]\n ptrue p1.d\n lastb %[last], p1, z16.d\n"
+      "5:\n"
+      : [bad] "=&r"(bad), [lanes] "=&r"(lanes), [last] "=&r"(last)
+      : [s] "r"(seed), [sve] "r"(sve)
+      : "x0", "x9", "x10", "x11", "x12", "x16", "p1", "z16", "memory", "d8", "d9", "d10", "d11", "d12", "d13",
+        "d14", "d15");
+  if (sve && last != seed + lanes - 1) bad = 16;  // the top lane of z16 was lost
+#elif defined(__riscv)
+  uint64_t last = 0;
+  __asm__ volatile(
+      "mv t1, %[s]\n"
+      ".irp n, 8, 9, 10, 11, 12, 13, 14, 15\n fmv.d.x f\\n, t1\n addi t1, t1, 1\n .endr\n"
+      ".option push\n .option arch, +v\n"
+      "beqz %[sve], 4f\n"
+      "vsetvli t2, zero, e64, m1, ta, ma\n vid.v v8\n vadd.vx v8, v8, %[s]\n"
+      "4: li t3, 16\n"
+      "1: li t4, 50000\n"
+      "2: addi t4, t4, -1\n bnez t4, 2b\n"
+      "li a7, 3\n ecall\n"
+      "li t4, 300000\n add a0, a0, t4\n li a7, 4\n ecall\n"
+      "addi t3, t3, -1\n bnez t3, 1b\n"
+      "mv t1, %[s]\n li %[bad], 0\n"
+      ".irp n, 8, 9, 10, 11, 12, 13, 14, 15\n fmv.x.d t5, f\\n\n beq t5, t1, 3f\n li %[bad], \\n\n 3: addi t1, t1, 1\n .endr\n"
+      "beqz %[sve], 5f\n"
+      "vsetvli t2, zero, e64, m1, ta, ma\n addi t2, t2, -1\n vslidedown.vx v9, v8, t2\n vmv.x.s %[last], v9\n"
+      "add t2, t2, %[s]\n beq %[last], t2, 5f\n li %[bad], 16\n"
+      "5:\n .option pop\n"
+      : [bad] "=&r"(bad), [last] "=&r"(last)
+      : [s] "r"(seed), [sve] "r"(sve)
+      : "t1", "t2", "t3", "t4", "t5", "a0", "a7", "v8", "v9", "memory", "f8", "f9", "f10", "f11", "f12", "f13",
+        "f14", "f15");
+#endif
+  if (bad) return 0x200 + (int64_t)bad;
+
+  double acc = (double)seed;
+  for (int i = 0; i < 200000; i++) {
+    acc = acc * 1.0000001 + 0.5;
+    if (i % 20000 == 0) sys(CROI_SYS_NANOSLEEP, 0, 0, 0, 0, 0);
+  }
+  uint64_t bits;
+  __builtin_memcpy(&bits, &acc, sizeof bits);
+  return 0x10000000 | (int64_t)((bits ^ bits >> 32) & 0x0FFFFFFF);
+}
+
+// Entered straight from the kernel, not called: on amd64 the stack is
+// 16-byte aligned rather than 8 off, so realign (SSE spills need it).
+#if defined(__x86_64__)
+__attribute__((force_align_arg_pointer))
+#endif
 __attribute__((section(".text.start"))) [[noreturn]] void _start(uint64_t mode, uint64_t handle) {
-  exit_with(mode == 1 ? marks((uint32_t)handle) : mode == 2 ? vdso(handle) : objects());
+  exit_with(mode == 1   ? marks((uint32_t)handle)
+            : mode == 2 ? vdso(handle)
+            : mode == 3 ? registers(handle & 0xFFFF, handle >> 16 & 1)
+                        : objects());
 }

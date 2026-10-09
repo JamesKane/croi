@@ -3,8 +3,8 @@ import Fmt
 import Synchronization
 
 /// Boot self-test for K3d: the sizes are sane for what was found, every
-/// CPU measures the same again, and areas are allocated, aligned, zeroed
-/// and freed with their thread (kernel threads get none). Runs before the
+/// CPU measures the same again, and areas are allocated, aligned, in their
+/// initial state and freed with their thread (kernel threads get none). Runs before the
 /// scheduler starts; the thread part runs in `threads()` afterwards.
 enum ExtendedStateSelfTest {
     static let sawArea = Atomic<Int>(0)
@@ -58,7 +58,12 @@ enum ExtendedStateSelfTest {
         guard ExtendedState.eagerSize > 0 else { return area == 0 ? 0 : 1 }
         guard area != 0, area % UInt64(ExtendedState.alignment) == 0 else { return 1 }
         let bytes = unsafe UnsafePointer<UInt8>(bitPattern: UInt(area))!
-        for i in 0..<ExtendedState.eagerSize where unsafe bytes[i] != 0 { return 1 }
+        for i in 0..<ExtendedState.eagerSize where unsafe bytes[i] != 0 {
+            #if arch(x86_64)
+            if i < 2 || (i >= 24 && i < 28) { continue }  // FCW and MXCSR start at their reset values
+            #endif
+            return 1
+        }
         return 0
     }
 

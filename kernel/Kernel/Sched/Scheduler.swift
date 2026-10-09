@@ -1035,6 +1035,14 @@ enum Scheduler {
         }
         loadPkru(next.pointee.pkru, me)
         setKernelStack(next.pointee.stack.top)
+        // User FP/SIMD state (K6d): out of the registers for the thread
+        // leaving, in for the one arriving. Nothing in between uses FP.
+        if current.pointee.extendedState != 0 {
+            unsafe arch_xstate_save(UnsafeMutableRawPointer(bitPattern: UInt(current.pointee.extendedState))!)
+        }
+        if next.pointee.extendedState != 0 {
+            unsafe arch_xstate_restore(UnsafeRawPointer(bitPattern: UInt(next.pointee.extendedState))!)
+        }
         unsafe arch_context_switch(UnsafeMutablePointer<UInt64>(bitPattern: UInt(current.address))!,
                                    next.pointee.savedSp)
         finishSwitch()

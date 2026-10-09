@@ -8,3 +8,6 @@ uint32_t croi_trace_mask = 0;
 // accessors in usercopy.S open it (stac/clac, PAN toggles) only then.
 // Read from assembly, so a C global like the trace mask.
 uint8_t croi_user_protection = 0;
+
+// ExtendedState's configuration for the save/restore assembly (xstate.h).
+uint64_t croi_xstate_config = 0;

@@ -274,6 +274,7 @@ func kernel_main_continue() -> Never {
         UserSelfTest.run(console)
         SyscallSelfTest.run(console)
         VdsoSelfTest.run(console)
+        FpSelfTest.run(console)
         SelfTestDeadman.done.store(true, ordering: .relaxed)
     } else {
         console.write("  cpus:   no ACPI tables; boot cpu only\n")

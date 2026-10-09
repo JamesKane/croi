@@ -366,3 +366,61 @@ arch_user_counter_enable:
     mov     %rax, %cr4
     ret
 .size arch_user_counter_enable, . - arch_user_counter_enable
+
+// --- User extended state (xstate.h) ---------------------------------------
+
+// void arch_xstate_enable(void): CR4.OSFXSR, OSXMMEXCPT; with a feature
+// mask, CR4.OSXSAVE and XCR0 = the mask. CR0.EM off, MP on, TS off.
+.globl arch_xstate_enable
+.type arch_xstate_enable, @function
+arch_xstate_enable:
+    mov     %cr0, %rax
+    and     $~((1 << 2) | (1 << 3)), %rax  // EM, TS
+    or      $(1 << 1), %rax                // MP
+    mov     %rax, %cr0
+    mov     %cr4, %rax
+    or      $((1 << 9) | (1 << 10)), %rax  // OSFXSR, OSXMMEXCPT
+    mov     croi_xstate_config(%rip), %rcx
+    test    %rcx, %rcx
+    jz      1f
+    or      $(1 << 18), %rax               // OSXSAVE
+    mov     %rax, %cr4
+    mov     %ecx, %eax
+    shr     $32, %rcx
+    mov     %ecx, %edx
+    xor     %ecx, %ecx                     // XCR0
+    xsetbv
+    ret
+1:  mov     %rax, %cr4
+    ret
+.size arch_xstate_enable, . - arch_xstate_enable
+
+// void arch_xstate_save(void *area)
+.globl arch_xstate_save
+.type arch_xstate_save, @function
+arch_xstate_save:
+    mov     croi_xstate_config(%rip), %rax
+    test    %rax, %rax
+    jz      1f
+    mov     %rax, %rdx
+    shr     $32, %rdx
+    xsave64 (%rdi)
+    ret
+1:  fxsave64 (%rdi)
+    ret
+.size arch_xstate_save, . - arch_xstate_save
+
+// void arch_xstate_restore(const void *area)
+.globl arch_xstate_restore
+.type arch_xstate_restore, @function
+arch_xstate_restore:
+    mov     croi_xstate_config(%rip), %rax
+    test    %rax, %rax
+    jz      1f
+    mov     %rax, %rdx
+    shr     $32, %rdx
+    xrstor64 (%rdi)
+    ret
+1:  fxrstor64 (%rdi)
+    ret
+.size arch_xstate_restore, . - arch_xstate_restore

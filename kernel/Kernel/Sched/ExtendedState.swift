@@ -89,6 +89,23 @@ enum ExtendedState {
         settle(0)
         Ipi.callOthers(settle, 0)
         #endif
+        // K6d: user threads' state is saved and restored at switches.
+        #if arch(x86_64)
+        // XCR0: what all CPUs share, less PKRU (the scheduler switches it)
+        // and AMX tiles (lazy XFD support isn't built yet).
+        let excluded: UInt64 = 1 << 9 | 1 << 17 | 1 << 18
+        croi_xstate_config = shared.xsave ? shared.features & ~excluded : 0
+        #elseif arch(arm64)
+        croi_xstate_config = shared.sveLength
+        #elseif arch(riscv64)
+        croi_xstate_config = shared.vlenb
+        #endif
+        arch_xstate_enable()
+        Ipi.callOthers(enableHere, 0)
+    }
+
+    private static let enableHere: Ipi.Function = { _ in
+        arch_xstate_enable()
     }
 
     #if arch(riscv64)
@@ -196,6 +213,12 @@ enum ExtendedState {
             panic("xstate: out of memory for a thread's register state")
         }
         unsafe raw.initializeMemory(as: UInt8.self, repeating: 0, count: eagerSize)
+        #if arch(x86_64)
+        // The legacy area's control words at their reset values (XRSTOR
+        // takes MXCSR from memory even for an initial SSE state).
+        unsafe raw.storeBytes(of: UInt16(0x37F), toByteOffset: 0, as: UInt16.self)    // FCW
+        unsafe raw.storeBytes(of: UInt32(0x1F80), toByteOffset: 24, as: UInt32.self)  // MXCSR
+        #endif
         liveAreas.add(1, ordering: .relaxed)
         return UInt64(UInt(bitPattern: raw))
     }

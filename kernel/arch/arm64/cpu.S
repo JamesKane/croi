@@ -422,3 +422,110 @@ arch_user_counter_enable:
     isb
     ret
 .size arch_user_counter_enable, . - arch_user_counter_enable
+
+// --- User extended state (xstate.h) ---------------------------------------
+// Layout: without SVE, q0-q31 then FPSR, FPCR. With SVE (VL bytes): z0-z31
+// (32 x VL), p0-p15 and FFR (17 x VL/8), then FPSR, FPCR. The Neon
+// registers are the low 128 bits of the Z registers.
+
+.arch_extension sve
+
+// void arch_xstate_enable(void): CPACR_EL1.FPEN (and ZEN with SVE): no
+// traps at EL0 or EL1. SME stays trapped (not supported yet).
+.globl arch_xstate_enable
+.type arch_xstate_enable, %function
+arch_xstate_enable:
+    mrs     x0, cpacr_el1
+    orr     x0, x0, #(3 << 20)              // FPEN
+    adrp    x1, croi_xstate_config
+    ldr     x1, [x1, :lo12:croi_xstate_config]
+    cbz     x1, 1f
+    orr     x0, x0, #(3 << 16)              // ZEN
+1:  msr     cpacr_el1, x0
+    isb
+    ret
+.size arch_xstate_enable, . - arch_xstate_enable
+
+// void arch_xstate_save(void *area)
+.globl arch_xstate_save
+.type arch_xstate_save, %function
+arch_xstate_save:
+    adrp    x1, croi_xstate_config
+    ldr     x1, [x1, :lo12:croi_xstate_config]
+    cbnz    x1, 2f
+    stp     q0, q1, [x0, #0]
+    stp     q2, q3, [x0, #32]
+    stp     q4, q5, [x0, #64]
+    stp     q6, q7, [x0, #96]
+    stp     q8, q9, [x0, #128]
+    stp     q10, q11, [x0, #160]
+    stp     q12, q13, [x0, #192]
+    stp     q14, q15, [x0, #224]
+    stp     q16, q17, [x0, #256]
+    stp     q18, q19, [x0, #288]
+    stp     q20, q21, [x0, #320]
+    stp     q22, q23, [x0, #352]
+    stp     q24, q25, [x0, #384]
+    stp     q26, q27, [x0, #416]
+    stp     q28, q29, [x0, #448]
+    stp     q30, q31, [x0, #480]
+    add     x2, x0, #512
+    b       3f
+2:  .irp n, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31
+    str     z\n, [x0, #\n, mul vl]
+    .endr
+    addvl   x2, x0, #16                     // the predicates, 32 VLs on
+    addvl   x2, x2, #16
+    .irp n, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15
+    str     p\n, [x2, #\n, mul vl]
+    .endr
+    rdffr   p0.b
+    str     p0, [x2, #16, mul vl]
+    addpl   x2, x2, #17
+3:  mrs     x3, fpsr
+    mrs     x4, fpcr
+    stp     x3, x4, [x2]
+    ret
+.size arch_xstate_save, . - arch_xstate_save
+
+// void arch_xstate_restore(const void *area)
+.globl arch_xstate_restore
+.type arch_xstate_restore, %function
+arch_xstate_restore:
+    adrp    x1, croi_xstate_config
+    ldr     x1, [x1, :lo12:croi_xstate_config]
+    cbnz    x1, 2f
+    ldp     q0, q1, [x0, #0]
+    ldp     q2, q3, [x0, #32]
+    ldp     q4, q5, [x0, #64]
+    ldp     q6, q7, [x0, #96]
+    ldp     q8, q9, [x0, #128]
+    ldp     q10, q11, [x0, #160]
+    ldp     q12, q13, [x0, #192]
+    ldp     q14, q15, [x0, #224]
+    ldp     q16, q17, [x0, #256]
+    ldp     q18, q19, [x0, #288]
+    ldp     q20, q21, [x0, #320]
+    ldp     q22, q23, [x0, #352]
+    ldp     q24, q25, [x0, #384]
+    ldp     q26, q27, [x0, #416]
+    ldp     q28, q29, [x0, #448]
+    ldp     q30, q31, [x0, #480]
+    add     x2, x0, #512
+    b       3f
+2:  .irp n, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31
+    ldr     z\n, [x0, #\n, mul vl]
+    .endr
+    addvl   x2, x0, #16
+    addvl   x2, x2, #16
+    ldr     p0, [x2, #16, mul vl]           // FFR first, through p0
+    wrffr   p0.b
+    .irp n, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15
+    ldr     p\n, [x2, #\n, mul vl]
+    .endr
+    addpl   x2, x2, #17
+3:  ldp     x3, x4, [x2]
+    msr     fpsr, x3
+    msr     fpcr, x4
+    ret
+.size arch_xstate_restore, . - arch_xstate_restore
