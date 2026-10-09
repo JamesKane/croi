@@ -46,8 +46,12 @@ use OS-defined memory types 0x80000001 (kernel) / 0x80000002 (handoff and
 page tables) so they show up as CROI_MEM_KERNEL / CROI_MEM_HANDOFF.
 
 Kernel enters on the loader's page tables with the handoff's physical
-address as its argument. Not yet supported: arm64 firmware entering at EL2
-(reported as unsupported), amd64 5-level paging, KASLR.
+address as its argument, at EL1 on arm64: if firmware ran at EL2, the
+trampoline neutralizes EL2 (HCR_EL2 = RW only; timer, PMU and GICv3 sysregs
+handed to EL1) and drops to EL1 after ExitBootServices. Not yet supported:
+amd64 5-level paging, KASLR, CPUs where HCR_EL2.E2H is RES1 (VHE-only).
+EL2 does not yet un-trap pointer authentication (HCR_EL2.API/APK), so the
+kernel must not use PAC until it does.
 - `ld/image.ld` Shared linker script: one PT_LOAD per permission (W^X).
 - `cmake/`    Toolchain file, per-arch settings, `croi_image()` helper.
 

@@ -1,5 +1,10 @@
-// arm64 handoff to the kernel. Assembly because it reprograms the EL1
-// translation regime and jumps into it; see loader.h for the contract.
+// arm64 handoff to the kernel. Assembly because it changes exception level
+// and translation regime; see loader.h for the contract.
+//
+// The kernel runs at EL1. Firmware may run (and so start us) at EL2; croi
+// has no hypervisor, so from EL2 we configure EL2 to stay out of the way
+// and drop to EL1. That can only happen after ExitBootServices, since boot
+// services must be called at the firmware's own exception level.
 //
 // UEFI leaves the MMU on with its own MAIR/TCR. Changing those under a live
 // MMU is unpredictable, so the MMU is turned off (we are identity mapped, so
@@ -19,6 +24,27 @@
 #define SCTLR_I   (1 << 12)
 #define SCTLR_WXN (1 << 19)
 
+// SCTLR_EL1 RES1 bits (ARMv8.0) with everything else off, MMU included.
+#define SCTLR_EL1_MMU_OFF 0x30d00800
+
+// HCR_EL2: EL1 is AArch64 (RW). Everything else clear: no stage 2, no
+// traps, interrupts routed to EL1, E2H/TGE off.
+#define HCR_EL2_RW (1 << 31)
+
+// CNTHCTL_EL2 (E2H = 0 layout): EL1 may use the physical counter and timer.
+#define CNTHCTL_EL1PCTEN (1 << 0)
+#define CNTHCTL_EL1PCEN  (1 << 1)
+
+// CPTR_EL2 (E2H = 0 layout): RES1 bits only, so FP/SIMD/SVE are not trapped.
+#define CPTR_EL2_RES1 0x33ff
+
+// ICC_SRE_EL2: GICv3 system registers enabled, and usable from EL1.
+#define ICC_SRE_EL2_SRE    (1 << 0)
+#define ICC_SRE_EL2_ENABLE (1 << 3)
+
+// SPSR for the drop: EL1h (SP_EL1) with D, A, I and F masked.
+#define SPSR_EL1H_MASKED 0x3c5
+
 .section .text.croi_arch, "ax", %progbits
 
 // void croi_arch_enter_kernel(root=x0, root_high=x1, entry=x2, handoff=x3)
@@ -27,6 +53,73 @@
 croi_arch_enter_kernel:
     msr     daifset, #0xf
 
+    mrs     x9, CurrentEL
+    lsr     x9, x9, #2
+    cmp     x9, #2
+    b.ne    .Lat_el1
+
+    // --- EL2: get out of the way and drop to EL1. ---
+
+    // EL2 MMU off first: rewriting HCR_EL2.E2H under a live EL2&0 regime
+    // is unsafe, and with E2H set the *_EL1 names below would hit EL2.
+    mrs     x9, sctlr_el2
+    bic     x9, x9, #SCTLR_M
+    bic     x9, x9, #SCTLR_C
+    bic     x9, x9, #SCTLR_I
+    bic     x9, x9, #SCTLR_WXN
+    msr     sctlr_el2, x9
+    isb
+
+    mov     x9, #HCR_EL2_RW
+    msr     hcr_el2, x9
+    isb
+
+    mov     x9, #(CNTHCTL_EL1PCTEN | CNTHCTL_EL1PCEN)
+    msr     cnthctl_el2, x9
+    msr     cntvoff_el2, xzr
+    mov     x9, #CPTR_EL2_RES1
+    msr     cptr_el2, x9
+    msr     hstr_el2, xzr
+    msr     vttbr_el2, xzr
+
+    // EL1 reads of MIDR/MPIDR return these; give it the real values.
+    mrs     x9, midr_el1
+    msr     vpidr_el2, x9
+    mrs     x9, mpidr_el1
+    msr     vmpidr_el2, x9
+
+    // Let EL1 use every PMU counter (HPMN = PMCR_EL0.N), if there is a PMU.
+    mov     x10, xzr
+    mrs     x9, id_aa64dfr0_el1
+    ubfx    x9, x9, #8, #4          // PMUVer
+    cbz     x9, 1f
+    cmp     x9, #0xf                // IMPLEMENTATION DEFINED PMU
+    b.eq    1f
+    mrs     x10, pmcr_el0
+    ubfx    x10, x10, #11, #5       // N
+1:  msr     mdcr_el2, x10
+
+    // GICv3 CPU interface: enable system register access from EL1.
+    mrs     x9, id_aa64pfr0_el1
+    ubfx    x9, x9, #24, #4         // GIC
+    cbz     x9, 2f
+    mrs     x9, ICC_SRE_EL2
+    orr     x9, x9, #ICC_SRE_EL2_SRE
+    orr     x9, x9, #ICC_SRE_EL2_ENABLE
+    msr     ICC_SRE_EL2, x9
+    isb
+    msr     ICH_HCR_EL2, xzr
+2:
+    ldr     x9, =SCTLR_EL1_MMU_OFF
+    msr     sctlr_el1, x9
+    mov     x9, #SPSR_EL1H_MASKED
+    msr     spsr_el2, x9
+    adr     x9, .Lat_el1
+    msr     elr_el2, x9
+    isb
+    eret
+
+.Lat_el1:
     // MMU and caches off. WXN must stay clear: the identity map is RWX.
     mrs     x9, sctlr_el1
     bic     x9, x9, #SCTLR_M
@@ -63,14 +156,16 @@ croi_arch_enter_kernel:
     br      x2
 .size croi_arch_enter_kernel, . - croi_arch_enter_kernel
 
-// 2 if the firmware entered us at EL2 (dropping to EL1 is not done yet).
+// The current EL if it is not EL1 or EL2 (EL1 is used directly, EL2 is
+// dropped from in croi_arch_enter_kernel), else 0.
 .globl croi_arch_unsupported
 .type croi_arch_unsupported, %function
 croi_arch_unsupported:
     mrs     x0, CurrentEL
     lsr     x0, x0, #2
-    cmp     x0, #1
-    csel    x0, xzr, x0, eq
+    sub     x1, x0, #1
+    cmp     x1, #1
+    csel    x0, xzr, x0, ls         // EL1 or EL2 -> 0
     ret
 .size croi_arch_unsupported, . - croi_arch_unsupported
 

@@ -34,6 +34,10 @@ func kernel_main(_ handoffAddress: UInt64) -> Never {
     console.write(hex: handoff.kernel_phys)
     console.write(" -> ")
     console.write(hex: handoff.kernel_virt)
+    #if arch(arm64)
+    console.write("\n  EL:     ")
+    console.write(decimal: arch_current_el())
+    #endif
     console.write("\n  ACPI:   RSDP at ")
     console.write(hex: handoff.acpi_rsdp)
     console.write("\n")

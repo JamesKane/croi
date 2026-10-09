@@ -49,3 +49,12 @@ add_test(NAME boot-smoke
   COMMAND ${CROI_QEMU} --test "croi kernel: halting"
           ${CROI_ARCH} ${CROI_ESP_DIR} ${CMAKE_BINARY_DIR}/qemu ${CROI_EDK2_DIR})
 set_tests_properties(boot-smoke PROPERTIES TIMEOUT 120)
+
+if(CROI_ARCH STREQUAL arm64)
+  # Firmware at EL2 with a GICv3: the loader must drop to EL1.
+  add_test(NAME boot-smoke-el2
+    COMMAND ${CROI_QEMU} --test "croi kernel: halting"
+            ${CROI_ARCH} ${CROI_ESP_DIR} ${CMAKE_BINARY_DIR}/qemu-el2 ${CROI_EDK2_DIR}
+            -machine virtualization=on,gic-version=3)
+  set_tests_properties(boot-smoke-el2 PROPERTIES TIMEOUT 120)
+endif()

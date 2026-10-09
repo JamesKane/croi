@@ -16,7 +16,8 @@ EFI_STATUS croi_loader_main(EFI_HANDLE _Nullable image, EFI_SYSTEM_TABLE *_Nonnu
 [[noreturn]] void croi_arch_enter_kernel(uint64_t root, uint64_t root_high, uint64_t entry, uint64_t handoff);
 
 // Nonzero if the CPU state the firmware left is one the loader can't hand
-// off from (e.g. 5-level paging on amd64, EL2 on arm64). Codes are per arch.
+// off from (5-level paging on amd64; EL3 on arm64, where EL2 is dropped
+// from in croi_arch_enter_kernel). Codes are per arch.
 uint64_t croi_arch_unsupported(void);
 
 // Clean and invalidate data cache lines covering [addr, addr+size) to the

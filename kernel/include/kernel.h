@@ -14,6 +14,11 @@
 // Assembly (arch/<arch>/start.S). Masks interrupts and idles the CPU forever.
 [[noreturn]] void arch_halt(void);
 
+#if defined(__aarch64__)
+// Assembly (arch/arm64/start.S). The current exception level.
+uint64_t arch_current_el(void);
+#endif
+
 #if defined(__x86_64__)
 // Assembly (arch/amd64/start.S). Port I/O, which Swift cannot express.
 uint8_t arch_inb(uint16_t port);

@@ -27,3 +27,13 @@ arch_halt:
 boot_stack:
     .skip   16384
 boot_stack_top:
+
+// uint64_t arch_current_el(void)
+.section .text.arch_current_el, "ax", %progbits
+.globl arch_current_el
+.type arch_current_el, %function
+arch_current_el:
+    mrs     x0, CurrentEL
+    lsr     x0, x0, #2
+    ret
+.size arch_current_el, . - arch_current_el
