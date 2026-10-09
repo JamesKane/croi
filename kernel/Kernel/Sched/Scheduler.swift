@@ -8,33 +8,72 @@ struct CpuScheduler {
     var idle: ThreadPointer?
     /// The thread just switched away from, for `finishSwitch`.
     var previous: ThreadPointer?
-    var queue = QueueHead()
+    /// Runnable threads: fair by virtual runtime, deadline by absolute
+    /// deadline, and deadline threads waiting for their next period.
+    var fair = QueueHead()
+    var deadline = QueueHead()
+    var throttled = QueueHead()
     /// Takes threads (its idle thread exists).
     var ready = false
-    /// The running thread's timeslice timer, 0 when none is armed.
+    /// The running thread's slice or budget timer, 0 when none is armed.
     var sliceTimer: UInt32 = 0
+    /// Wakes the CPU when the first throttled thread's period starts.
+    var eligibilityTimer: UInt32 = 0
+    var eligibilityAt: UInt64 = 0
+    /// Never decreases; woken fair threads start near it.
+    var minVruntime: UInt64 = 0
+    /// Processing rate, 1024 = the reference (biggest) core.
+    var capacity: UInt64 = 1024
+    /// Reservation tag (ext 8): 0, or the only tag whose threads run here.
+    var reservation: UInt32 = 0
+    /// Admitted deadline utilization in this CPU's own time.
+    var admitted: UInt64 = 0
+    /// Published for the power service (KP): how long this CPU may take
+    /// to wake without breaking an admitted deadline, and the fraction of
+    /// its capacity admitted work needs (SchedScale.one = all of it).
+    var wakeLatencyBound: UInt64 = .max
+    var frequencyFloor: UInt64 = 0
     var switches: UInt64 = 0
+
+    var hasRunnable: Bool { !fair.isEmpty || !deadline.isEmpty }
+    var queuedCount: Int { fair.count + deadline.count + throttled.count }
 }
 
-/// Kernel threads on per-CPU run queues (roadmap K3a). This first version
-/// is round-robin with a timeslice. Fair and deadline (EDF) scheduling on
-/// separate scheduling contexts replace the policy in K3c; what stays is
-/// the mechanism here: one scheduler lock, switching, blocking with
-/// timeouts, wakeup placement and preemption.
+/// Kernel threads on per-CPU run queues: fair (weighted virtual runtime)
+/// plus deadline (EDF over CBS reservations), Zircon's two disciplines.
+///
+/// Mechanism (K3a): one scheduler lock, switching, blocking with timeouts,
+/// wakeup placement and preemption. Policy (K3c):
+/// - An eligible deadline thread runs before any fair one, earliest
+///   absolute deadline first. Its budget is charged in capacity-scaled
+///   time; when it runs out the thread waits for its next period
+///   (throttled), and the context counts an overrun (ext 3).
+/// - Fair threads run in order of virtual runtime (ns used x 1024 /
+///   weight), each for a slice of the target latency in proportion to its
+///   weight, at least the minimum granularity.
+/// - Deadline reservations are admitted on one CPU, with a reason when
+///   refused (ext 4), and never migrate. CPUs can be reserved for a tag
+///   (ext 8).
+/// - Priority inheritance carries profiles (Zircon's rules).
 ///
 /// Locking: one global lock (Zircon's thread_lock) protects every thread
-/// record, run queue and wait queue. It is taken with interrupts masked
-/// and handed across a context switch: the thread that resumes releases
-/// it (`finishSwitch`). Never hold another spinlock while taking it, and
-/// never send a waiting IPI (`Ipi.call`) while holding it, since the target
-/// may be spinning on it with interrupts masked.
+/// record, run queue, wait queue and context. It is taken with interrupts
+/// masked and handed across a context switch: the thread that resumes
+/// releases it (`finishSwitch`). Never hold another spinlock while taking
+/// it, and never send a waiting IPI (`Ipi.call`) while holding it, since
+/// the target may be spinning on it with interrupts masked.
 ///
-/// Preemption: a request sets this CPU's bit in `preemptPending` (slice
-/// expiry, a wakeup onto an idle CPU, a reschedule IPI). It is acted on
-/// when an interrupt returns, or at the next voluntary switch.
+/// Preemption: a request sets this CPU's bit in `preemptPending` (slice or
+/// budget expiry, a period starting, a wakeup that should run first, a
+/// reschedule IPI). It is acted on when an interrupt returns, or when a
+/// `locked` section ends with interrupts on.
 enum Scheduler {
     static let lock = SpinLock()
-    static var timeslice: UInt64 { 10_000_000 }  // ns
+    static var targetLatency: UInt64 { 16_000_000 }      // ns (Zircon's default)
+    static var minimumGranularity: UInt64 { 750_000 }    // ns
+    /// Admitted deadline utilization per CPU stays below this, leaving
+    /// room for fair threads and interrupts.
+    static var admissionBound: UInt64 { SchedScale.one * 85 / 100 }
 
     nonisolated(unsafe) private static var cpus = InlineArray<64, CpuScheduler>(repeating: CpuScheduler())
     private static let preemptPending = Atomic<UInt64>(0)
@@ -47,13 +86,22 @@ enum Scheduler {
     static let threadCount = Atomic<Int>(0)
     /// Every thread record, linked through `allNext` (scheduler lock).
     nonisolated(unsafe) private static var allThreads: ThreadPointer?
+    /// Every scheduling context, linked through `next`.
+    nonisolated(unsafe) private static var contexts: SchedContextPointer?
 
     // MARK: Bring-up
 
     /// The boot CPU: the code running now becomes the "bootstrap" thread
     /// (it may block, unlike an idle thread), and CPU 0 gets an idle thread.
+    /// Every CPU's capacity starts from its core type.
     static func initializeBootCpu(stack: StackRange) {
         exitWaiters = QueuePointer.allocate()
+        var estimates = InlineArray<64, UInt64>(repeating: 1024)
+        var biggest: UInt64 = 1
+        for cpu in 0..<Smp.count {
+            estimates[cpu] = CoreCapacity.estimate(coreType: CpuTopologies.topology(cpu).coreType)
+            biggest = max(biggest, estimates[cpu])
+        }
         let bootstrap = makeRecord(name: "bootstrap", stack: stack, ownsStack: false, entry: nil, argument: 0,
                                    isIdle: false, priority: Thread.defaultPriority, affinity: allCpus, cpu: 0)
         bootstrap.pointee.state = .running
@@ -66,13 +114,17 @@ enum Scheduler {
             panic("sched: no memory for an idle stack")
         }
         let idle = makeRecord(name: "idle", stack: idleStack, ownsStack: false, entry: idleEntry, argument: 0,
-                              isIdle: true, priority: -1, affinity: 1, cpu: 0)
+                              isIdle: true, priority: 0, affinity: 1, cpu: 0)
         idle.pointee.savedSp = arch_thread_prepare(idleStack.top, idle.address)
         let saved = arch_interrupts_save()
         lock.lockMasked()
+        for cpu in 0..<Smp.count {
+            cpus[cpu].capacity = max(1, estimates[cpu] * SchedScale.capacityOne / biggest)
+        }
         cpus[0].current = bootstrap
         cpus[0].idle = idle
         cpus[0].ready = true
+        bootstrap.pointee.runStart = Clock.now()
         lock.unlockMasked()
         arch_interrupts_restore(saved)
         started.store(true, ordering: .releasing)
@@ -82,7 +134,7 @@ enum Scheduler {
     static func becomeIdle(stack: StackRange) -> Never {
         let me = Int(Cpu.current)
         let idle = makeRecord(name: "idle", stack: stack, ownsStack: false, entry: nil, argument: 0,
-                              isIdle: true, priority: -1, affinity: 1 << UInt64(me), cpu: me)
+                              isIdle: true, priority: 0, affinity: 1 << UInt64(me), cpu: me)
         idle.pointee.state = .running
         _ = arch_interrupts_save()
         lock.lockMasked()
@@ -98,22 +150,25 @@ enum Scheduler {
         idleLoop()
     }
 
-    /// Runs whatever is queued here, frees dead threads, and otherwise
+    /// Runs whatever is runnable here, frees dead threads, and otherwise
     /// waits for an interrupt. Interrupts stay masked except while waiting.
     private static func idleLoop() -> Never {
         let me = Int(Cpu.current)
         while true {
             reapZombies()
             lock.lockMasked()
+            refreshEligibility(me, Clock.now())
             // Loop: coming back here, `finishSwitch` may have just made a
             // thread ready on this CPU (a joiner woken by an exit), with
             // only a local request and no IPI to end the wait below.
-            while !cpus[me].queue.isEmpty {
+            while cpus[me].hasRunnable {
                 switchAway()
+                refreshEligibility(me, Clock.now())
             }
             lock.unlockMasked()
-            // A wakeup aimed here after the check above sends an IPI, which
-            // ends the wait at once.
+            // A wakeup aimed here after the check above sends an IPI, and a
+            // throttled thread's period start has a timer: either ends the
+            // wait.
             arch_wait_for_interrupt()
         }
     }
@@ -123,8 +178,10 @@ enum Scheduler {
     // MARK: Threads
 
     /// Starts a kernel thread running `entry(argument)` on a new stack. With
-    /// `cpu`, it only ever runs there.
+    /// `cpu`, it only ever runs there. With `context`, it runs on that
+    /// scheduling context; otherwise fair at `priority`'s weight.
     static func spawn(_ name: StaticString, cpu: Int? = nil, priority: Int = Thread.defaultPriority,
+                      context: SchedContextPointer? = nil,
                       _ entry: Thread.Entry, _ argument: UInt64) throws(VmError) -> ThreadHandle {
         guard (0...Thread.maxPriority).contains(priority) else { panic("sched: priority out of range") }
         reapZombies()
@@ -137,7 +194,10 @@ enum Scheduler {
         let thread = makeRecord(name: name, stack: stack, ownsStack: true, entry: entry, argument: argument,
                                 isIdle: false, priority: priority, affinity: affinity, cpu: Int(Cpu.current))
         thread.pointee.savedSp = arch_thread_prepare(stack.top, thread.address)
-        locked { makeReady(thread) }
+        locked {
+            if let context { attach(thread, context) }
+            makeReady(thread)
+        }
         return ThreadHandle(thread: thread)
     }
 
@@ -156,20 +216,31 @@ enum Scheduler {
         let thread = cpus[me].current!
         guard !thread.pointee.isIdle else { panic("sched: the idle thread exited") }
         guard thread.pointee.ownedQueues == nil else { panic("sched: a thread exited holding a mutex") }
+        detachContext(thread)
         thread.pointee.exitCode = code
         thread.pointee.state = .dead
         switchAway()
         panic("sched: a dead thread was resumed")
     }
 
-    /// Lets other threads queued on this CPU run first.
+    /// Fair threads: lets others on this CPU run first. Deadline threads:
+    /// ends this period's work, giving up the rest of its budget.
     static func yield() {
         locked {
             let me = Int(Cpu.current)
             let thread = cpus[me].current!
-            guard cpus[me].queue.topPriority >= thread.pointee.effectivePriority else { return }
+            let now = Clock.now()
+            charge(thread, me, now)
+            if thread.pointee.effective.discipline == .deadline {
+                thread.pointee.remaining = 0
+                thread.pointee.budgetYielded = true
+            } else {
+                guard cpus[me].hasRunnable else { return }
+                if let first = cpus[me].fair.head {
+                    thread.pointee.vruntime = max(thread.pointee.vruntime, first.pointee.vruntime)
+                }
+            }
             thread.pointee.state = .ready
-            cpus[me].queue.push(thread)
             switchAway()
         }
     }
@@ -209,7 +280,7 @@ enum Scheduler {
     /// `body` may block (`block`); the lock is held again when it resumes.
     ///
     /// Leaving it is a preemption point when the caller had interrupts on:
-    /// a wakeup or priority change in `body` may have made another thread
+    /// a wakeup or profile change in `body` may have made another thread
     /// on this CPU more deserving.
     static func locked<R>(_ body: () -> R) -> R {
         let preemptible = arch_interrupts_enabled()
@@ -232,8 +303,11 @@ enum Scheduler {
         thread.pointee.state = .blocked
         thread.pointee.waitResult = .woken
         thread.pointee.waitQueue = queue
-        queue?.pointee.push(thread)
-        if let owner = queue?.pointee.owner { updateEffectivePriority(owner) }  // lend it our priority
+        if let queue {
+            thread.pointee.queueKey = thread.pointee.effective.waitKey
+            queue.pointee.push(thread)
+            if let owner = queue.pointee.owner { updateEffectiveProfile(owner) }  // lend it our profile
+        }
         // Waiting again for the same deadline (a condition loop) keeps the
         // timer already armed, and with it the generation it checks.
         if deadline == .max || thread.pointee.timeoutTimer == 0 || thread.pointee.timeoutDeadline != deadline {
@@ -262,7 +336,7 @@ enum Scheduler {
         guard let thread = queue.pointee.pop() else { return false }
         thread.pointee.waitQueue = nil
         makeReady(thread)
-        if let owner = queue.pointee.owner { updateEffectivePriority(owner) }
+        if let owner = queue.pointee.owner { updateEffectiveProfile(owner) }
         return true
     }
 
@@ -281,7 +355,7 @@ enum Scheduler {
             if let queue = thread.pointee.waitQueue {
                 queue.pointee.remove(thread)
                 thread.pointee.waitQueue = nil
-                if let owner = queue.pointee.owner { updateEffectivePriority(owner) }
+                if let owner = queue.pointee.owner { updateEffectiveProfile(owner) }
             }
             thread.pointee.waitResult = .timedOut
             makeReady(thread)
@@ -327,44 +401,56 @@ enum Scheduler {
         Timers.cancel(UInt32(id))
     }
 
-    // MARK: Priority inheritance (lock held)
+    // MARK: Profiles and inheritance (lock held)
 
-    /// A thread's effective priority: its base, or the best waiter on any
-    /// owned wait queue it holds.
-    private static func inheritedPriority(_ thread: ThreadPointer) -> Int {
-        var priority = thread.pointee.basePriority
-        var owned = thread.pointee.ownedQueues
-        while let queue = owned {
-            priority = max(priority, queue.pointee.topPriority)
-            owned = queue.pointee.nextOwned
-        }
-        return priority
+    private static func baseProfile(_ thread: ThreadPointer) -> Profile {
+        thread.pointee.context?.pointee.profile ?? .fair(weight: thread.pointee.baseWeight)
     }
 
-    /// Recomputes `thread`'s effective priority and carries a change along
-    /// the chain: its position in the queue it is on, and the owner of the
+    /// Base profile plus what the waiters on its owned queues lend it.
+    private static func computeEffective(_ thread: ThreadPointer) -> Profile {
+        var inherited = InheritedProfile()
+        var owned = thread.pointee.ownedQueues
+        while let queue = owned {
+            var waiter = queue.pointee.head
+            while let current = waiter {
+                inherited.add(current.pointee.effective)
+                waiter = current.pointee.next
+            }
+            owned = queue.pointee.nextOwned
+        }
+        return inherited.applied(to: baseProfile(thread))
+    }
+
+    /// Recomputes `thread`'s effective profile and carries a change along
+    /// the chain: its place in the queue it is on, and the owner of the
     /// owned queue it waits on, and so on.
-    static func updateEffectivePriority(_ start: ThreadPointer) {
+    static func updateEffectiveProfile(_ start: ThreadPointer) {
         var thread = start
+        let now = Clock.now()
         for _ in 0..<1024 {
-            let priority = inheritedPriority(thread)
-            let old = thread.pointee.effectivePriority
-            guard priority != old else { return }
-            thread.pointee.effectivePriority = priority
+            let profile = computeEffective(thread)
+            let old = thread.pointee.effective
+            guard profile != old else { return }
             switch thread.pointee.state {
             case .ready:
                 let cpu = thread.pointee.cpu
-                cpus[cpu].queue.remove(thread)
-                cpus[cpu].queue.push(thread)
-                if priority > cpus[cpu].current!.pointee.effectivePriority { requestPreemption(on: cpu) }
+                dequeue(thread, cpu)
+                setProfile(thread, profile, now)
+                enqueue(thread, on: cpu, now)
+                requestPreemption(on: cpu)
                 return
             case .running:
-                let cpu = thread.pointee.cpu
-                if priority < old, cpus[cpu].queue.topPriority > priority { requestPreemption(on: cpu) }
+                if thread.pointee.isIdle { return }
+                charge(thread, thread.pointee.cpu, now)
+                setProfile(thread, profile, now)
+                requestPreemption(on: thread.pointee.cpu)  // re-evaluate, re-arm its slice
                 return
             case .blocked:
+                setProfile(thread, profile, now)
                 guard let queue = thread.pointee.waitQueue else { return }
                 queue.pointee.remove(thread)
+                thread.pointee.queueKey = profile.waitKey
                 queue.pointee.push(thread)
                 guard let owner = queue.pointee.owner else { return }
                 thread = owner
@@ -373,6 +459,18 @@ enum Scheduler {
             }
         }
         panic("sched: priority inheritance chain too long")
+    }
+
+    /// Switches a thread to a new effective profile, starting the runtime
+    /// state of a discipline it wasn't using.
+    private static func setProfile(_ thread: ThreadPointer, _ profile: Profile, _ now: UInt64) {
+        let old = thread.pointee.effective
+        thread.pointee.effective = profile
+        if profile.discipline == .deadline, old.discipline != .deadline || old.params != profile.params {
+            startPeriod(thread, now)
+        } else if profile.discipline == .fair, old.discipline != .fair {
+            thread.pointee.vruntime = cpus[thread.pointee.cpu].minVruntime
+        }
     }
 
     private static func addOwned(_ queue: QueuePointer, to owner: ThreadPointer) {
@@ -413,6 +511,20 @@ enum Scheduler {
         return true
     }
 
+    /// The running deadline thread's current period: when it started and
+    /// its absolute deadline (both 0 for a fair thread).
+    static func currentPeriod() -> (start: UInt64, deadline: UInt64) {
+        locked {
+            let thread = cpus[Int(Cpu.current)].current!
+            guard thread.pointee.effective.discipline == .deadline else { return (0, 0) }
+            return (thread.pointee.periodStart, thread.pointee.absoluteDeadline)
+        }
+    }
+
+    static func effectiveProfile(of thread: ThreadPointer) -> Profile {
+        locked { thread.pointee.effective }
+    }
+
     // MARK: Mutex
 
     static func lockMutex(_ queue: QueuePointer) {
@@ -438,81 +550,438 @@ enum Scheduler {
             if let next = queue.pointee.pop() {
                 next.pointee.waitQueue = nil
                 addOwned(queue, to: next)
-                updateEffectivePriority(next)  // it inherits the remaining waiters
+                updateEffectiveProfile(next)  // it inherits the remaining waiters
                 makeReady(next)
             }
-            updateEffectivePriority(me)  // drop what we inherited through it
+            updateEffectiveProfile(me)  // drop what we inherited through it
         }
     }
 
-    static func effectivePriority(of thread: ThreadPointer) -> Int {
-        locked { thread.pointee.effectivePriority }
+    // MARK: Scheduling contexts (ext 2, 3, 4, 8, 10)
+
+    static func makeContext(_ profile: Profile, cpu: Int, account: AccountPointer?, wallUtilization: UInt64,
+                            reservation: UInt32) -> SchedContextPointer {
+        guard let raw = unsafe heap.allocate(size: MemoryLayout<SchedContextRecord>.size) else {
+            panic("sched: out of memory for a scheduling context")
+        }
+        unsafe raw.bindMemory(to: SchedContextRecord.self, capacity: 1).initialize(
+            to: SchedContextRecord(profile: profile, cpu: cpu, account: account, wallUtilization: wallUtilization,
+                                   reservation: reservation))
+        let context = SchedContextPointer(address: UInt64(UInt(bitPattern: raw)))
+        locked {
+            context.pointee.next = contexts
+            contexts = context
+            if cpu >= 0 { recomputePowerHints(cpu) }
+        }
+        return context
+    }
+
+    /// Admission control: the CPU the reservation fits on, biggest first
+    /// (so deadline work lands on fast cores and stays there), or why none
+    /// will take it.
+    static func admit(_ params: DeadlineParams, affinity: UInt64, account: AccountPointer?,
+                      reservation: UInt32) throws(AdmissionRefusal) -> SchedContextPointer {
+        guard params.isValid else { throw .invalidParameters }
+        let utilization = params.utilization
+        let decision = locked { () -> (cpu: Int, wall: UInt64, refusal: AdmissionRefusal?) in
+            if let account, account.pointee.used + utilization > account.pointee.limit {
+                return (-1, 0, .accountExhausted)
+            }
+            var best = -1, bestWall: UInt64 = 0
+            var closest = -1, closestLoad = UInt64.max
+            for cpu in 0..<Smp.count {
+                guard cpus[cpu].ready, affinity & (1 << UInt64(cpu)) != 0,
+                      cpus[cpu].reservation == reservation else { continue }
+                let wall = utilization * SchedScale.capacityOne / cpus[cpu].capacity
+                let load = cpus[cpu].admitted + wall
+                if load < closestLoad {
+                    closest = cpu
+                    closestLoad = load
+                }
+                guard load <= admissionBound else { continue }
+                if best < 0 || cpus[cpu].capacity > cpus[best].capacity
+                    || (cpus[cpu].capacity == cpus[best].capacity && cpus[cpu].admitted < cpus[best].admitted) {
+                    best = cpu
+                    bestWall = wall
+                }
+            }
+            if best < 0 { return (-1, 0, closest < 0 ? .noEligibleCpu : .cpuOverloaded(cpu: closest)) }
+            cpus[best].admitted += bestWall
+            if let account { account.pointee.used += utilization }
+            return (best, bestWall, nil)
+        }
+        if let refusal = decision.refusal { throw refusal }
+        return makeContext(.deadline(params), cpu: decision.cpu, account: account,
+                           wallUtilization: decision.wall, reservation: reservation)
+    }
+
+    static func destroyContext(_ context: SchedContextPointer) {
+        locked {
+            guard context.pointee.boundThreads == 0 else { panic("sched: context destroyed while threads use it") }
+            let cpu = context.pointee.cpu
+            if cpu >= 0 {
+                cpus[cpu].admitted -= context.pointee.wallUtilization
+                if let account = context.pointee.account {
+                    account.pointee.used -= context.pointee.profile.params.utilization
+                }
+            }
+            if contexts == context {
+                contexts = context.pointee.next
+            } else {
+                var cursor = contexts
+                while let current = cursor {
+                    if current.pointee.next == context {
+                        current.pointee.next = context.pointee.next
+                        break
+                    }
+                    cursor = current.pointee.next
+                }
+            }
+            if cpu >= 0 { recomputePowerHints(cpu) }
+        }
+        unsafe heap.free(UnsafeMutableRawPointer(bitPattern: UInt(context.address))!)
+    }
+
+    /// Runs `thread` on `context` from now on (nil: back to its own
+    /// weight). A deadline context moves it to the admitted CPU.
+    static func bind(_ thread: ThreadPointer, _ context: SchedContextPointer?) {
+        locked {
+            detachContext(thread)
+            if let context { attach(thread, context) }
+            reposition(thread)
+        }
+    }
+
+    private static func attach(_ thread: ThreadPointer, _ context: SchedContextPointer) {
+        context.pointee.boundThreads += 1
+        thread.pointee.context = context
+        setProfile(thread, computeEffective(thread), Clock.now())
+    }
+
+    private static func detachContext(_ thread: ThreadPointer) {
+        guard let context = thread.pointee.context else { return }
+        context.pointee.boundThreads -= 1
+        thread.pointee.context = nil
+        if thread.pointee.state != .dead {
+            setProfile(thread, computeEffective(thread), Clock.now())
+        }
+    }
+
+    /// After a profile or placement rule changed: queue it again where it
+    /// now belongs, or make its CPU re-evaluate it.
+    private static func reposition(_ thread: ThreadPointer) {
+        switch thread.pointee.state {
+        case .ready:
+            dequeue(thread, thread.pointee.cpu)
+            makeReady(thread)
+        case .running:
+            requestPreemption(on: thread.pointee.cpu)
+        case .blocked:
+            if let queue = thread.pointee.waitQueue {
+                queue.pointee.remove(thread)
+                thread.pointee.queueKey = thread.pointee.effective.waitKey
+                queue.pointee.push(thread)
+                if let owner = queue.pointee.owner { updateEffectiveProfile(owner) }
+            }
+        case .dead:
+            break
+        }
+    }
+
+    /// Reserves `cpu` for threads whose context carries `tag` (ext 8);
+    /// everything else leaves it. Refused while reservations of another
+    /// tag are admitted there.
+    @discardableResult
+    static func reserve(cpu: Int, tag: UInt32) -> Bool {
+        locked { () -> Bool in
+            var cursor = contexts
+            while let context = cursor {
+                if context.pointee.cpu == cpu, context.pointee.reservation != tag { return false }
+                cursor = context.pointee.next
+            }
+            cpus[cpu].reservation = tag
+            // Move whatever no longer belongs here.
+            var movers = QueueHead()
+            for queueIndex in 0..<3 {
+                while true {
+                    let candidate: ThreadPointer?
+                    switch queueIndex {
+                    case 0: candidate = cpus[cpu].fair.head
+                    case 1: candidate = cpus[cpu].deadline.head
+                    default: candidate = cpus[cpu].throttled.head
+                    }
+                    guard let thread = candidate else { break }
+                    dequeue(thread, cpu)
+                    movers.push(thread)
+                }
+            }
+            while let thread = movers.pop() { makeReady(thread) }
+            requestPreemption(on: cpu)
+            return true
+        }
+    }
+
+    /// The tag a thread's context reserves CPUs for, or 0.
+    private static func tag(_ thread: ThreadPointer) -> UInt32 {
+        thread.pointee.context?.pointee.reservation ?? 0
+    }
+
+    private static func allowed(_ thread: ThreadPointer, on cpu: Int) -> Bool {
+        cpus[cpu].ready && thread.pointee.affinity & (1 << UInt64(cpu)) != 0 && cpus[cpu].reservation == tag(thread)
+    }
+
+    /// Sets a CPU's capacity (the user-space power service's privileged
+    /// call, from `_CPC`). Returns whether its admitted reservations still
+    /// fit under the bound; they are not revoked if not.
+    @discardableResult
+    static func setCapacity(cpu: Int, _ capacity: UInt64) -> Bool {
+        locked { () -> Bool in
+            cpus[cpu].capacity = max(1, min(capacity, SchedScale.capacityOne))
+            var admitted: UInt64 = 0
+            var cursor = contexts
+            while let context = cursor {
+                if context.pointee.cpu == cpu {
+                    admitted += context.pointee.profile.params.utilization * SchedScale.capacityOne
+                        / cpus[cpu].capacity
+                }
+                cursor = context.pointee.next
+            }
+            cpus[cpu].admitted = admitted
+            recomputePowerHints(cpu)
+            return admitted <= admissionBound
+        }
+    }
+
+    static func capacity(cpu: Int) -> UInt64 { locked { cpus[cpu].capacity } }
+
+    /// The wake-latency bound and frequency floor `cpu` publishes for the
+    /// power service (KP enforces them; these are the hooks).
+    static func powerHints(cpu: Int) -> (wakeLatency: UInt64, frequencyFloor: UInt64) {
+        locked { (cpus[cpu].wakeLatencyBound, cpus[cpu].frequencyFloor) }
+    }
+
+    /// Wake latency: the least slack (deadline minus the wall time its
+    /// budget needs here) among the reservations admitted on `cpu`.
+    private static func recomputePowerHints(_ cpu: Int) {
+        var latency = UInt64.max
+        var cursor = contexts
+        while let context = cursor {
+            if context.pointee.cpu == cpu {
+                let params = context.pointee.profile.params
+                let wall = params.capacity * SchedScale.capacityOne / cpus[cpu].capacity
+                latency = min(latency, params.deadline > wall ? params.deadline - wall : 0)
+            }
+            cursor = context.pointee.next
+        }
+        cpus[cpu].wakeLatencyBound = latency
+        cpus[cpu].frequencyFloor = cpus[cpu].admitted
+    }
+
+    // MARK: Run queues (lock held)
+
+    /// Charges the running thread for the time since `runStart`: virtual
+    /// runtime for fair threads, capacity-scaled budget for deadline ones.
+    private static func charge(_ thread: ThreadPointer, _ cpu: Int, _ now: UInt64) {
+        guard !thread.pointee.isIdle, now > thread.pointee.runStart else { return }
+        let elapsed = now - thread.pointee.runStart
+        thread.pointee.runStart = now
+        switch thread.pointee.effective.discipline {
+        case .fair:
+            thread.pointee.vruntime &+= elapsed * SchedScale.capacityOne / max(1, thread.pointee.effective.weight)
+        case .deadline:
+            thread.pointee.remaining -= Int64(elapsed * cpus[cpu].capacity / SchedScale.capacityOne)
+        }
+    }
+
+    /// A fresh period starting now.
+    private static func startPeriod(_ thread: ThreadPointer, _ now: UInt64) {
+        let params = thread.pointee.effective.params
+        thread.pointee.periodStart = now
+        thread.pointee.absoluteDeadline = now + params.deadline
+        thread.pointee.remaining = Int64(params.capacity)
+    }
+
+    /// The period after the current one (or now, if that has passed too).
+    private static func nextPeriod(_ thread: ThreadPointer, _ now: UInt64) {
+        let params = thread.pointee.effective.params
+        var start = thread.pointee.periodStart + params.period
+        if start + params.deadline <= now { start = now }
+        thread.pointee.periodStart = start
+        thread.pointee.absoluteDeadline = start + params.deadline
+        thread.pointee.remaining = Int64(params.capacity)
+    }
+
+    /// The CBS wakeup rule: keep the current period's budget only if using
+    /// it before the deadline wouldn't exceed the reserved utilization.
+    private static func replenishOnWake(_ thread: ThreadPointer, _ now: UInt64) {
+        let params = thread.pointee.effective.params
+        let deadline = thread.pointee.absoluteDeadline
+        if thread.pointee.remaining <= 0 {
+            if now >= thread.pointee.periodStart + params.period { startPeriod(thread, now) } else { nextPeriod(thread, now) }
+        } else if now >= deadline
+                    || UInt64(thread.pointee.remaining) * params.period > (deadline - now) * params.capacity {
+            startPeriod(thread, now)
+        }
+    }
+
+    /// Puts a ready thread on `cpu`'s run queues.
+    private static func enqueue(_ thread: ThreadPointer, on cpu: Int, _ now: UInt64) {
+        thread.pointee.state = .ready
+        thread.pointee.cpu = cpu
+        switch thread.pointee.effective.discipline {
+        case .fair:
+            thread.pointee.queueKey = thread.pointee.vruntime
+            thread.pointee.runQueue = .fair
+            cpus[cpu].fair.push(thread)
+        case .deadline:
+            if thread.pointee.periodStart > now {
+                thread.pointee.queueKey = thread.pointee.periodStart
+                thread.pointee.runQueue = .throttled
+                cpus[cpu].throttled.push(thread)
+            } else {
+                thread.pointee.queueKey = thread.pointee.absoluteDeadline
+                thread.pointee.runQueue = .deadline
+                cpus[cpu].deadline.push(thread)
+            }
+        }
+    }
+
+    private static func dequeue(_ thread: ThreadPointer, _ cpu: Int) {
+        switch thread.pointee.runQueue {
+        case .fair: cpus[cpu].fair.remove(thread)
+        case .deadline: cpus[cpu].deadline.remove(thread)
+        case .throttled: cpus[cpu].throttled.remove(thread)
+        case .none: break
+        }
+        thread.pointee.runQueue = .none
+    }
+
+    private static func pop(_ cpu: Int) -> ThreadPointer? {
+        let thread = cpus[cpu].deadline.pop() ?? cpus[cpu].fair.pop()
+        thread?.pointee.runQueue = .none
+        return thread
+    }
+
+    /// Moves throttled threads whose period has started to the deadline
+    /// queue, and arms a timer for the next one. On `cpu` itself.
+    private static func refreshEligibility(_ cpu: Int, _ now: UInt64) {
+        while let first = cpus[cpu].throttled.head, first.pointee.periodStart <= now {
+            _ = cpus[cpu].throttled.pop()
+            first.pointee.queueKey = first.pointee.absoluteDeadline
+            first.pointee.runQueue = .deadline
+            cpus[cpu].deadline.push(first)
+        }
+        let want = cpus[cpu].throttled.head?.pointee.periodStart ?? 0
+        guard want != cpus[cpu].eligibilityAt else { return }
+        if cpus[cpu].eligibilityTimer != 0 {
+            Timers.cancel(cpus[cpu].eligibilityTimer)
+            cpus[cpu].eligibilityTimer = 0
+        }
+        cpus[cpu].eligibilityAt = want
+        if want != 0 {
+            cpus[cpu].eligibilityTimer = Timers.arm(deadline: want, eligibilityReached, 0) ?? 0
+        }
+    }
+
+    private static let eligibilityReached: Timers.Callback = { _, _ in
+        lock.lockMasked()
+        let me = Int(Cpu.current)
+        cpus[me].eligibilityTimer = 0
+        cpus[me].eligibilityAt = 0
+        lock.unlockMasked()
+        requestPreemption()
+    }
+
+    /// Whether `candidate` (ready on this CPU) should replace `current`.
+    private static func preempts(_ candidate: ThreadPointer, _ current: ThreadPointer) -> Bool {
+        if current.pointee.isIdle { return true }
+        guard candidate.pointee.runQueue == .deadline else { return false }  // fair waits for the slice
+        return current.pointee.effective.discipline == .fair
+            || candidate.pointee.absoluteDeadline < current.pointee.absoluteDeadline
     }
 
     // MARK: Switching (lock held, interrupts masked)
 
-    /// Queues a ready thread on the CPU chosen for it, and makes that CPU
-    /// reschedule if it is idle or past its timeslice.
+    /// Queues a thread that has just become runnable (spawned, woken) on
+    /// the CPU chosen for it, and makes that CPU reschedule if it should
+    /// run before what is running there.
     private static func makeReady(_ thread: ThreadPointer) {
+        let now = Clock.now()
+        if thread.pointee.effective.discipline == .deadline {
+            replenishOnWake(thread, now)
+        }
         let cpu = place(thread)
-        thread.pointee.state = .ready
-        thread.pointee.cpu = cpu
-        cpus[cpu].queue.push(thread)
+        if thread.pointee.effective.discipline == .fair {
+            // Its lag, carried to this CPU; a sleeper gets at most half the
+            // target latency of credit.
+            let floor = cpus[cpu].minVruntime
+            let lag = max(thread.pointee.lag, -Int64(targetLatency / 2))
+            thread.pointee.vruntime = lag < 0 ? floor &- UInt64(-lag) : floor &+ UInt64(lag)
+        }
+        enqueue(thread, on: cpu, now)
         let me = Int(Cpu.current)
-        let running = cpus[cpu].current!.pointee.effectivePriority
-        if cpus[cpu].current == cpus[cpu].idle || thread.pointee.effectivePriority > running {
-            if cpu == me { requestPreemption() } else { Ipi.requestReschedule(cpu) }
-        } else if thread.pointee.effectivePriority == running, cpus[cpu].sliceTimer == 0 {
-            // Its thread has used up a slice already: preempt it. Here, in
-            // thread context nothing would act on a request, so start a
-            // fresh slice instead.
-            if cpu == me { armSlice(for: cpus[me].current!, on: me) } else { Ipi.requestReschedule(cpu) }
+        let current = cpus[cpu].current!
+        if thread.pointee.runQueue == .throttled {
+            if cpu == me { refreshEligibility(me, now) } else { Ipi.requestReschedule(cpu) }
+        } else if preempts(thread, current)
+                    || (current.pointee.effective.discipline == .fair && cpus[cpu].sliceTimer == 0) {
+            requestPreemption(on: cpu)
         }
     }
 
-    /// Where a ready thread should run: its last CPU if that is idle, else
-    /// an idle CPU it may use, else one running something of lower
-    /// priority (the lowest), else the least loaded one.
+    /// Where a runnable thread should go. Deadline threads: the CPU their
+    /// reservation was admitted on (inherited deadline work stays put).
+    /// Fair: the last CPU if idle, else an idle one, else the least loaded.
     private static func place(_ thread: ThreadPointer) -> Int {
-        let affinity = thread.pointee.affinity
+        if let context = thread.pointee.context, context.pointee.cpu >= 0 { return context.pointee.cpu }
         let last = thread.pointee.cpu
-        let priority = thread.pointee.effectivePriority
+        if thread.pointee.effective.discipline == .deadline, allowed(thread, on: last) { return last }
         var best = -1
         var bestLoad = Int.max
-        var preemptible = -1
-        var preemptiblePriority = priority
         for step in 0..<Smp.count {
             let cpu = (last + step) % Smp.count
-            guard cpus[cpu].ready, affinity & (1 << UInt64(cpu)) != 0 else { continue }
+            guard allowed(thread, on: cpu) else { continue }
             let busy = cpus[cpu].current != cpus[cpu].idle ? 1 : 0
-            let load = cpus[cpu].queue.count + busy
+            let load = cpus[cpu].queuedCount + busy
             if load == 0 { return cpu }
-            let running = cpus[cpu].current!.pointee.effectivePriority
-            if running < preemptiblePriority, cpus[cpu].queue.topPriority < priority {
-                preemptible = cpu
-                preemptiblePriority = running
-            }
             if load < bestLoad {
                 best = cpu
                 bestLoad = load
             }
         }
-        if preemptible >= 0 { return preemptible }
         guard best >= 0 else { panic("sched: no CPU a thread may run on") }
         return best
     }
 
-    /// Switches this CPU to its next thread. The caller has already set
-    /// the running thread's new state (and queued it, if ready); a thread
-    /// left `.running` keeps the CPU when nothing else is queued. Returns
-    /// when this thread next runs, with the lock held.
+    /// Switches this CPU to its best runnable thread. The caller has set
+    /// the running thread's new state: `.ready` (preempted or yielding: it
+    /// is charged and competes again), `.blocked`, `.dead`, or `.running`
+    /// (keeps the CPU if nothing is runnable). Returns when this thread
+    /// next runs, with the lock held.
     private static func switchAway() {
         let me = Int(Cpu.current)
         _ = preemptPending.bitwiseAnd(~(1 << UInt64(me)), ordering: .relaxed)
+        let now = Clock.now()
         let current = cpus[me].current!
-        let next = cpus[me].queue.pop() ?? (current.pointee.state == .running ? current : cpus[me].idle!)
+        charge(current, me, now)
+        if !current.pointee.isIdle {
+            switch current.pointee.state {
+            case .ready:
+                requeue(current, me, now)
+            case .blocked, .dead:
+                if current.pointee.effective.discipline == .fair {
+                    current.pointee.lag = Int64(bitPattern: current.pointee.vruntime &- cpus[me].minVruntime)
+                }
+            case .running:
+                break
+            }
+        }
+        refreshEligibility(me, now)
+        let next = pop(me) ?? (current.pointee.state == .running ? current : cpus[me].idle!)
         next.pointee.state = .running
-        armSlice(for: next, on: me)
+        next.pointee.runStart = now
+        advanceMinVruntime(me, next)
+        armSlice(for: next, on: me, now)
         guard next != current else { return }
 
         next.pointee.cpu = me
@@ -525,6 +994,43 @@ enum Scheduler {
         unsafe arch_context_switch(UnsafeMutablePointer<UInt64>(bitPattern: UInt(current.address))!,
                                    next.pointee.savedSp)
         finishSwitch()
+    }
+
+    /// A preempted or yielding thread competes again: on this CPU, or
+    /// wherever it may run now if this CPU no longer takes it. A deadline
+    /// thread out of budget waits for its next period.
+    private static func requeue(_ thread: ThreadPointer, _ me: Int, _ now: UInt64) {
+        if thread.pointee.effective.discipline == .deadline, thread.pointee.remaining <= 0 {
+            if !thread.pointee.budgetYielded { overrun(thread) }
+            thread.pointee.budgetYielded = false
+            nextPeriod(thread, now)
+        }
+        if allowed(thread, on: me), thread.pointee.context.map({ $0.pointee.cpu < 0 || $0.pointee.cpu == me }) ?? true {
+            enqueue(thread, on: me, now)
+        } else {
+            thread.pointee.lag = Int64(bitPattern: thread.pointee.vruntime &- cpus[me].minVruntime)
+            let cpu = place(thread)
+            enqueue(thread, on: cpu, now)
+            requestPreemption(on: cpu)
+        }
+    }
+
+    /// The budget ran out before the work was done (ext 3).
+    private static func overrun(_ thread: ThreadPointer) {
+        guard let context = thread.pointee.context else { return }
+        context.pointee.overruns += 1
+        if let hook = context.pointee.overrunHook {
+            hook(context.pointee.overrunArgument, context.pointee.overruns)
+        }
+    }
+
+    private static func advanceMinVruntime(_ cpu: Int, _ running: ThreadPointer) {
+        var floor = UInt64.max
+        if !running.pointee.isIdle, running.pointee.effective.discipline == .fair {
+            floor = running.pointee.vruntime
+        }
+        if let first = cpus[cpu].fair.head { floor = min(floor, first.pointee.vruntime) }
+        if floor != .max, floor > cpus[cpu].minVruntime { cpus[cpu].minVruntime = floor }
     }
 
     /// The first thing a thread does after being switched to, on the CPU
@@ -544,14 +1050,31 @@ enum Scheduler {
         }
     }
 
-    /// A timeslice for a thread that is about to run, unless it is idle.
-    private static func armSlice(for thread: ThreadPointer, on me: Int) {
+    /// The running thread's timer: a deadline thread's remaining budget
+    /// (enforcement), or a fair thread's share of the target latency when
+    /// others are waiting (none when it is alone: tickless).
+    private static func armSlice(for thread: ThreadPointer, on me: Int, _ now: UInt64) {
         if cpus[me].sliceTimer != 0 {
             Timers.cancel(cpus[me].sliceTimer)
             cpus[me].sliceTimer = 0
         }
         guard !thread.pointee.isIdle else { return }
-        cpus[me].sliceTimer = Timers.arm(deadline: Clock.now() + timeslice, sliceExpired, 0) ?? 0
+        var length: UInt64
+        switch thread.pointee.effective.discipline {
+        case .deadline:
+            let remaining = UInt64(max(0, thread.pointee.remaining))
+            length = remaining * SchedScale.capacityOne / cpus[me].capacity
+        case .fair:
+            guard cpus[me].hasRunnable else { return }
+            var total = thread.pointee.effective.weight
+            var cursor = cpus[me].fair.head
+            while let waiting = cursor {
+                total += waiting.pointee.effective.weight
+                cursor = waiting.pointee.next
+            }
+            length = max(minimumGranularity, targetLatency * thread.pointee.effective.weight / max(1, total))
+        }
+        cpus[me].sliceTimer = Timers.arm(deadline: now + max(1, length), sliceExpired, 0) ?? 0
     }
 
     private static let sliceExpired: Timers.Callback = { _, _ in
@@ -576,7 +1099,8 @@ enum Scheduler {
     }
 
     /// Called as an interrupt returns (and at `locked`'s exit): switches
-    /// threads if asked to and a thread that should preempt is waiting.
+    /// threads if asked to and the running one should give way: its budget
+    /// or slice is used up, or an eligible deadline thread comes first.
     static func preemptIfRequested() {
         guard started.load(ordering: .acquiring) else { return }
         let me = Int(Cpu.current)
@@ -585,21 +1109,32 @@ enum Scheduler {
         // Loop: the thread switched to may raise a new request in
         // `finishSwitch` (a wakeup onto this CPU).
         while preemptPending.load(ordering: .relaxed) & (1 << UInt64(me)) != 0 {
-            let running = cpus[me].current?.pointee.effectivePriority ?? -1
-            let waiting = cpus[me].queue.topPriority
-            // A higher priority waiting, or an equal one once the slice is used up.
-            guard cpus[me].ready, !cpus[me].queue.isEmpty,
-                  cpus[me].current == cpus[me].idle || waiting > running
-                    || (waiting == running && cpus[me].sliceTimer == 0) else {
-                _ = preemptPending.bitwiseAnd(~(1 << UInt64(me)), ordering: .relaxed)
-                break
-            }
+            _ = preemptPending.bitwiseAnd(~(1 << UInt64(me)), ordering: .relaxed)
+            guard cpus[me].ready else { break }
+            let now = Clock.now()
+            refreshEligibility(me, now)
             let current = cpus[me].current!
-            if !current.pointee.isIdle {
-                current.pointee.state = .ready
-                cpus[me].queue.push(current)
+            charge(current, me, now)
+            var give = false
+            if current.pointee.isIdle {
+                give = cpus[me].hasRunnable
+            } else if current.pointee.effective.discipline == .deadline, current.pointee.remaining <= 0 {
+                give = true
+            } else if let first = cpus[me].deadline.head, preempts(first, current) {
+                give = true
+            } else if current.pointee.effective.discipline == .fair, cpus[me].sliceTimer == 0 {
+                give = !cpus[me].fair.isEmpty
+            } else if !allowed(current, on: me) {
+                give = true  // reserved away from it
             }
-            switchAway()
+            if give {
+                if !current.pointee.isIdle { current.pointee.state = .ready }
+                switchAway()
+            } else if !current.pointee.isIdle, cpus[me].sliceTimer == 0 {
+                // Competition or its profile changed; an armed slice is left
+                // alone, or requests could keep extending it.
+                armSlice(for: current, on: me, now)
+            }
         }
         lock.unlockMasked()
     }
@@ -690,8 +1225,12 @@ enum Scheduler {
             out.write(": current ")
             out.write(hex: cpus[cpu].current?.address ?? 0)
             out.write(cpus[cpu].current == cpus[cpu].idle ? " (idle)" : "")
-            out.write(", queued ")
-            out.write(decimal: UInt64(cpus[cpu].queue.count))
+            out.write(", fair ")
+            out.write(decimal: UInt64(cpus[cpu].fair.count))
+            out.write(" deadline ")
+            out.write(decimal: UInt64(cpus[cpu].deadline.count))
+            out.write(" throttled ")
+            out.write(decimal: UInt64(cpus[cpu].throttled.count))
             out.write(", slice ")
             out.write(decimal: UInt64(cpus[cpu].sliceTimer))
             out.write(pending & (1 << UInt64(cpu)) != 0 ? ", preempt pending" : "")
@@ -715,9 +1254,19 @@ enum Scheduler {
             }
             out.write(" cpu ")
             out.write(decimal: UInt64(thread.pointee.cpu))
-            out.write(" prio ")
-            out.write(decimal: UInt64(thread.pointee.effectivePriority + 1))
-            out.write("-1 queue ")
+            switch thread.pointee.effective.discipline {
+            case .fair:
+                out.write(" fair w ")
+                out.write(decimal: thread.pointee.effective.weight)
+            case .deadline:
+                out.write(" deadline ")
+                out.write(decimal: thread.pointee.effective.params.capacity / 1000)
+                out.write("/")
+                out.write(decimal: thread.pointee.effective.params.period / 1000)
+                out.write(" us left ")
+                out.write(decimal: UInt64(max(0, thread.pointee.remaining)) / 1000)
+            }
+            out.write(" queue ")
             out.write(hex: thread.pointee.waitQueue?.address ?? 0)
             out.write(" timer ")
             out.write(decimal: UInt64(thread.pointee.timeoutTimer))

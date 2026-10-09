@@ -21,10 +21,12 @@ add_library(kernel-swift OBJECT
   Kernel/Time/Clock.swift
   Kernel/Time/Timers.swift
   Kernel/Time/Watchdog.swift
+  Kernel/Sched/Profile.swift
   Kernel/Sched/Thread.swift
   Kernel/Sched/Scheduler.swift
   Kernel/Sched/SchedulerSelfTest.swift
   Kernel/Sched/MutexSelfTest.swift
+  Kernel/Sched/DeadlineSelfTest.swift
   Kernel/SpinLock.swift
   Kernel/Uart.swift
   Kernel/Vm/ArchAspace.swift

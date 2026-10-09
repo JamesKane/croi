@@ -20,12 +20,32 @@ struct Thread: ~Copyable {
     let entry: Entry?
     let argument: UInt64
     let isIdle: Bool
-    /// Priority, 0...31 (Zircon's range; 16 is the default). The effective
-    /// priority adds what it inherits from waiters on the owned wait queues
-    /// it holds (`ownedQueues`), transitively. Idle threads are -1.
-    var basePriority: Int
-    var effectivePriority: Int
+    /// The scheduling context it runs on, if bound to one; otherwise a
+    /// fair weight of its own (`baseWeight`, from a priority).
+    var context: SchedContextPointer?
+    var baseWeight: UInt64
+    /// Its base profile plus what it inherits from waiters on the owned
+    /// wait queues it holds (`ownedQueues`), transitively.
+    var effective: Profile
     var ownedQueues: QueuePointer?
+    /// Ordering key in whatever queue it is on (smaller first): virtual
+    /// runtime (fair run queue), absolute deadline (deadline run queue),
+    /// next period start (throttled), `Profile.waitKey` (wait queues).
+    var queueKey: UInt64 = 0
+    var runQueue = RunQueue.none
+    /// When it last started running, for charging the time it used.
+    var runStart: UInt64 = 0
+    // Fair: virtual runtime, and how far ahead of its CPU's minimum it was
+    // when it left (carried to wherever it runs next).
+    var vruntime: UInt64 = 0
+    var lag: Int64 = 0
+    // Deadline (CBS): the current period, and the budget left in it in
+    // capacity-scaled ns.
+    var periodStart: UInt64 = 0
+    var absoluteDeadline: UInt64 = 0
+    var remaining: Int64 = 0
+    /// It gave up the rest of its budget (yield): no overrun.
+    var budgetYielded = false
     /// CPUs it may run on, one bit each.
     var affinity: UInt64
     /// The CPU it last ran or is queued on.
@@ -55,13 +75,15 @@ struct Thread: ~Copyable {
     var cpusSeen: UInt64 = 0
     var switchesIn: UInt64 = 0
 
+    enum RunQueue { case none, fair, deadline, throttled }
+
     static var defaultPriority: Int { 16 }
     static var maxPriority: Int { 31 }
 
     init(name: StaticString, stack: StackRange, ownsStack: Bool, entry: Entry?, argument: UInt64,
          isIdle: Bool, priority: Int, affinity: UInt64, cpu: Int) {
-        self.basePriority = isIdle ? -1 : priority
-        self.effectivePriority = isIdle ? -1 : priority
+        self.baseWeight = isIdle ? 0 : Profile.weight(priority: priority)
+        self.effective = .fair(weight: baseWeight)
         self.name = name
         self.stack = stack
         self.ownsStack = ownsStack
@@ -84,8 +106,8 @@ struct Thread: ~Copyable {
     }
 }
 
-/// An intrusive queue of threads, linked through `Thread.next`, highest
-/// effective priority first and FIFO among equals. Scheduler lock.
+/// An intrusive queue of threads, linked through `Thread.next`, in
+/// increasing `Thread.queueKey` and FIFO among equals. Scheduler lock.
 ///
 /// A queue with an `owner` is an owned wait queue (Zircon's
 /// OwnedWaitQueue): its waiters lend their priority to the owner, and on
@@ -100,13 +122,10 @@ struct QueueHead {
 
     var isEmpty: Bool { head == nil }
 
-    /// The highest effective priority waiting, or -1.
-    var topPriority: Int { head?.pointee.effectivePriority ?? -1 }
-
     mutating func push(_ thread: ThreadPointer) {
         thread.pointee.next = nil
-        let priority = thread.pointee.effectivePriority
-        guard let first = head, first.pointee.effectivePriority >= priority else {
+        let key = thread.pointee.queueKey
+        guard let first = head, first.pointee.queueKey <= key else {
             thread.pointee.next = head
             head = thread
             if tail == nil { tail = thread }
@@ -114,7 +133,7 @@ struct QueueHead {
             return
         }
         var after = first
-        while let next = after.pointee.next, next.pointee.effectivePriority >= priority {
+        while let next = after.pointee.next, next.pointee.queueKey <= key {
             after = next
         }
         thread.pointee.next = after.pointee.next

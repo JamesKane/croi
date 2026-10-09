@@ -219,17 +219,38 @@ is cancelled by IPI after the lock drops; a timer must never outlive its
 thread. Preemption: a timeslice (10 ms), or a wakeup onto an idle CPU,
 sets a per-CPU request that is acted on when an interrupt returns.
 Interrupt frames don't restore the per-CPU register (rv64 `tp` is skipped),
-because a preempted thread can resume on another CPU. Policy is
-priority (0...31, default 16) with round-robin among equals; fair + EDF on
-scheduling contexts replaces it in K3c, keeping the inheritance machinery.
-Run and wait queues are priority ordered (`QueueHead`). Leaving `locked`
-with interrupts on is a preemption point. A wakeup aimed at the local
+because a preempted thread can resume on another CPU. Queues are ordered
+by `Thread.queueKey` (`QueueHead`). Leaving `locked` with interrupts on
+is a preemption point. A wakeup aimed at the local
 CPU only sets a request bit, so the idle loop and `preemptIfRequested`
 recheck after every switch (`finishSwitch` can make a thread ready here).
 
-Priority inheritance (K3b): a `QueueHead` with an `owner` is an owned wait
-queue. Its waiters lend their effective priority to the owner and on down
-the chain (`updateEffectivePriority`). `Mutex` (Thread.swift) is the
+Policy (K3c, Zircon's two disciplines; Sched/Profile.swift): a thread's
+`Profile` is fair (weight; priorities 0...31 map through Zircon's table)
+or deadline (`DeadlineParams`: capacity of reference-core work within
+deadline, every period). Per CPU: a fair queue by virtual runtime (ns x
+1024 / weight; slice = 16 ms target latency x weight share, >= 0.75 ms;
+tickless when alone), a deadline queue by absolute deadline (always
+first), and a throttled queue of reservations waiting for their next
+period (an eligibility timer). Deadline budgets are charged in
+capacity-scaled time and enforced by the slice timer; running out counts
+an overrun on the context (ext 3 hook); `yield()` ends a deadline
+thread's period. CBS rule on wakeup. Scheduling contexts
+(`SchedContext`, ~Copyable owner of a `SchedContextRecord`) are separate
+from threads: a fair weight, or a deadline reservation admitted by
+`Scheduler.admit` on one CPU (biggest capacity that fits under 85%), with
+`AdmissionRefusal` reasons and a per-user `SchedAccount` budget (ext 4);
+admitted threads never migrate. CPU capacity defaults from the core type
+(`CoreCapacity`, biggest = 1024), overridable by `setCapacity` (the power
+service's call). `reserve(cpu:tag:)` (ext 8). Each CPU publishes
+`powerHints` (wake-latency bound, frequency floor) for KP. `frame` intent
+(ext 10) is stored only.
+
+Priority inheritance (K3b, with K3c's profiles): a `QueueHead` with an
+`owner` is an owned wait queue. Its waiters lend their effective profile to
+the owner and on down the chain (`updateEffectiveProfile`), by Zircon's
+rules: fair weights add; deadline utilizations add with the tightest
+deadline, and turn a fair owner into a deadline one. `Mutex` (Thread.swift) is the
 kernel's blocking lock on one: unlock hands it to the highest-priority
 waiter, and recursion or a deadlock cycle panics (K7's futex will refuse
 the owner instead, as Zircon does). A thread may not exit holding one.

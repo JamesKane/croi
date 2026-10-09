@@ -106,9 +106,15 @@ Progress: **K3a done**: threads, context switch, per-CPU run queues,
 blocking with timeouts, wakeup placement, timeslice and wakeup
 preemption, join/detach/reaping. **K3b done**: priorities, owned wait
 queues with transitive priority inheritance, kernel `Mutex` with handoff
-by priority, a scheduler state dump. Next: K3c (scheduling contexts, fair + EDF,
-capacity, admission), the trace core for `sched`/`irq`, and K3d
-(extended-state sizing).
+by priority, a scheduler state dump. **K3c done**: scheduling contexts,
+fair (weighted virtual runtime) + EDF (CBS budgets, capacity-scaled,
+throttling, overruns), Zircon-rule profile inheritance, admission with
+reasons and per-user accounts, capacity defaults by core type, reserved
+CPUs, power hints. Not yet: IPC donation (ext 2, with channels in K7),
+overrun port packets (K5 ports), the frame intent's display alignment
+(ext 1/10), load balancing of fair threads between CPUs beyond wakeup
+placement. Next: the trace core for `sched`/`irq`, then K3d (extended-state
+sizing).
 - Threads, context switch and kernel threads. Wait queues, and owned wait
   queues with priority inheritance from day one.
 - **Scheduling contexts are separate objects from threads** (seL4 MCS

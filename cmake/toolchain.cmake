@@ -70,9 +70,11 @@ foreach(_f IN LISTS CROI_ARCH_SWIFT_CFLAGS _cg)
   list(APPEND _swift -Xcc ${_f})
 endforeach()
 list(JOIN _swift " " CMAKE_Swift_FLAGS_INIT)
-set(CMAKE_Swift_FLAGS_DEBUG_INIT "-Onone -g")
-set(CMAKE_Swift_FLAGS_RELEASE_INIT "-Osize")
-set(CMAKE_Swift_FLAGS_RELWITHDEBINFO_INIT "-Osize -g")
+# Seeded as cache entries: CMake's Swift support overwrites the per-config
+# _INIT variables with its own (-O -g), so setting those had no effect.
+set(CMAKE_Swift_FLAGS_DEBUG "-Onone -g" CACHE STRING "")
+set(CMAKE_Swift_FLAGS_RELEASE "-Osize" CACHE STRING "")
+set(CMAKE_Swift_FLAGS_RELWITHDEBINFO "-Osize -g" CACHE STRING "")
 
 # Embedded Swift requires whole-module compilation.
 set(CMAKE_Swift_COMPILATION_MODE wholemodule)
