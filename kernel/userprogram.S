@@ -9,3 +9,12 @@ croi_user_program_start:
     .incbin CROI_USER_PROGRAM
 .globl croi_user_program_end
 croi_user_program_end:
+
+// The vDSO image (user/vdso), mapped into user address spaces.
+.section .rodata.vdso, "a"
+.balign 4096
+.globl croi_vdso_start
+croi_vdso_start:
+    .incbin CROI_VDSO
+.globl croi_vdso_end
+croi_vdso_end:

@@ -410,3 +410,15 @@ arch_has_poe:
     ubfx    x0, x0, #16, #4
     ret
 .size arch_has_poe, . - arch_has_poe
+
+// void arch_user_counter_enable(void): CNTKCTL_EL1.EL0VCTEN (bit 1): EL0
+// may read CNTVCT_EL0 (and CNTFRQ_EL0).
+.globl arch_user_counter_enable
+.type arch_user_counter_enable, %function
+arch_user_counter_enable:
+    mrs     x0, cntkctl_el1
+    orr     x0, x0, #(1 << 1)
+    msr     cntkctl_el1, x0
+    isb
+    ret
+.size arch_user_counter_enable, . - arch_user_counter_enable

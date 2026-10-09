@@ -33,6 +33,8 @@ struct VmoRecord: ~Copyable {
     /// Device-local or pinned: never paged or evicted (for the pager to
     /// come); charged in full.
     var neverEvict = false
+    /// A kernel shared page: user mappings are read only, always.
+    var sharedReadOnly = false
     var committedPages: UInt64 = 0
     /// The address spaces mapping it, once per mapping (for decommit).
     var mappers = UniqueArray<UInt64>()
@@ -186,6 +188,14 @@ struct Vmo: ~Copyable {
         guard base % KernelLayout.pageSize == 0 else { throw .unaligned(base) }
         guard !PhysicalMap.overlapsDenied(base, size) else { throw .denied(base) }
         record = try Self.make(.physical(base: base), size: size, cache: cache)
+    }
+
+    /// One of the kernel's shared read-only pages (time, topology, power),
+    /// for mapping read only into user space. The only RAM a physical VMO
+    /// may cover: the kernel owns and writes it; user space only reads.
+    init(sharedKernelPage phys: UInt64) throws(VmError) {
+        record = try Self.make(.physical(base: phys), size: KernelLayout.pageSize, cache: .cached)
+        record.pointee.sharedReadOnly = true
     }
 
     /// Physically contiguous pages, zeroed, aligned to 2^alignLog2 bytes,
@@ -361,6 +371,21 @@ struct Vmo: ~Copyable {
 
     private init(borrowed record: VmoPointer) {
         self.record = record
+    }
+
+    /// Runs `body` with a borrowed handle over `record` (no reference of
+    /// its own taken or dropped).
+    static func withBorrowed<R>(_ record: VmoPointer, _ body: (borrowing Vmo) throws(VmError) -> R) throws(VmError) -> R {
+        let vmo = borrowing(record)
+        let result: R
+        do throws(VmError) {
+            result = try body(vmo)
+        } catch {
+            _ = vmo.keep()
+            throw error
+        }
+        _ = vmo.keep()
+        return result
     }
 
     /// Gives up the handle without releasing the VMO: for kernel-held

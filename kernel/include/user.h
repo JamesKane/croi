@@ -35,6 +35,12 @@ static inline uint64_t croi_user_program_size(void) {
   return (uint64_t)(croi_user_program_end - croi_user_program_start);
 }
 
+// The vDSO image (user/vdso): header (shared.h) and code.
+extern const uint8_t croi_vdso_start[];
+extern const uint8_t croi_vdso_end[];
+static inline uint64_t croi_vdso_address(void) { return (uint64_t)croi_vdso_start; }
+static inline uint64_t croi_vdso_size(void) { return (uint64_t)(croi_vdso_end - croi_vdso_start); }
+
 #if defined(__x86_64__)
 // SYSCALL setup on this CPU: EFER.SCE, STAR, LSTAR, FMASK.
 void arch_syscall_init(void);

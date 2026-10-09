@@ -356,3 +356,13 @@ arch_write_pkru:
     wrpkru
     ret
 .size arch_write_pkru, . - arch_write_pkru
+
+// void arch_user_counter_enable(void): CR4.TSD clear, so rdtsc works in user mode.
+.globl arch_user_counter_enable
+.type arch_user_counter_enable, @function
+arch_user_counter_enable:
+    mov     %cr4, %rax
+    and     $~(1 << 2), %rax
+    mov     %rax, %cr4
+    ret
+.size arch_user_counter_enable, . - arch_user_counter_enable

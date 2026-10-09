@@ -232,6 +232,19 @@ thread's stack top.
   category (enter/exit). User programs: `user/` is built with user flags
   (CMake custom command, static at the address the kernel maps it) and
   included with `.incbin` (kernel/userprogram.S).
+- K6c: shared read-only pages (include/shared.h, Kernel/User/Vdso.swift):
+  the time page, a topology page and a power page (ext 9), each with a
+  seqlock sequence (`SharedPages.write` bumps it odd/even); the scheduler
+  republishes a CPU's capacity and power hints when they change
+  (`publishPowerHints`, outside its lock). The vDSO (user/vdso: header
+  with function offsets at byte 0, code, then the three pages, all
+  reached PC-relatively) is mapped by `Vdso.map` into a region of its
+  own: code read/execute, pages read only (`Vmo(sharedKernelPage:)`, the
+  only RAM a physical VMO may cover, never writable). User counter
+  access per CPU (`arch_user_counter_enable`: arm64 CNTKCTL_EL1.EL0VCTEN,
+  rv64 scounteren.TM). User binaries come from `croi_user_binary`
+  (cmake/CroiUser.cmake) with `CROI_USER_CFLAGS` (cmake/arch: general
+  registers only until K6d).
 - The boot test runs `usertest.S` (per arch) from a VMO: registers kept
   across syscalls, a message, a fault and a privileged instruction killed,
   preemption of user code; it reports the null syscall time (KVM: ~40 ns).

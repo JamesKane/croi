@@ -283,3 +283,12 @@ arch_cache_line:
     li      a0, 0
     ret
 .size arch_cache_line, . - arch_cache_line
+
+// void arch_user_counter_enable(void): scounteren.TM (bit 1): U-mode may
+// read `time` (firmware's mcounteren must allow it too; OpenSBI does).
+.globl arch_user_counter_enable
+.type arch_user_counter_enable, %function
+arch_user_counter_enable:
+    csrsi   scounteren, 2
+    ret
+.size arch_user_counter_enable, . - arch_user_counter_enable

@@ -91,6 +91,9 @@ enum Scheduler {
     /// Every thread record, linked through `allNext` (scheduler lock).
     nonisolated(unsafe) private static var allThreads: ThreadPointer?
     nonisolated(unsafe) private static var nextTraceId: UInt32 = 0
+    /// CPUs whose capacity or power hints changed and aren't in the shared
+    /// pages yet (published once the scheduler lock is dropped).
+    nonisolated(unsafe) private static var publishPending: UInt64 = 0
     /// Every scheduling context, linked through `next`.
     nonisolated(unsafe) private static var contexts: SchedContextPointer?
 
@@ -764,6 +767,17 @@ enum Scheduler {
         }
     }
 
+    /// Writes the shared pages for CPUs whose hints changed (outside the
+    /// scheduler lock: SharedPages reads through it).
+    static func publishPowerHints() {
+        let pending = locked { () -> UInt64 in
+            let pending = publishPending
+            publishPending = 0
+            return pending
+        }
+        for cpu in 0..<Smp.count where pending & (1 << UInt64(cpu)) != 0 { SharedPages.publish(cpu: cpu) }
+    }
+
     static func capacity(cpu: Int) -> UInt64 { locked { cpus[cpu].capacity } }
 
     /// The wake-latency bound and frequency floor `cpu` publishes for the
@@ -787,6 +801,7 @@ enum Scheduler {
         }
         cpus[cpu].wakeLatencyBound = latency
         cpus[cpu].frequencyFloor = cpus[cpu].admitted
+        publishPending |= 1 << UInt64(cpu)
     }
 
     // MARK: Run queues (lock held)

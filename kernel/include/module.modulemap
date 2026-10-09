@@ -12,5 +12,6 @@ module CKernel {
   header "cache.h"
   header "jit.h"
   header "user.h"
+  header "shared.h"
   export *
 }

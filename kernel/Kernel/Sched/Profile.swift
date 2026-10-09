@@ -223,6 +223,7 @@ struct SchedContext: ~Copyable {
     init(deadline params: DeadlineParams, affinity: UInt64 = .max, account: AccountPointer? = nil,
          reservation: UInt32 = 0) throws(AdmissionRefusal) {
         record = try Scheduler.admit(params, affinity: affinity, account: account, reservation: reservation)
+        Scheduler.publishPowerHints()
     }
 
     var cpu: Int { record.pointee.cpu }
@@ -254,6 +255,7 @@ struct SchedContext: ~Copyable {
     deinit {
         let source = record.pointee.overrunSource
         Scheduler.destroyContext(record)
+        Scheduler.publishPowerHints()
         if source != 0 { PacketSourcePointer(address: source).retire() }
     }
 }

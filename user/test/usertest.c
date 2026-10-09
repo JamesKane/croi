@@ -5,6 +5,8 @@
 
 #include <croi/syscall.h>
 
+#include "shared.h"
+
 #define ERR_BAD_HANDLE (-11)
 #define ERR_INVALID_ARGS (-10)
 #define ERR_TIMED_OUT (-21)
@@ -102,6 +104,50 @@ static int64_t marks(uint32_t resource) {
   return 0x600D;
 }
 
+// Mode 2: the vDSO at `base`: its clock against the syscall's, the
+// topology page, timing, and the power page's seqlock under a kernel
+// writer (an equal pair must never read torn).
+static int64_t vdso(uint64_t base) {
+  const croi_vdso_header_t *header = (const croi_vdso_header_t *)base;
+  CHECK(50, header->magic == CROI_VDSO_MAGIC);
+  uint64_t (*clock)(void) = (uint64_t (*)(void))(base + header->clock_monotonic);
+  const croi_topology_page_t *(*topology)(void) = (const croi_topology_page_t *(*)(void))(base + header->topology);
+  const croi_power_page_t *(*power)(void) = (const croi_power_page_t *(*)(void))(base + header->power);
+
+  uint64_t before = clock();
+  uint64_t middle = (uint64_t)sys(CROI_SYS_CLOCK_MONOTONIC, 0, 0, 0, 0, 0);
+  uint64_t after = clock();
+  CHECK(51, before <= middle && middle <= after);
+  const croi_topology_page_t *t = topology();
+  CHECK(52, t->version == CROI_TOPOLOGY_PAGE_VERSION && t->cpu_count >= 1 && t->cpus[0].capacity >= 1);
+
+  uint64_t t0 = clock();
+  for (int i = 0; i < 1000; i++) clock();
+  uint64_t t1 = clock();
+  for (int i = 0; i < 1000; i++) sys(CROI_SYS_CLOCK_MONOTONIC, 0, 0, 0, 0, 0);
+  uint64_t t2 = clock();
+
+  const croi_power_page_t *p = power();
+  uint64_t torn = 0, distinct = 0, last = 0;
+  for (int i = 0; i < 200000; i++) {
+    uint64_t s1 = __atomic_load_n(&p->sequence, __ATOMIC_ACQUIRE);
+    if (s1 & 1) continue;
+    uint64_t a = *(volatile const uint64_t *)&p->test_a;
+    uint64_t b = *(volatile const uint64_t *)&p->test_b;
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
+    if (__atomic_load_n(&p->sequence, __ATOMIC_RELAXED) != s1) continue;
+    if (a != b) torn++;
+    if (a != last) {
+      distinct++;
+      last = a;
+    }
+  }
+  CHECK(53, torn == 0);
+  uint64_t vdso_ns = (t1 - t0) / 1000, syscall_ns = (t2 - t1) / 1000;
+  sys(CROI_SYS_TEST_REPORT, (vdso_ns & 0xFFFF) | (syscall_ns & 0xFFFF) << 16 | distinct << 32, 0, 0, 0, 0);
+  return 0x600D;
+}
+
 __attribute__((section(".text.start"))) [[noreturn]] void _start(uint64_t mode, uint64_t handle) {
-  exit_with(mode == 1 ? marks((uint32_t)handle) : objects());
+  exit_with(mode == 1 ? marks((uint32_t)handle) : mode == 2 ? vdso(handle) : objects());
 }

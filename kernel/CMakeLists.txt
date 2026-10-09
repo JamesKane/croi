@@ -19,6 +19,8 @@ add_library(kernel-swift OBJECT
   Kernel/Ref.swift
   Kernel/Smp.swift
   Kernel/User/Syscalls.swift
+  Kernel/User/Vdso.swift
+  Kernel/User/VdsoSelfTest.swift
   Kernel/User/UserSelfTest.swift
   Kernel/User/SyscallSelfTest.swift
   Kernel/Object/Status.swift
@@ -85,27 +87,20 @@ add_custom_command(TARGET kernel POST_BUILD
           -P ${PROJECT_SOURCE_DIR}/cmake/CheckNoArc.cmake
   COMMENT "Checking kernel is free of Swift refcounting")
 
-# The K6b self-test's user program: C built with user-mode flags (no
-# kernel code model, red zone allowed) into a flat binary at its fixed
-# user address, then included in the kernel image (userprogram.S).
-if(CROI_ARCH STREQUAL amd64)
-  set(_user_flags -mgeneral-regs-only)
-elseif(CROI_ARCH STREQUAL arm64)
-  set(_user_flags -mgeneral-regs-only)
-else()
-  set(_user_flags -march=rv64imac -mabi=lp64 -mcmodel=medany)
-endif()
+# User binaries the kernel carries (cmake/CroiUser.cmake): the self-test
+# program and the vDSO.
+include(${PROJECT_SOURCE_DIR}/cmake/CroiUser.cmake)
 set(_user_dir ${PROJECT_SOURCE_DIR}/user)
-set(_user_elf ${CMAKE_CURRENT_BINARY_DIR}/usertest.elf)
 set(_user_bin ${CMAKE_CURRENT_BINARY_DIR}/usertest.bin)
-add_custom_command(OUTPUT ${_user_bin}
-  COMMAND ${CMAKE_C_COMPILER} --target=${CROI_CLANG_TRIPLE} ${_user_flags} -std=c23 -O2 -ffreestanding
-          -fno-pic -fno-pie -fno-stack-protector -fno-builtin -nostdlib -static -fuse-ld=lld
-          -Wl,--no-pie -Wl,-T,${_user_dir}/test/user.ld -I${_user_dir}/include
-          ${_user_dir}/test/usertest.c -o ${_user_elf}
-  COMMAND ${CMAKE_OBJCOPY} -O binary ${_user_elf} ${_user_bin}
-  DEPENDS ${_user_dir}/test/usertest.c ${_user_dir}/test/user.ld ${_user_dir}/include/croi/syscall.h
-  COMMENT "Building the user test program")
+croi_user_binary(${_user_bin}
+  SOURCES ${_user_dir}/test/usertest.c
+  LINKER_SCRIPT ${_user_dir}/test/user.ld
+  INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/include)
+set(_vdso_bin ${CMAKE_CURRENT_BINARY_DIR}/vdso.bin)
+croi_user_binary(${_vdso_bin} PIC
+  SOURCES ${_user_dir}/vdso/header.S ${_user_dir}/vdso/vdso.c
+  LINKER_SCRIPT ${_user_dir}/vdso/vdso.ld
+  INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/include)
 set_source_files_properties(userprogram.S PROPERTIES
-  OBJECT_DEPENDS ${_user_bin}
-  COMPILE_DEFINITIONS "CROI_USER_PROGRAM=\"${_user_bin}\"")
+  OBJECT_DEPENDS "${_user_bin};${_vdso_bin}"
+  COMPILE_DEFINITIONS "CROI_USER_PROGRAM=\"${_user_bin}\";CROI_VDSO=\"${_vdso_bin}\"")

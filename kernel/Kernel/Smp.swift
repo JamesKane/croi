@@ -321,6 +321,7 @@ enum CpuStacks {
         // Every CPU the same way (they are alike: a mixed system would turn
         // it off for all).
         croi_user_protection = arch_user_protection_enable() != 0 ? 1 : 0
+        arch_user_counter_enable()
         #if arch(x86_64)
         // GDT (8 entries) and TSS (104 bytes), never freed.
         guard let gdt = unsafe heap.allocate(size: 64, alignment: 16),

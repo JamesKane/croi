@@ -397,6 +397,7 @@ struct UserAspace: ~Copyable {
     /// Adds a mapping (mapping physical/contiguous VMOs at once), taking a
     /// VMO reference and listing this address space on the VMO.
     private func insert(_ mapping: Mapping) throws(VmError) {
+        if mapping.vmo.pointee.sharedReadOnly, mapping.rights != [.read] { throw .invalidArgument }
         if case .anonymous = mapping.vmo.pointee.kind {} else {
             try record.pointee.arch.map(virt: mapping.base, phys: mapping.vmo.commit(at: mapping.offset)!,
                                         size: mapping.size,

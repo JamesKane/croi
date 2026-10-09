@@ -227,9 +227,12 @@ built-in user test program; null syscall ~40 ns under KVM (budget 100).
 refused; range-checked user copies; object syscalls (handles, signals,
 waits, events, ports, VMOs, trace_configure with user marks); the
 `syscall` trace category; a C user test program built with user flags.
-Next: K6c (vDSO and shared pages,
-with the kernel/user build split), K6d (user FP/SIMD), K6e (sampling and
-PMU).
+**K6c done**: the vDSO (clock without a syscall:
+~13 ns vs 62 under KVM) with the time, topology and power pages (ext 9),
+seqlocked and read only; user counter access; the kernel/user build
+split (`croi_user_binary`, `CROI_USER_CFLAGS`). The vblank page (ext 1)
+joins the same mechanism with the display driver. Next: K6d (user
+FP/SIMD), K6e (sampling and PMU).
 - Syscall entry/exit per arch, user-copy with fault recovery, and SMAP, PAN
   and SUM discipline.
 - **vDSO** plus the shared read-only pages: clock, topology and power
