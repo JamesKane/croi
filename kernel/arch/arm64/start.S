@@ -22,6 +22,21 @@ arch_halt:
     b       1b
 .size arch_halt, . - arch_halt
 
+// void arch_load_page_tables(uint64_t root, uint64_t root_high)
+.section .text.arch_load_page_tables, "ax", %progbits
+.globl arch_load_page_tables
+.type arch_load_page_tables, %function
+arch_load_page_tables:
+    dsb     ishst                   // table writes visible to the walker
+    msr     ttbr0_el1, x0
+    msr     ttbr1_el1, x1
+    isb
+    tlbi    vmalle1
+    dsb     ish
+    isb
+    ret
+.size arch_load_page_tables, . - arch_load_page_tables
+
 .section .bss.boot_stack, "aw", %nobits
 .balign 16
 boot_stack:

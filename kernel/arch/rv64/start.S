@@ -20,6 +20,20 @@ arch_halt:
     j       1b
 .size arch_halt, . - arch_halt
 
+// void arch_load_page_tables(uint64_t root, uint64_t root_high)
+.section .text.arch_load_page_tables, "ax", %progbits
+.globl arch_load_page_tables
+.type arch_load_page_tables, %function
+arch_load_page_tables:
+    srli    a0, a0, 12
+    li      t0, (8 << 60)           // Sv39
+    or      a0, a0, t0
+    sfence.vma
+    csrw    satp, a0
+    sfence.vma
+    ret
+.size arch_load_page_tables, . - arch_load_page_tables
+
 .section .bss.boot_stack, "aw", %nobits
 .balign 16
 boot_stack:

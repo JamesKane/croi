@@ -2,6 +2,7 @@ import CEFI
 import CHandoff
 import CLoader
 import Fmt
+import PageTables
 
 private var archName: StaticString {
     #if arch(x86_64)
@@ -90,36 +91,41 @@ func croi_loader_main(
 
     // Boot page tables. Mapping all RAM up front covers everything allocated
     // later too, since allocations only change the type of RAM ranges.
-    var tables = try BootPageTables(boot: boot)
+    var tables: BootPageTables
+    do throws(MapError) {
+        tables = try BootPageTables(memory: FirmwarePages(boot: boot))
+    } catch {
+        throw LoaderError(error)
+    }
     try map.refresh(boot: boot)
     var runStart: UInt64 = 0
     var runEnd: UInt64 = 0
     try map.forEach { (type: UInt32, base: UInt64, size: UInt64) throws(LoaderError) in
-        guard MemoryMap.isRam(type), base < Mmu.identityLimit else { return }
-        let end = min(base + size, Mmu.identityLimit)
+        guard MemoryMap.isRam(type), base < PageTableFormat.identityLimit else { return }
+        let end = min(base + size, PageTableFormat.identityLimit)
         if base == runEnd {
             runEnd = end
             return
         }
         if runEnd > runStart {
-            try tables.map(virt: runStart, phys: runStart, size: runEnd - runStart, .identityRam)
+            try mapping(&tables, virt: runStart, phys: runStart, size: runEnd - runStart, .identityRam)
         }
         runStart = base
         runEnd = end
     }
     if runEnd > runStart {
-        try tables.map(virt: runStart, phys: runStart, size: runEnd - runStart, .identityRam)
+        try mapping(&tables, virt: runStart, phys: runStart, size: runEnd - runStart, .identityRam)
     }
     for i in 0..<elf.segmentCount {
         let segment = elf.segments[i]
-        try tables.map(
+        try mapping(&tables, 
             virt: segment.vaddr, phys: kernelPhys + (segment.vaddr - elf.base),
             size: roundUp(segment.memsz, to: pageSize),
             MapAttributes(writable: segment.writable, executable: segment.executable, global: true))
     }
     if uart.kind == CROI_UART_NS16550_MMIO || uart.kind == CROI_UART_PL011 {
         let page = uart.base & ~(pageSize - 1)
-        try tables.map(virt: page, phys: page, size: pageSize, .identityDevice)
+        try mapping(&tables, virt: page, phys: page, size: pageSize, .identityDevice)
     }
 
     // Point of no return. Only the console write and the final map refresh
@@ -157,4 +163,15 @@ func croi_loader_main(
         }
     }
     croi_arch_enter_kernel(tables.rootLow, tables.rootHigh, elf.entry, handoffPhys)
+}
+
+/// Adds a boot mapping, reporting failure as a LoaderError.
+private func mapping(
+    _ tables: inout BootPageTables, virt: UInt64, phys: UInt64, size: UInt64, _ attributes: MapAttributes
+) throws(LoaderError) {
+    do throws(MapError) {
+        try tables.map(virt: virt, phys: phys, size: size, attributes)
+    } catch {
+        throw LoaderError(error)
+    }
 }

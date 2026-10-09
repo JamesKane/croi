@@ -31,6 +31,7 @@ override); `build/<arch>/esp/` is served to it as a FAT drive.
 - `kernel/`   Kernel image (static PIE at CROI_KERNEL_BASE).
 - `lib/handoff/` Loader -> kernel handoff ABI (`croi_handoff_t`, C header).
 - `lib/fmt/`  `TextOutput`: allocation-free text formatting for both images.
+- `lib/pagetables/` Page-table formats + generic builder (loader and kernel).
 - `lib/rt/`   Freestanding C runtime the compilers call (mem*, stack guard).
 
 ## Boot flow
@@ -44,6 +45,16 @@ ExitBootServices -> memory map converted into the handoff ->
 `croi_arch_enter_kernel` (boot/arch/<arch>/enter.S). Loader allocations
 use OS-defined memory types 0x80000001 (kernel) / 0x80000002 (handoff and
 page tables) so they show up as CROI_MEM_KERNEL / CROI_MEM_HANDOFF.
+
+Kernel (`kernel/Kernel/Main.swift`): validates the handoff, builds its own
+page tables from free RAM with `BootAllocator` (front-to-back, never frees;
+reads the handoff range table in place, which is CROI_MEM_HANDOFF and so
+never handed out), and switches to them. Kernel address space
+(`KernelLayout`): low half empty; physmap of all RAM at 0xffff800000000000
+(amd64/arm64) or 0xffffffc000000000 (rv64 Sv39), RW + NX; device registers
+the kernel uses are mapped in the physmap as device memory; the image at
+CROI_KERNEL_BASE with text RX, rodata R, data RW. amd64 loads its own GDT
+first thing, since firmware's sits in memory reported free.
 
 Kernel enters on the loader's page tables with the handoff's physical
 address as its argument, at EL1 on arm64: if firmware ran at EL2, the

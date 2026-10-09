@@ -69,3 +69,14 @@ import Fmt
         unsafe VolatileMappedRegister<UInt32>(unsafeBitPattern: UInt(config.base + offset))
     }
 }
+
+extension croi_uart_t {
+    /// The same UART, addressed through the physmap (MMIO kinds only).
+    var inPhysmap: croi_uart_t {
+        var uart = self
+        if kind == CROI_UART_NS16550_MMIO || kind == CROI_UART_PL011 {
+            uart.base = KernelLayout.physmap(base)
+        }
+        return uart
+    }
+}
