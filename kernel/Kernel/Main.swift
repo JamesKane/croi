@@ -218,6 +218,18 @@ func kernel_main_continue() -> Never {
         timeSelfTest(others: online - 1, console)
         cpuStacksSelfTest(console)
         ppttSelfTest()
+        watchdogSelfTest()
+        #if arch(arm64)
+        sErrorSelfTest()
+        #endif
+        console.write("  wdog:   ")
+        if BootOptions.has("croi.watchdog=off") {
+            console.write("off (croi.watchdog=off)\n")
+        } else if Watchdog.start(acpi) {
+            console.write("SBSA generic watchdog on, 30 s timeout, refreshed every 5 s\n")
+        } else {
+            console.write("none in the GTDT\n")
+        }
         console.write("  topo:   ")
         if CpuTopologies.placeAll(acpi) {
             console.write(decimal: UInt64(CpuTopologies.distinct { $0.package }))
@@ -705,7 +717,12 @@ private func timeSelfTest(others: Int, _ console: Uart) {
     console.write(decimal: (b - (start + 5 * ms)) / 1000)
     console.write(" us late; ")
     console.write(decimal: UInt64(others))
-    console.write(" other CPUs' timers fire\n")
+    console.write(" other CPUs' timers fire")
+    #if arch(x86_64)
+    console.write(Timers.alwaysRunning ? "; ARAT\n" : "; no ARAT (APIC timer stops in deep C-states)\n")
+    #else
+    console.write("\n")
+    #endif
 }
 
 /// What each CPU reports about its exception stack.
@@ -791,3 +808,76 @@ private func pptt(_ t: inout InlineArray<176, UInt8>, _ at: Int, type: UInt8, le
 private func put32(_ t: inout InlineArray<176, UInt8>, _ at: Int, _ value: UInt32) {
     for i in 0..<4 { t[at + i] = UInt8(truncatingIfNeeded: value >> (8 * i)) }
 }
+
+/// The SBSA watchdog: GTDT parsing on a hand-built table, and the register
+/// programming on two RAM pages standing in for its frames (QEMU's virt
+/// machine has no watchdog).
+private func watchdogSelfTest() {
+    var t = InlineArray<124, UInt8>(repeating: 0)
+    put32(&t, 88, 1)                  // platform timer count
+    put32(&t, 92, 96)                 // platform timer offset
+    t[96] = 1                         // SBSA generic watchdog
+    t[97] = 28                        // length
+    put32(&t, 100, 0x2A44_0000)       // refresh frame
+    put32(&t, 108, 0x2A45_0000)       // control frame
+    put32(&t, 116, 48)                // GSIV
+    guard SbsaWatchdog.find(in: t.span.bytes)
+            == SbsaWatchdog.Description(refreshFrame: 0x2A44_0000, controlFrame: 0x2A45_0000, interrupt: 48)
+    else { panic("watchdog self-test: GTDT parse") }
+
+    for method in [.refreshFrame, .offsetRegister] as InlineArray<2, SbsaWatchdog.RefreshMethod> {
+        let control: UInt64, refresh: UInt64
+        do throws(VmError) {
+            control = try kernelAspace.allocate(pages: 1)
+            refresh = try kernelAspace.allocate(pages: 1)
+        } catch {
+            panic("watchdog self-test: no memory")
+        }
+        let wcs = unsafe UnsafeMutablePointer<UInt32>(bitPattern: UInt(control))!
+        let worLow = unsafe UnsafeMutablePointer<UInt32>(bitPattern: UInt(control + 0x8))!
+        let worHigh = unsafe UnsafeMutablePointer<UInt32>(bitPattern: UInt(control + 0xC))!
+        let wrr = unsafe UnsafeMutablePointer<UInt32>(bitPattern: UInt(refresh))!
+        unsafe wrr.pointee = 0xFFFF_FFFF
+
+        var watchdog = SbsaWatchdog(control: control, refresh: refresh, method: method)
+        watchdog.enable(timeoutTicks: 0x3_0000_0002)  // offset = half
+        guard unsafe wcs.pointee == 1, unsafe worLow.pointee == 0x8000_0001, unsafe worHigh.pointee == 1 else {
+            panic("watchdog self-test: enable")
+        }
+        unsafe worLow.pointee = 0
+        watchdog.kick()
+        switch method {
+        case .refreshFrame:
+            guard unsafe wrr.pointee == 0, unsafe worLow.pointee == 0 else { panic("watchdog self-test: refresh frame") }
+        case .offsetRegister:
+            guard unsafe wrr.pointee == 0xFFFF_FFFF, unsafe worLow.pointee == 0x8000_0001 else {
+                panic("watchdog self-test: refresh by offset")
+            }
+        }
+        try? kernelAspace.free(control)
+        try? kernelAspace.free(refresh)
+    }
+}
+
+private func put32(_ t: inout InlineArray<124, UInt8>, _ at: Int, _ value: UInt32) {
+    for i in 0..<4 { t[at + i] = UInt8(truncatingIfNeeded: value >> (8 * i)) }
+}
+
+#if arch(arm64)
+/// The SError classifier on synthetic syndromes (QEMU can't inject them).
+private func sErrorSelfTest() {
+    let serror: UInt64 = 0x2F << 26 | 1 << 25 | 0x11  // EC, IL, DFSC = asynchronous SError
+    let cases = [
+        (serror | 0b110 << 10, SErrorPolicy.Kind.corrected),
+        (serror | 0b011 << 10, .recoverable),
+        (serror | 0b010 << 10, .restartable),
+        (serror | 0b001 << 10, .unrecoverable),
+        (serror | 0b000 << 10, .uncontainable),
+        (serror | 1 << 24, .unclassified),           // implementation-defined syndrome
+        (0x25 << 26 | 1 << 25, .unclassified),       // a data abort, not an SError
+    ] as InlineArray<7, (UInt64, SErrorPolicy.Kind)>
+    for i in 0..<cases.count where SErrorPolicy.classify(esr: cases[i].0) != cases[i].1 {
+        panic("serror self-test: misclassified")
+    }
+}
+#endif

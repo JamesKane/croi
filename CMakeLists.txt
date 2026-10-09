@@ -82,6 +82,18 @@ if(CROI_ARCH STREQUAL rv64)
 endif()
 
 if(CROI_ARCH STREQUAL arm64)
+  # The DBG2 console path (QEMU's SPCR can't be turned off): an ESP whose
+  # command line makes the loader try DBG2 first.
+  set(_esp_dbg2 ${CMAKE_BINARY_DIR}/esp-dbg2)
+  add_custom_target(esp-dbg2 ALL
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CROI_ESP_DIR} ${_esp_dbg2}
+    COMMAND ${CMAKE_COMMAND} -E echo "loader.console=dbg2" > ${_esp_dbg2}/croi/cmdline
+    DEPENDS esp)
+  add_test(NAME boot-dbg2-console
+    COMMAND ${CROI_QEMU} --test "at 0x9000000 (DBG2)"
+            ${CROI_ARCH} ${_esp_dbg2} ${CMAKE_BINARY_DIR}/qemu ${CROI_EDK2_DIR})
+  set_tests_properties(boot-dbg2-console PROPERTIES TIMEOUT 120)
+
   # Firmware at EL2 with a GICv3: the loader must drop to EL1.
   add_test(NAME boot-smoke-el2
     COMMAND ${CROI_QEMU} --test "croi kernel: boot complete"

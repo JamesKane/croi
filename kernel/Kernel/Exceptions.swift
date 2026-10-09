@@ -9,6 +9,21 @@ func arch_exception(_ frame: UnsafeMutablePointer<arch_exception_frame_t>) {
         unsafe Interrupts.handle(frame)
         return
     }
+    #if arch(arm64)
+    if unsafe ExceptionFrame.isSError(frame.pointee) {
+        let kind = unsafe SErrorPolicy.classify(esr: frame.pointee.esr)
+        if kind == .corrected {
+            SErrorPolicy.corrected += 1
+            return
+        }
+        // Recoverable kinds will go to the faulting process once there is
+        // user mode; from the kernel they are fatal like the rest.
+        if let console = panicConsole {
+            console.write("\ncroi kernel: SError: ")
+            console.write(SErrorPolicy.describe(kind))
+        }
+    }
+    #endif
     if unsafe ExceptionFrame.isBreakpoint(frame.pointee) {
         unsafe ExceptionFrame.skipBreakpoint(&frame.pointee)
         breakpointsHandled += 1
@@ -97,6 +112,9 @@ enum ExceptionFrame {
     static func isBreakpoint(_ f: arch_exception_frame_t) -> Bool {
         f.slot == 4 && exceptionClass(f) == 0x3C
     }
+
+    /// SError from any of the four vector groups.
+    static func isSError(_ f: arch_exception_frame_t) -> Bool { f.slot & 3 == 3 }
 
     /// IRQ from the current EL (SP_EL0 or SP_ELx).
     static func isInterrupt(_ f: arch_exception_frame_t) -> Bool { f.slot == 1 || f.slot == 5 }
@@ -229,3 +247,47 @@ enum ExceptionFrame {
     }
     #endif
 }
+
+#if arch(arm64)
+/// What an SError's syndrome says about recovery (ESR_EL1, EC 0x2F).
+/// Corrected errors are counted and execution continues. Restartable and
+/// recoverable ones (RAS) will be delivered to the faulting process once
+/// there is user mode; anything else, and anything from the kernel, is
+/// fatal. (Zircon only counts SErrors.)
+enum SErrorPolicy {
+    enum Kind: Equatable {
+        case corrected
+        case recoverable      // UER: the error was contained
+        case restartable      // UEO
+        case unrecoverable    // UEU
+        case uncontainable    // UC
+        case unclassified     // implementation defined, or no RAS syndrome
+    }
+
+    nonisolated(unsafe) static var corrected = 0
+
+    static func classify(esr: UInt64) -> Kind {
+        guard (esr >> 26) & 0x3F == 0x2F, esr & (1 << 24) == 0 else { return .unclassified }  // EC, IDS
+        guard esr & 0x3F == 0x11 else { return .unclassified }  // DFSC: asynchronous SError
+        switch (esr >> 10) & 0x7 {  // AET
+        case 0b000: return .uncontainable
+        case 0b001: return .unrecoverable
+        case 0b010: return .restartable
+        case 0b011: return .recoverable
+        case 0b110: return .corrected
+        default: return .unclassified
+        }
+    }
+
+    static func describe(_ kind: Kind) -> StaticString {
+        switch kind {
+        case .corrected: "corrected"
+        case .recoverable: "recoverable (UER)"
+        case .restartable: "restartable (UEO)"
+        case .unrecoverable: "unrecoverable (UEU)"
+        case .uncontainable: "uncontainable (UC)"
+        case .unclassified: "unclassified"
+        }
+    }
+}
+#endif

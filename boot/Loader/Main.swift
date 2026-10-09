@@ -68,23 +68,6 @@ func croi_loader_main(
     console.write(hex: elf.entry)
     console.write("\n")
 
-    // ACPI and the console UART.
-    let acpi = unsafe Acpi(systemTable: systemTable)
-    var uart = acpi?.serialConsole() ?? croi_uart_t()
-    #if arch(x86_64)
-    if uart.kind == CROI_UART_NONE {  // PCs without SPCR: assume COM1.
-        uart.kind = CROI_UART_NS16550_PIO
-        uart.base = 0x3F8
-    }
-    #endif
-    console.write("acpi: RSDP ")
-    console.write(hex: acpi?.rsdp ?? 0)
-    console.write(", uart kind ")
-    console.write(decimal: UInt64(uart.kind))
-    console.write(" at ")
-    console.write(hex: uart.base)
-    console.write("\n")
-
     // Optional: the boot filesystem image and the kernel command line.
     let bootfs = try volume.readIntoPages("\\croi\\bootfs.img", type: CroiMemoryType.bootfs)
     let cmdline = try unsafe volume.readIntoPool("\\croi\\cmdline")
@@ -96,6 +79,38 @@ func croi_loader_main(
     console.write(" bytes, cmdline: ")
     console.write(decimal: UInt64(unsafe cmdline?.size ?? 0))
     console.write(" bytes\n")
+
+    // ACPI and the console UART: SPCR, then DBG2 (then COM1 on PCs).
+    // `loader.console=dbg2` on the command line tries DBG2 first.
+    let acpi = unsafe Acpi(systemTable: systemTable)
+    let preferDbg2 = unsafe cmdline.map { unsafe commandLine($0.buffer, $0.size, has: "loader.console=dbg2") } ?? false
+    var uart = croi_uart_t()
+    var uartSource: StaticString = "none"
+    for useDbg2 in preferDbg2 ? [true, false] as InlineArray<2, Bool> : [false, true] where uart.kind == CROI_UART_NONE {
+        if useDbg2, let dbg2 = acpi?.dbg2Console() {
+            uart = dbg2
+            uartSource = "DBG2"
+        } else if !useDbg2, let spcr = acpi?.spcrConsole() {
+            uart = spcr
+            uartSource = "SPCR"
+        }
+    }
+    #if arch(x86_64)
+    if uart.kind == CROI_UART_NONE {  // PCs without SPCR or DBG2: assume COM1.
+        uart.kind = CROI_UART_NS16550_PIO
+        uart.base = 0x3F8
+        uartSource = "COM1 default"
+    }
+    #endif
+    console.write("acpi: RSDP ")
+    console.write(hex: acpi?.rsdp ?? 0)
+    console.write(", uart kind ")
+    console.write(decimal: UInt64(uart.kind))
+    console.write(" at ")
+    console.write(hex: uart.base)
+    console.write(" (")
+    console.write(uartSource)
+    console.write(")\n")
 
     // The GOP framebuffer, if there is a linear one.
     let framebuffer = unsafe findFramebuffer(boot)
@@ -260,4 +275,23 @@ private func mapping(
     framebuffer.blue_mask = masks.BlueMask
     framebuffer.reserved_mask = masks.ReservedMask
     return framebuffer
+}
+
+/// Whether the command line (ASCII, space separated) contains `word`.
+@unsafe private func commandLine(_ buffer: UnsafeMutableRawPointer, _ size: Int, has word: StaticString) -> Bool {
+    let text = unsafe UnsafeRawPointer(buffer).assumingMemoryBound(to: UInt8.self)
+    let wanted = unsafe word.utf8Start
+    let length = word.utf8CodeUnitCount
+    var start = 0
+    while start < size {
+        var end = start
+        while end < size, unsafe text[end] != UInt8(ascii: " "), unsafe text[end] != UInt8(ascii: "\n") { end += 1 }
+        if end - start == length {
+            var same = true
+            for i in 0..<length where unsafe text[start + i] != wanted[i] { same = false }
+            if same { return true }
+        }
+        start = end + 1
+    }
+    return false
 }

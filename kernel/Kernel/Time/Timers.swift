@@ -34,6 +34,9 @@ enum Timers {
     #if arch(x86_64)
     static var vector: UInt32 { 0xF1 }
     nonisolated(unsafe) private(set) static var deadlineMode = false
+    /// CPUID 6 EAX[2]: the local APIC timer keeps running in deep C-states.
+    /// Without it, deep idle will need an always-on wake timer (roadmap KP).
+    nonisolated(unsafe) private(set) static var alwaysRunning = false
     #elseif arch(arm64)
     nonisolated(unsafe) private(set) static var intid: UInt64 = 27
     #endif
@@ -41,10 +44,8 @@ enum Timers {
     /// Global setup (boot CPU, after Clock).
     static func initialize(_ acpi: AcpiTables) {
         #if arch(x86_64)
-        var regs = InlineArray<4, UInt32>(repeating: 0)
-        var span = regs.mutableSpan
-        span.withUnsafeMutableBufferPointer { unsafe arch_cpuid(1, 0, $0.baseAddress!) }
-        deadlineMode = regs[2] & (1 << 24) != 0
+        deadlineMode = cpuid(1)[2] & (1 << 24) != 0  // ECX: TSC-deadline
+        alwaysRunning = cpuid(6)[0] & (1 << 2) != 0  // EAX: ARAT
         #elseif arch(arm64)
         if let gtdt = acpi.table("GTDT") {
             let gsiv = acpi.withTable(gtdt) { (table: RawSpan) -> UInt32 in
@@ -55,6 +56,15 @@ enum Timers {
         #endif
         initializeThisCpu()
     }
+
+    #if arch(x86_64)
+    private static func cpuid(_ leaf: UInt32) -> InlineArray<4, UInt32> {
+        var regs = InlineArray<4, UInt32>(repeating: 0)
+        var span = regs.mutableSpan
+        span.withUnsafeMutableBufferPointer { unsafe arch_cpuid(leaf, 0, $0.baseAddress!) }
+        return regs
+    }
+    #endif
 
     /// This CPU's timer hardware: routed to its interrupt, disarmed.
     static func initializeThisCpu() {

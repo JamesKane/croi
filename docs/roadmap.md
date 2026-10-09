@@ -251,13 +251,16 @@ kernel uses only safe defaults:
 - no frequency floor.
 
 **What this changes in the plan**
-- **K2 follow-ups (small, soon):**
-  - record x86 ARAT (CPUID 6 EAX bit 2);
-  - parse GTDT watchdogs and keep the SBSA watchdog refreshed during
-    bring-up;
-  - a DBG2 console fallback in the loader;
-  - an arm64 SError policy: report it, and later deliver it to a user
-    process.
+- **K2 follow-ups (done):**
+  - x86 ARAT recorded;
+  - the GTDT's SBSA watchdog enabled and refreshed (`croi.watchdog=off`),
+    with the Sky1's refresh method available;
+  - the DBG2 console fallback (`loader.console=dbg2`);
+  - the arm64 SError policy (corrected errors continue; the rest is fatal
+    from the kernel).
+
+  The watchdog and SError paths are unverified on hardware: QEMU has
+  neither.
 - **K3:**
   - Each CPU has a capacity (processing rate) from day one: a core-type
     default, overridable from user space. EDF admission, with a reason,

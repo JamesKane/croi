@@ -20,6 +20,7 @@ add_library(kernel-swift OBJECT
   Kernel/Smp.swift
   Kernel/Time/Clock.swift
   Kernel/Time/Timers.swift
+  Kernel/Time/Watchdog.swift
   Kernel/SpinLock.swift
   Kernel/Uart.swift
   Kernel/Vm/ArchAspace.swift

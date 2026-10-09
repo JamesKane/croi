@@ -205,6 +205,24 @@ Arm MIDR). QEMU only has a PPTT on arm64 and never cache nodes, so a
 boot self-test runs the walk on a hand-built table. This is the data for
 the topology page (ext 9).
 
+Bring-up aids (K2 follow-ups from the board review in docs/roadmap.md):
+- Console: the loader takes SPCR, then DBG2 (CIX Sky1 has no SPCR), then
+  COM1 on PCs; `loader.console=dbg2` in `\croi\cmdline` tries DBG2 first
+  (test `boot-dbg2-console`). Qualcomm GENI (type 0x13) isn't supported yet.
+- `Timers.alwaysRunning`: x86 ARAT (CPUID 6 EAX[2]); without it deep
+  C-states stop the APIC timer.
+- `Watchdog` (Kernel/Time/Watchdog.swift): the GTDT's SBSA generic
+  watchdog, 30 s timeout, refreshed every 5 s by a timer;
+  `croi.watchdog=off` disables it. `SbsaWatchdog.RefreshMethod` has the
+  Sky1's WOR-write refresh for a board rule to pick. QEMU has no SBSA
+  watchdog, so the self-test only covers GTDT parsing and register
+  programming on RAM stand-ins; it is unverified on hardware.
+- arm64 SError policy (`SErrorPolicy`): corrected errors are counted and
+  execution continues; everything else from the kernel is reported and
+  panics. Recoverable kinds go to the faulting process once user mode
+  exists. QEMU can't inject SErrors; the classifier is tested on synthetic
+  ESR values.
+
 Exceptions: `arch/<arch>/exceptions.S` saves an `arch_exception_frame_t`
 (kernel.h) and calls Swift `arch_exception` (Kernel/Exceptions.swift);
 the handler may edit the frame to resume elsewhere. Installed at the top
