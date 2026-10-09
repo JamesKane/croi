@@ -41,3 +41,12 @@ arch_spin_pause:
     pause
     ret
 .size arch_spin_pause, . - arch_spin_pause
+
+// void arch_tlb_invalidate_page(uint64_t va): this CPU only. invlpg also
+// drops paging-structure cache entries used to translate va.
+.globl arch_tlb_invalidate_page
+.type arch_tlb_invalidate_page, @function
+arch_tlb_invalidate_page:
+    invlpg  (%rdi)
+    ret
+.size arch_tlb_invalidate_page, . - arch_tlb_invalidate_page

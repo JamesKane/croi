@@ -99,8 +99,13 @@ func kernel_main(_ handoffAddress: UInt64) -> Never {
     swiftAllocationSelfTest()
     refSelfTest()
     spinLockSelfTest()
+    kernelAspace.adopt(rootLow: tables.rootLow, rootHigh: tables.rootHigh)
+    vmSelfTest()
     console.write("  heap:   slabs + large pages; UniqueBox, UniqueArray and Ref allocate and free\n")
     console.write("  locks:  spinlocks mask interrupts, nest, release on throw; pmm and heap locked\n")
+    console.write("  vm:     kernel aspace at ")
+    console.write(hex: KernelLayout.dynamicBase)
+    console.write("; guards, protect, large-page split, table reclaim\n")
 
     // Exception round trip: take a breakpoint and resume after it.
     arch_breakpoint()
@@ -304,5 +309,69 @@ private func spinLockSelfTest() {
     }
     guard !heapLock.isHeldByCurrentCpu, !pmmLock.isHeldByCurrentCpu else {
         panic("spinlock self-test: pmm or heap lock left held")
+    }
+}
+
+/// Kernel address space: guarded allocations, attributes, protect, a large
+/// page split by a partial unmap, and full reclamation (pages, tables and
+/// regions) when everything is freed.
+private func vmSelfTest() {
+    do throws(VmError) {
+        try vmSelfTestBody()
+    } catch {
+        panic("vm self-test: unexpected VmError")
+    }
+}
+
+private func vmSelfTestBody() throws(VmError) {
+    let page = KernelLayout.pageSize
+    let freeBefore = pmm.freePages
+    let regionsBefore = kernelAspace.regionCount
+    let data = MapAttributes(writable: true, global: true)
+
+    // Guarded allocations.
+    let a = try kernelAspace.allocate(pages: 4)
+    let b = try kernelAspace.allocate(pages: 2)
+    guard b >= a + 4 * page + KernelAspace.guardSize else { panic("vm self-test: no guard gap") }
+    guard kernelAspace.query(a - page) == nil, kernelAspace.query(a + 4 * page) == nil else {
+        panic("vm self-test: guard page mapped")
+    }
+    for (base, count) in [(a, UInt64(4)), (b, UInt64(2))] as InlineArray<2, (UInt64, UInt64)> {
+        for i in 0..<count {
+            let virt = base + i * page
+            guard let t = kernelAspace.query(virt), t.attributes == data, t.pageSize == page else {
+                panic("vm self-test: allocation not mapped as expected")
+            }
+            unsafe UnsafeMutablePointer<UInt64>(bitPattern: UInt(virt))!.pointee = virt ^ 0xC401
+            let viaPhysmap = unsafe UnsafePointer<UInt64>(bitPattern: UInt(KernelLayout.physmap(t.physical)))!.pointee
+            guard viaPhysmap == virt ^ 0xC401 else { panic("vm self-test: mapping points at the wrong page") }
+        }
+    }
+
+    // Protect.
+    try kernelAspace.withArch { (arch) throws(VmError) in
+        try arch.protect(virt: a, size: page, MapAttributes(global: true))
+    }
+    guard kernelAspace.query(a)?.attributes.writable == false else { panic("vm self-test: protect") }
+    try kernelAspace.withArch { (arch) throws(VmError) in try arch.protect(virt: a, size: page, data) }
+
+    // A 2 MiB block, then a 4 KiB hole punched in it.
+    let block: UInt64 = 2 << 20
+    guard let run = pmm.allocateContiguous(block / page, alignLog2: 21) else { panic("vm self-test: no 2 MiB run") }
+    let window = try kernelAspace.reserve(size: block, alignment: block)
+    try kernelAspace.withArch { (arch) throws(VmError) in try arch.map(virt: window, phys: run, size: block, data) }
+    guard kernelAspace.query(window)?.pageSize == block else { panic("vm self-test: no large page") }
+    try kernelAspace.withArch { (arch) throws(VmError) in try arch.unmap(virt: window + 7 * page, size: page) }
+    guard kernelAspace.query(window + 7 * page) == nil,
+          let after = kernelAspace.query(window + 8 * page), after.physical == run + 8 * page, after.pageSize == page,
+          kernelAspace.query(window)?.physical == run
+    else { panic("vm self-test: large page split") }
+    try kernelAspace.free(window)
+    pmm.free(run, count: block / page)
+
+    try kernelAspace.free(a)
+    try kernelAspace.free(b)
+    guard kernelAspace.regionCount == regionsBefore, pmm.freePages == freeBefore else {
+        panic("vm self-test: pages, tables or regions not reclaimed")
     }
 }

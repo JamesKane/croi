@@ -4,7 +4,7 @@
 /// Everything is `@inlinable`: Embedded Swift specializes it in clients.
 
 /// How a range is mapped.
-public struct MapAttributes: Sendable {
+public struct MapAttributes: Sendable, Equatable {
     public var writable = false
     public var executable = false
     public var device = false
@@ -52,6 +52,10 @@ public enum PageTableFormat {
         isPresent(e) && level < levels - 1 && e & large == 0
     }
     @inlinable public static func address(_ e: UInt64) -> UInt64 { e & addressMask }
+    @inlinable public static func attributes(_ e: UInt64, level: Int) -> MapAttributes {
+        MapAttributes(writable: e & writable != 0, executable: e & noExecute == 0,
+                      device: e & cacheDisable != 0, global: e & globalBit != 0)
+    }
 
     #elseif arch(arm64)
     // Stage 1, 4 KiB granule, 48-bit VAs in both TTBR0 and TTBR1.
@@ -85,6 +89,10 @@ public enum PageTableFormat {
         isPresent(e) && level < levels - 1 && e & tableOrPage != 0
     }
     @inlinable public static func address(_ e: UInt64) -> UInt64 { e & addressMask }
+    @inlinable public static func attributes(_ e: UInt64, level: Int) -> MapAttributes {
+        MapAttributes(writable: e & readOnly == 0, executable: e & privilegedNoExecute == 0,
+                      device: e & attrDevice != 0, global: e & notGlobal == 0)
+    }
 
     #elseif arch(riscv64)
     // Sv39. Leaves allowed at every level (1 GiB, 2 MiB, 4 KiB).
@@ -112,7 +120,22 @@ public enum PageTableFormat {
         isPresent(e) && e & (read | write | execute) == 0
     }
     @inlinable public static func address(_ e: UInt64) -> UInt64 { ((e >> 10) & ((1 << 44) - 1)) << 12 }
+    @inlinable public static func attributes(_ e: UInt64, level: Int) -> MapAttributes {
+        MapAttributes(writable: e & write != 0, executable: e & execute != 0,
+                      device: false, global: e & globalBit != 0)
+    }
     #endif
+
+    /// A present entry that maps memory (rather than pointing at a table).
+    @inlinable public static func isLeaf(_ e: UInt64, level: Int) -> Bool {
+        isPresent(e) && !isTable(e, level: level)
+    }
+
+    /// The physical base of a leaf's page (low bits that are attributes at
+    /// large-page levels, e.g. x86 PAT, masked off).
+    @inlinable public static func leafAddress(_ e: UInt64, level: Int) -> UInt64 {
+        address(e) & ~(pageSize(level: level) - 1)
+    }
 
     @inlinable public static func shift(level: Int) -> UInt64 { UInt64(12 + 9 * (levels - 1 - level)) }
     @inlinable public static func pageSize(level: Int) -> UInt64 { 1 << shift(level: level) }

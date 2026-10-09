@@ -6,11 +6,17 @@ enum KernelLayout {
     /// `physmapBase + physical address`. Start of the 48-bit high half.
     static var physmapBase: UInt64 { 0xFFFF_8000_0000_0000 }
     static var physmapSize: UInt64 { 64 << 40 }
+    /// Dynamic kernel mappings (KernelAspace): right after the physmap.
+    static var dynamicBase: UInt64 { 0xFFFF_C000_0000_0000 }
+    static var dynamicSize: UInt64 { 32 << 40 }
     #elseif arch(riscv64)
     /// Start of the Sv39 high half.
     static var physmapBase: UInt64 { 0xFFFF_FFC0_0000_0000 }
     static var physmapSize: UInt64 { 128 << 30 }
+    static var dynamicBase: UInt64 { 0xFFFF_FFE0_0000_0000 }
+    static var dynamicSize: UInt64 { 64 << 30 }
     #endif
+    // The kernel image sits above both, at CROI_KERNEL_BASE.
 
     static var pageSize: UInt64 { 0x1000 }
 

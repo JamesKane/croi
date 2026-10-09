@@ -9,7 +9,9 @@ add_library(kernel-swift OBJECT
   Kernel/Pmm.swift
   Kernel/Ref.swift
   Kernel/SpinLock.swift
-  Kernel/Uart.swift)
+  Kernel/Uart.swift
+  Kernel/Vm/ArchAspace.swift
+  Kernel/Vm/KernelAspace.swift)
 set_target_properties(kernel-swift PROPERTIES Swift_MODULE_NAME Kernel)
 target_include_directories(kernel-swift PRIVATE include)
 target_link_libraries(kernel-swift PRIVATE croi-fmt croi-handoff croi-pagetables)

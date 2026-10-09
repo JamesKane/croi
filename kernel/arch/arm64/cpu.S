@@ -37,3 +37,16 @@ arch_spin_pause:
     yield
     ret
 .size arch_spin_pause, . - arch_spin_pause
+
+// void arch_tlb_invalidate_page(uint64_t va): all ASIDs, all levels
+// (including walk-cache entries), broadcast to the inner shareable domain.
+.globl arch_tlb_invalidate_page
+.type arch_tlb_invalidate_page, %function
+arch_tlb_invalidate_page:
+    dsb     ishst                   // the PTE write is visible to walkers
+    ubfx    x0, x0, #12, #44        // VA[55:12]
+    tlbi    vaae1is, x0
+    dsb     ish
+    isb
+    ret
+.size arch_tlb_invalidate_page, . - arch_tlb_invalidate_page

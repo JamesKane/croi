@@ -33,6 +33,11 @@ bool arch_interrupts_enabled(void);
 // Spin-wait hint (x86 pause, arm64 yield, RISC-V Zihintpause pause).
 void arch_spin_pause(void);
 
+// Invalidates TLB (and page-walk cache) entries for va after its page-table
+// entry changed. amd64 and rv64: this CPU only (shootdowns come with SMP);
+// arm64: broadcast to all CPUs.
+void arch_tlb_invalidate_page(uint64_t va);
+
 // --- Exceptions ---------------------------------------------------------------
 //
 // Each arch's vectors (arch/<arch>/exceptions.S) save the interrupted state

@@ -80,11 +80,27 @@ Locking (`Kernel/SpinLock.swift`): `SpinLock` masks interrupts on this CPU
 while held (Zircon's SpinLock + IrqSave) and spins test-and-test-and-set;
 `withLock { }` is the API (releases on throw). The lock word holds the
 holder's CPU + 1, so a recursive acquire or a release by a non-holder
-panics. `Cpu.current` is 0 until per-CPU data exists. Lock order: heap ->
-pmm (the heap calls the PMM with its lock held). Locks are global `let`s
+panics. `Cpu.current` is 0 until per-CPU data exists. Lock order: vm ->
+heap -> pmm (each calls the next with its own lock held). Locks are global `let`s
 next to the global state they guard; public mutating methods of `Pmm` and
 `Heap` take the lock and call `*Locked` internals. Restoring an
 *enabled* interrupt state is untested until interrupt controllers exist.
+
+Virtual memory (`Kernel/Vm/`, after Zircon's VmAspace/ArchVmAspace):
+- `ArchAspace`: map / unmap / protect / query on live page tables. Tables
+  from the PMM (`.mmu`) via the physmap; partly covered large pages are
+  split; emptied tables go back to the PMM (never roots). Each change is
+  followed by `arch_tlb_invalidate_page` (amd64/rv64 local only until SMP
+  shootdowns; arm64 broadcast). arm64 uses break-before-make when block
+  size or memory type changes, so never split the physmap (the tables are
+  reached through it).
+- `KernelAspace` (global `kernelAspace`, `vmLock`): region allocator over
+  KernelLayout's dynamic range (first fit, sorted `UniqueArray`, guard page
+  on both sides of every region). `allocate(pages:)` (fresh zeroed PMM
+  pages, RW+NX), `mapPhysical` (e.g. MMIO), `reserve` (address space only;
+  map via `withArch`), `free`. Not yet: VMOs/VMARs/user aspaces; kernel
+  top-level entries are created on demand, so on amd64/rv64 they must be
+  pre-populated before user address spaces copy the kernel half.
 
 Exceptions: `arch/<arch>/exceptions.S` saves an `arch_exception_frame_t`
 (kernel.h) and calls Swift `arch_exception` (Kernel/Exceptions.swift);

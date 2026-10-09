@@ -19,7 +19,7 @@ struct InterruptState {
 /// which catches recursive acquisition (a guaranteed deadlock) and release
 /// by a CPU that doesn't hold it; both panic.
 ///
-/// Lock order (take left before right): heap -> pmm.
+/// Lock order (take left before right): vm -> heap -> pmm.
 struct SpinLock: ~Copyable {
     /// 0 when free, else holder CPU + 1.
     private let holder = Atomic<UInt32>(0)

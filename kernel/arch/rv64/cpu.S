@@ -40,3 +40,11 @@ arch_spin_pause:
     .insn i 0x0f, 0, x0, x0, 0x010
     ret
 .size arch_spin_pause, . - arch_spin_pause
+
+// void arch_tlb_invalidate_page(uint64_t va): this hart, all levels for va.
+.globl arch_tlb_invalidate_page
+.type arch_tlb_invalidate_page, %function
+arch_tlb_invalidate_page:
+    sfence.vma a0, zero
+    ret
+.size arch_tlb_invalidate_page, . - arch_tlb_invalidate_page
