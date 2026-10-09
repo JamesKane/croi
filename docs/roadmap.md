@@ -115,8 +115,12 @@ overrun port packets (K5 ports), the frame intent's display alignment
 (ext 1/10), load balancing of fair threads between CPUs beyond wakeup
 placement. **Trace core for K3 done**: per-CPU rings, `sched` and `irq`
 categories, probe cost checked under KVM (`boot-smoke-kvm`: ~19 ns per
-enabled event, a disabled probe one load and a branch). Next: K3d
-(extended-state sizing).
+enabled event, a disabled probe one load and a branch). **K3d done**:
+per-thread extended-state areas sized at boot from what every CPU shares
+(QEMU: amd64 XSAVE 2.7 KB; arm64 SVE/SME 2048-bit, 8.75 KB + 74 KB lazy;
+rv64 D + V128, 808 B); arm64 EL2 no longer traps SVE/SME. **K3 is
+complete**; the save/restore code and lazy XFD/SME come with user threads
+in K6.
 - Threads, context switch and kernel threads. Wait queues, and owned wait
   queues with priority inheritance from day one.
 - **Scheduling contexts are separate objects from threads** (seL4 MCS

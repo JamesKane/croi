@@ -36,9 +36,6 @@
 #define CNTHCTL_EL1PCTEN (1 << 0)
 #define CNTHCTL_EL1PCEN  (1 << 1)
 
-// CPTR_EL2 (E2H = 0 layout): RES1 bits only, so FP/SIMD/SVE are not trapped.
-#define CPTR_EL2_RES1 0x33ff
-
 // ICC_SRE_EL2: GICv3 system registers enabled, and usable from EL1.
 #define ICC_SRE_EL2_SRE    (1 << 0)
 #define ICC_SRE_EL2_ENABLE (1 << 3)
@@ -78,8 +75,43 @@ croi_arch_enter_kernel:
     mov     x9, #(CNTHCTL_EL1PCTEN | CNTHCTL_EL1PCEN)
     msr     cnthctl_el2, x9
     msr     cntvoff_el2, xzr
-    mov     x9, #CPTR_EL2_RES1
+    // CPTR_EL2 (E2H = 0): trap none of FP/SIMD, SVE or SME. TZ (bit 8) and
+    // TSM (bit 12) trap SVE/SME where those exist and are RES1 where not.
+    mov     x9, #0x22ff
+    mrs     x10, id_aa64pfr0_el1
+    ubfx    x10, x10, #32, #4       // SVE
+    cbnz    x10, .Lel2_has_sve
+    orr     x9, x9, #(1 << 8)
+.Lel2_has_sve:
+    mrs     x10, id_aa64pfr1_el1
+    ubfx    x10, x10, #24, #4       // SME
+    cbnz    x10, .Lel2_has_sme
+    orr     x9, x9, #(1 << 12)
+.Lel2_has_sme:
     msr     cptr_el2, x9
+    isb
+    // EL2's vector-length limits: the hardware maximum (LEN = 15), so EL1
+    // chooses (ZCR_EL2 and SMCR_EL2 reset to UNKNOWN values).
+    mrs     x10, id_aa64pfr0_el1
+    ubfx    x10, x10, #32, #4
+    cbz     x10, .Lel2_no_sve
+    mov     x9, #0xf
+    msr     S3_4_C1_C2_0, x9        // ZCR_EL2
+.Lel2_no_sve:
+    mrs     x10, id_aa64pfr1_el1
+    ubfx    x10, x10, #24, #4
+    cbz     x10, .Lel2_no_sme
+    mov     x9, #0xf
+    mrs     x10, S3_0_C0_C4_5       // ID_AA64SMFR0_EL1
+    tbz     x10, #63, .Lel2_no_fa64
+    orr     x9, x9, #(1 << 31)      // FA64: the full ISA in streaming mode
+.Lel2_no_fa64:
+    ubfx    x10, x10, #56, #4       // SMEver: SME2 has ZT0
+    cbz     x10, .Lel2_no_zt0
+    orr     x9, x9, #(1 << 30)      // EZT0: don't trap ZT0
+.Lel2_no_zt0:
+    msr     S3_4_C1_C2_6, x9        // SMCR_EL2
+.Lel2_no_sme:
     msr     hstr_el2, xzr
     msr     vttbr_el2, xzr
 

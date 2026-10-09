@@ -234,3 +234,57 @@ arch_cpu_core_type:
     orr     x0, x1, x0, lsl #16
     ret
 .size arch_cpu_core_type, . - arch_cpu_core_type
+
+// --- Extended state detection (xstate.h) --------------------------------
+
+// uint64_t arch_arm64_id_register(uint32_t which)
+.globl arch_arm64_id_register
+.type arch_arm64_id_register, %function
+arch_arm64_id_register:
+    cmp     w0, #1
+    b.eq    1f
+    b.hi    2f
+    mrs     x0, id_aa64pfr0_el1
+    ret
+1:  mrs     x0, id_aa64pfr1_el1
+    ret
+2:  mrs     x0, S3_0_C0_C4_5            // ID_AA64SMFR0_EL1
+    ret
+.size arch_arm64_id_register, . - arch_arm64_id_register
+
+// CPACR_EL1: FPEN [21:20], ZEN [17:16], SMEN [25:24] = 0b11 (no traps).
+#define CPACR_FP_SVE_SME ((3 << 20) | (3 << 16) | (3 << 24))
+
+// uint64_t arch_sve_vector_length(uint64_t len)
+.globl arch_sve_vector_length
+.type arch_sve_vector_length, %function
+arch_sve_vector_length:
+    mrs     x2, cpacr_el1
+    mov     x3, #((3 << 20) | (3 << 16))
+    orr     x3, x2, x3
+    msr     cpacr_el1, x3
+    isb
+    msr     S3_0_C1_C2_0, x0            // ZCR_EL1.LEN
+    isb
+    .inst   0x04bf5020                  // rdvl x0, #1
+    msr     cpacr_el1, x2
+    isb
+    ret
+.size arch_sve_vector_length, . - arch_sve_vector_length
+
+// uint64_t arch_sme_vector_length(uint64_t len)
+.globl arch_sme_vector_length
+.type arch_sme_vector_length, %function
+arch_sme_vector_length:
+    mrs     x2, cpacr_el1
+    mov     x3, #((3 << 20) | (3 << 24))
+    orr     x3, x2, x3
+    msr     cpacr_el1, x3
+    isb
+    msr     S3_0_C1_C2_6, x0            // SMCR_EL1.LEN
+    isb
+    .inst   0x04bf5820                  // rdsvl x0, #1
+    msr     cpacr_el1, x2
+    isb
+    ret
+.size arch_sme_vector_length, . - arch_sme_vector_length

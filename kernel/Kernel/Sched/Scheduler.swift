@@ -182,8 +182,10 @@ enum Scheduler {
     /// Starts a kernel thread running `entry(argument)` on a new stack. With
     /// `cpu`, it only ever runs there. With `context`, it runs on that
     /// scheduling context; otherwise fair at `priority`'s weight.
+    /// `extendedState` gives it an FP/SIMD/vector save area (for user
+    /// threads from K6; kernel threads don't need one).
     static func spawn(_ name: StaticString, cpu: Int? = nil, priority: Int = Thread.defaultPriority,
-                      context: SchedContextPointer? = nil,
+                      context: SchedContextPointer? = nil, extendedState: Bool = false,
                       _ entry: Thread.Entry, _ argument: UInt64) throws(VmError) -> ThreadHandle {
         guard (0...Thread.maxPriority).contains(priority) else { panic("sched: priority out of range") }
         reapZombies()
@@ -196,6 +198,7 @@ enum Scheduler {
         let thread = makeRecord(name: name, stack: stack, ownsStack: true, entry: entry, argument: argument,
                                 isIdle: false, priority: priority, affinity: affinity, cpu: Int(Cpu.current))
         thread.pointee.savedSp = arch_thread_prepare(stack.top, thread.address)
+        if extendedState { thread.pointee.extendedState = ExtendedState.allocate() }
         locked {
             if let context { attach(thread, context) }
             makeReady(thread)
@@ -1208,6 +1211,7 @@ enum Scheduler {
                 panic("sched: freeing an unknown thread stack")
             }
         }
+        ExtendedState.free(thread.pointee.extendedState)
         let raw = unsafe UnsafeMutablePointer<Thread>(bitPattern: UInt(thread.address))!
         unsafe raw.deinitialize(count: 1)
         unsafe heap.free(UnsafeMutableRawPointer(raw))

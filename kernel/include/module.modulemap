@@ -6,5 +6,6 @@ module CKernel {
   header "time.h"
   header "thread.h"
   header "trace.h"
+  header "xstate.h"
   export *
 }

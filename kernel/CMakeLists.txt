@@ -22,6 +22,8 @@ add_library(kernel-swift OBJECT
   Kernel/Time/Timers.swift
   Kernel/Time/Watchdog.swift
   Kernel/Sched/Profile.swift
+  Kernel/Sched/ExtendedState.swift
+  Kernel/Sched/ExtendedStateSelfTest.swift
   Kernel/Sched/Thread.swift
   Kernel/Sched/Scheduler.swift
   Kernel/Sched/SchedulerSelfTest.swift

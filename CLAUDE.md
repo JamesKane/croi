@@ -257,6 +257,19 @@ the owner instead, as Zircon does). A thread may not exit holding one.
 `Scheduler.dump` prints every CPU and thread (all are on `allThreads`);
 the boot self-tests arm a 20 s deadman that calls it.
 
+Extended register state (K3d, Sched/ExtendedState.swift, include/xstate.h):
+measured on every CPU at boot (IPI call), the shared subset kept (user
+threads migrate): amd64 CPUID 0xD (standard-format XSAVE size; AMX tile
+data lazy behind XFD), arm64 FP/SIMD, SVE and SME vector lengths
+(rdvl/rdsvl with CPACR traps lifted only for the probe; every CPU's
+ZCR_EL1/SMCR_EL1 then set to the smallest), rv64 F/D/V from the RHCT
+plus `vlenb`. `eagerSize` bytes per user thread (saved each switch) +
+`lazySize` on first use (AMX tiles, SME ZA/streaming state).
+`spawn(extendedState: true)` allocates the area; kernel threads have
+none and never touch FP. The save/restore code is K6's. The arm64 EL2
+drop sets CPTR_EL2 from the ID registers (TZ/TSM are traps where SVE/SME
+exist, RES1 otherwise: 0x33ff trapped both) and opens ZCR_EL2/SMCR_EL2.
+
 Trace (Kernel/Trace/, include/trace.h; roadmap "Trace", K3 part):
 per-CPU rings (header page + power-of-two records of 32 bytes,
 `croi_trace_record_t`: raw counter time, kind, CPU, thread trace id

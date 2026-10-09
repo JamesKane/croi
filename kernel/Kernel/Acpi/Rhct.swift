@@ -15,6 +15,28 @@ enum RiscvIsa {
         return nodes > 0 && matches == nodes
     }
 
+    /// Whether every ISA string node's base ("rv64imafdcv...", before the
+    /// first '_') has single-letter extension `letter` ('g' implies imafd).
+    static func everyHartHasBase(_ letter: UInt8, _ acpi: AcpiTables) -> Bool {
+        var nodes = 0
+        var matches = 0
+        forEachIsaString(acpi) { isa in
+            nodes += 1
+            var found = false
+            var i = 4  // past "rv64"
+            while i < isa.count, isa[i] != UInt8(ascii: "_") {
+                let c = isa[i] | 0x20
+                // No String here: its storage is reference counted (see CheckNoArc).
+                let impliedByG = letter == UInt8(ascii: "i") || letter == UInt8(ascii: "m") || letter == UInt8(ascii: "a")
+                    || letter == UInt8(ascii: "f") || letter == UInt8(ascii: "d")
+                if c == letter || (c == UInt8(ascii: "g") && impliedByG) { found = true }
+                i += 1
+            }
+            if found { matches += 1 }
+        }
+        return nodes > 0 && matches == nodes
+    }
+
     /// Writes the first ISA string (the harts' are identical on QEMU).
     static func writeBootIsa(_ acpi: AcpiTables, to out: some TextOutput) {
         var written = false

@@ -69,6 +69,9 @@ struct Thread: ~Copyable {
     /// Dead and switched off its stack: safe to free.
     var switchedOut = false
     var detached = false
+    /// Its extended register state area (ExtendedState), or 0: kernel
+    /// threads never use FP/SIMD.
+    var extendedState: UInt64 = 0
     /// Its name in trace records: task << 12 | thread; kernel threads are
     /// task 0, idle threads 0.
     var traceId: UInt32 = 0

@@ -66,9 +66,12 @@ enum MutexSelfTest {
         let window = argument & 0xFFFF, priority = Int(argument >> 16)
         a.lock()
         let giveUp = Clock.now() + 2000 * ms
-        while !flag.load(ordering: .acquiring) {  // High waiting and Mid spawned
+        // Wait for High to be waiting and Mid spawned by sleeping, not
+        // spinning: once High waits we run on its inherited budget, and
+        // spinning would spend it before the measured window.
+        while !flag.load(ordering: .acquiring) {
             if Clock.now() > giveUp { break }
-            arch_spin_pause()
+            Scheduler.sleep(until: Clock.now() + ms / 4)
         }
         let profile = Scheduler.effectiveProfile(of: Scheduler.current)
         observed.store(profile.discipline == .fair ? Int(profile.weight) : -1, ordering: .relaxed)
@@ -124,7 +127,9 @@ enum MutexSelfTest {
         flag.store(true, ordering: .releasing)
         guard high.join() == 0, mid.join() == 0, low.join() == 0 else { panic("mutex self-test: deadline threads failed") }
         guard observed.load(ordering: .relaxed) == -1 else { panic("mutex self-test: deadline not inherited") }
-        guard midDuringHold.load(ordering: .relaxed) == 0, midWhenHighLocked.load(ordering: .relaxed) == 0 else {
+        // Mid may run while Low sleeps waiting to start; while Low runs on
+        // the inherited reservation, it must not.
+        guard midDuringHold.load(ordering: .relaxed) == 0 else {
             panic("mutex self-test: fair thread ran during inherited deadline work")
         }
     }

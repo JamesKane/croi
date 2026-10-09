@@ -155,3 +155,16 @@ arch_cpu_core_type:
     li      a0, 0
     ret
 .size arch_cpu_core_type, . - arch_cpu_core_type
+
+// uint64_t arch_rv_vlenb(void): sstatus.VS (bits 10:9) Initial for the
+// read, then Off again.
+.globl arch_rv_vlenb
+.type arch_rv_vlenb, %function
+arch_rv_vlenb:
+    li      t0, (1 << 9)
+    csrs    sstatus, t0
+    csrr    a0, 0xc22                   // vlenb
+    li      t0, (3 << 9)
+    csrc    sstatus, t0
+    ret
+.size arch_rv_vlenb, . - arch_rv_vlenb

@@ -244,10 +244,14 @@ func kernel_main_continue() -> Never {
         console.write(decimal: UInt64(CpuTopologies.distinct { $0.coreType }))
         console.write(" core type(s)\n")
 
+        ExtendedState.initialize(acpi)
+        ExtendedStateSelfTest.run(console)
+
         // From here on the boot code is the "bootstrap" thread.
         unsafe Scheduler.initializeBootCpu(stack: UnsafePointer<PerCpu>(bitPattern: UInt(Smp.records[0]))!.pointee.stack)
         SelfTestDeadman.arm()
         SchedulerSelfTest.run(console)
+        ExtendedStateSelfTest.threads()
         MutexSelfTest.run(console)
         DeadlineSelfTest.run(console)
         TraceSelfTest.run(console)
