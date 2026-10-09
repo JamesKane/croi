@@ -1,0 +1,9 @@
+module CEFI {
+  header "efi.h"
+  export *
+}
+
+module CLoader {
+  header "loader.h"
+  export *
+}

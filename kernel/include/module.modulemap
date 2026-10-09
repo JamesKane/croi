@@ -1,0 +1,4 @@
+module CKernel {
+  header "kernel.h"
+  export *
+}

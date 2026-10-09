@@ -1,0 +1,53 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 29, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "toolchainFile": "${sourceDir}/cmake/toolchain.cmake",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" }
+    },
+    { "name": "amd64", "inherits": "base", "cacheVariables": { "CROI_ARCH": "amd64" } },
+    { "name": "arm64", "inherits": "base", "cacheVariables": { "CROI_ARCH": "arm64" } },
+    { "name": "rv64",  "inherits": "base", "cacheVariables": { "CROI_ARCH": "rv64" } }
+  ],
+  "buildPresets": [
+    { "name": "amd64", "configurePreset": "amd64" },
+    { "name": "arm64", "configurePreset": "arm64" },
+    { "name": "rv64",  "configurePreset": "rv64" }
+  ],
+  "testPresets": [
+    { "name": "amd64", "configurePreset": "amd64", "output": { "outputOnFailure": true } },
+    { "name": "arm64", "configurePreset": "arm64", "output": { "outputOnFailure": true } },
+    { "name": "rv64",  "configurePreset": "rv64",  "output": { "outputOnFailure": true } }
+  ],
+  "workflowPresets": [
+    {
+      "name": "amd64",
+      "steps": [
+        { "type": "configure", "name": "amd64" },
+        { "type": "build", "name": "amd64" },
+        { "type": "test", "name": "amd64" }
+      ]
+    },
+    {
+      "name": "arm64",
+      "steps": [
+        { "type": "configure", "name": "arm64" },
+        { "type": "build", "name": "arm64" },
+        { "type": "test", "name": "arm64" }
+      ]
+    },
+    {
+      "name": "rv64",
+      "steps": [
+        { "type": "configure", "name": "rv64" },
+        { "type": "build", "name": "rv64" },
+        { "type": "test", "name": "rv64" }
+      ]
+    }
+  ]
+}
