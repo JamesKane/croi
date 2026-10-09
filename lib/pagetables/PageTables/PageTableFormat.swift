@@ -31,15 +31,18 @@ public struct MapAttributes: Sendable, Equatable {
     /// Accessible from user mode (EL0, U-mode, CPL 3). User mappings are
     /// never global and never executable by the kernel.
     public var user = false
+    /// amd64 protection key (PKU, 0-15) of a user page; 0 elsewhere.
+    public var protectionKey: UInt8 = 0
 
     @inlinable
     public init(writable: Bool = false, executable: Bool = false, cache: CachePolicy = .cached, global: Bool = false,
-                user: Bool = false) {
+                user: Bool = false, protectionKey: UInt8 = 0) {
         self.writable = writable
         self.executable = executable
         self.cache = cache
         self.global = global
         self.user = user
+        self.protectionKey = protectionKey
     }
 }
 
@@ -70,7 +73,7 @@ public enum PageTableFormat {
     @inlinable public static func leaf(_ phys: UInt64, level: Int, _ a: MapAttributes) -> UInt64 {
         var e = phys | present | accessed | dirty
         if a.writable { e |= writable }
-        if a.user { e |= userBit }
+        if a.user { e |= userBit | UInt64(a.protectionKey & 0xF) << 59 }  // PKU key, bits 62:59
         switch a.cache {
         case .cached: break
         case .writeCombining: e |= writeThrough                // PAT index 1
@@ -93,7 +96,8 @@ public enum PageTableFormat {
         default: .device
         }
         return MapAttributes(writable: e & writable != 0, executable: e & noExecute == 0,
-                             cache: cache, global: e & globalBit != 0, user: e & userBit != 0)
+                             cache: cache, global: e & globalBit != 0, user: e & userBit != 0,
+                             protectionKey: e & userBit != 0 ? UInt8((e >> 59) & 0xF) : 0)
     }
 
     #elseif arch(arm64)

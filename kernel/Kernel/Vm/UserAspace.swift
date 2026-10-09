@@ -24,29 +24,58 @@ struct VmRights: OptionSet, Equatable {
     static var execute: VmRights { VmRights(rawValue: 4) }
 }
 
+/// A sub-region of a user address space (Zircon's child VMAR). Region 0 is
+/// the root: all of UserLayout. A reservation holds its whole range for
+/// its owner: nothing else is placed there, and inside it views are mapped
+/// and unmapped atomically (ext 7).
+struct Region {
+    let id: UInt32
+    let base: UInt64
+    let size: UInt64
+    let parent: UInt32
+    let reservation: Bool
+    /// A JIT reservation (ext 7): its protection key (PKU), or 0.
+    var jit = false
+    var jitKey: UInt8 = 0
+
+    func contains(_ base: UInt64, _ size: UInt64) -> Bool {
+        base >= self.base && size <= self.size && base - self.base <= self.size - size
+    }
+}
+
 /// A VMO range mapped into a user address space (Zircon's VmMapping). It
-/// holds a reference to the VMO.
+/// holds a reference to the VMO, and the VMO lists the address space (for
+/// decommit).
 struct Mapping {
     var base: UInt64
     var size: UInt64
     let vmo: VmoPointer
     /// Byte offset into the VMO of `base`.
-    let offset: UInt64
-    let rights: VmRights
+    var offset: UInt64
+    var rights: VmRights
+    let region: UInt32
+    /// Its region's JIT protection key (0: none).
+    var key: UInt8 = 0
 
     func contains(_ virt: UInt64) -> Bool { virt >= base && virt - base < size }
+    func overlaps(_ base: UInt64, _ size: UInt64) -> Bool { base < self.base + self.size && self.base < base + size }
 }
 
 /// A user address space's state (Zircon's user VmAspace): lower-half page
-/// tables sharing the kernel half, an ASID, and its mappings (sorted by
-/// base; the root VMAR. K4b adds sub-regions and reservations). Lives on
-/// the heap at a fixed address; `lock` guards it. Lock order: aspace ->
-/// vmo -> heap -> pmm.
+/// tables sharing the kernel half, an ASID, its regions and its mappings
+/// (each sorted by base, mappings never overlapping). Lives on the heap at
+/// a fixed address, reference counted (the owner, plus a decommit walking
+/// it); `lock` guards the rest. Lock order: aspace -> vmo -> heap -> pmm.
 struct UserAspaceRecord: ~Copyable {
     var arch: ArchAspace
     let asid: UInt64
     let lock = SpinLock()
     var mappings = UniqueArray<Mapping>()
+    var regions = UniqueArray<Region>()
+    var nextRegion: UInt32 = 1
+    /// Torn down: its tables are gone; holders of a reference skip it.
+    var dead = false
+    let references = Atomic<Int>(1)
     /// Threads bound to it (scheduler lock).
     var threads = 0
     /// CPUs that have it loaded, one bit each (they need its TLB flushes).
@@ -60,12 +89,28 @@ struct UserAspaceRecord: ~Copyable {
         unsafeAddress { unsafe UnsafePointer<UserAspaceRecord>(bitPattern: UInt(address))! }
         nonmutating unsafeMutableAddress { unsafe UnsafeMutablePointer<UserAspaceRecord>(bitPattern: UInt(address))! }
     }
+
+    func retain() {
+        guard pointee.references.add(1, ordering: .relaxed).newValue > 1 else { panic("aspace: retained after release") }
+    }
+
+    /// The last reference frees the record (the tables went at teardown).
+    func release() {
+        guard pointee.references.subtract(1, ordering: .acquiringAndReleasing).newValue == 0 else { return }
+        let raw = unsafe UnsafeMutablePointer<UserAspaceRecord>(bitPattern: UInt(address))!
+        unsafe raw.deinitialize(count: 1)
+        unsafe heap.free(UnsafeMutableRawPointer(raw))
+        UserAspaces.live.subtract(1, ordering: .relaxed)
+    }
 }
 
-/// The owner of a user address space. Dropping it frees the tables and
-/// the ASID; no thread may still use it.
+/// The owner of a user address space. Dropping it unmaps everything and
+/// frees the tables and the ASID; no thread may still use it.
 struct UserAspace: ~Copyable {
     let record: UserAspacePointer
+
+    /// The root region's id.
+    static var root: UInt32 { 0 }
 
     init() throws(VmError) {
         let arch = try kernelAspace.makeUserTables()
@@ -80,8 +125,8 @@ struct UserAspace: ~Copyable {
         UserAspaces.live.add(1, ordering: .relaxed)
     }
 
-    /// Maps physical memory at a user address (the VMAR layer builds on
-    /// this). `attributes.user` is forced on.
+    /// Maps physical memory at a user address, outside the region and
+    /// mapping bookkeeping (tests of the tables themselves).
     func map(virt: UInt64, phys: UInt64, size: UInt64, _ attributes: MapAttributes) throws(VmError) {
         guard UserLayout.contains(virt, size) else { throw .outOfRange(virt) }
         var attributes = attributes
@@ -103,78 +148,284 @@ struct UserAspace: ~Copyable {
         record.pointee.lock.withLock { record.pointee.arch.query(virt) }
     }
 
+    var mappingCount: Int { record.pointee.lock.withLock { record.pointee.mappings.count } }
+    var regionCount: Int { record.pointee.lock.withLock { record.pointee.regions.count } }
+
+    // MARK: Regions
+
+    /// A sub-region of `parent` (`size` bytes, aligned), placed first fit.
+    /// A reservation holds its range for views (`mapView`).
+    /// A JIT reservation (`jit`, entitled code generation) gets a
+    /// protection key where the hardware has them (see Jit).
+    func allocateRegion(size: UInt64, alignment: UInt64 = KernelLayout.pageSize, in parent: UInt32 = root,
+                        reservation: Bool = false, jit: Bool = false) throws(VmError) -> Region {
+        guard size > 0, size % KernelLayout.pageSize == 0, alignment % KernelLayout.pageSize == 0,
+              alignment & (alignment - 1) == 0, !jit || reservation else { throw .invalidArgument }
+        var key: UInt8 = 0
+        if jit, Jit.mechanism == .protectionKeys {
+            guard let allocated = Jit.allocateKey() else { throw .noSpace }
+            key = allocated
+        }
+        return try record.pointee.lock.withLock { () throws(VmError) -> Region in
+            let container = try region(parent)
+            guard !container.reservation else { throw .invalidArgument }
+            let base: UInt64
+            do throws(VmError) {
+                base = try findGap(size, alignment, in: container)
+            } catch {
+                Jit.freeKey(key)
+                throw error
+            }
+            let region = Region(id: record.pointee.nextRegion, base: base, size: size, parent: parent,
+                                reservation: reservation, jit: jit, jitKey: key)
+            record.pointee.nextRegion += 1
+            var index = 0
+            while index < record.pointee.regions.count, record.pointee.regions[index].base < base { index += 1 }
+            record.pointee.regions.insert(region, at: index)
+            return region
+        }
+    }
+
+    /// Removes a region, its sub-regions and everything mapped in them.
+    func destroyRegion(_ id: UInt32) throws(VmError) {
+        var released = UniqueArray<UInt64>()
+        try record.pointee.lock.withLock { () throws(VmError) in
+            let target = try region(id)
+            guard id != Self.root else { throw .invalidArgument }
+            try removeMappings(target.base, target.size, collecting: &released)
+            var i = 0
+            while i < record.pointee.regions.count {
+                let r = record.pointee.regions[i]
+                if target.contains(r.base, r.size) {
+                    Jit.freeKey(r.jitKey)
+                    _ = record.pointee.regions.remove(at: i)
+                } else {
+                    i += 1
+                }
+            }
+        }
+        release(released)
+    }
+
     // MARK: Mappings
 
-    /// Maps [offset, offset+size) of `vmo` at `at`, or at the first free
-    /// address with a guard page each side. Physical and contiguous VMOs
-    /// are mapped at once (with large pages where aligned); anonymous ones
-    /// page in on first touch. Returns the base.
+    /// Maps [offset, offset+size) of `vmo` in `region` (not a reservation:
+    /// see `mapView`), at `at` or first fit with a guard page each side.
+    /// Physical and contiguous VMOs are mapped at once (large pages where
+    /// aligned); anonymous ones page in on first touch. Returns the base.
     func map(_ vmo: borrowing Vmo, offset: UInt64 = 0, size: UInt64, at fixed: UInt64? = nil,
-             rights: VmRights) throws(VmError) -> UInt64 {
-        let page = KernelLayout.pageSize
-        guard size > 0, size % page == 0, offset % page == 0, offset <= vmo.size, size <= vmo.size - offset,
-              rights.contains(.read) || rights.isEmpty == false else { throw .invalidArgument }
+             in id: UInt32 = root, rights: VmRights) throws(VmError) -> UInt64 {
+        try checkMapping(vmo, offset, size, rights)
         let pointer = vmo.record
         return try record.pointee.lock.withLock { () throws(VmError) -> UInt64 in
+            let container = try region(id)
+            guard !container.reservation, Jit.allows(rights, key: 0) else { throw .invalidArgument }
             let base: UInt64
             if let fixed {
-                guard fixed % page == 0, UserLayout.contains(fixed, size), !overlaps(fixed, size) else {
-                    throw .alreadyMapped(fixed)
-                }
+                guard fixed % KernelLayout.pageSize == 0, container.contains(fixed, size),
+                      isFree(fixed, size, in: container) else { throw .alreadyMapped(fixed) }
                 base = fixed
             } else {
-                base = try findGap(size)
+                base = try findGap(size, KernelLayout.pageSize, in: container)
             }
-            if case .anonymous = pointer.pointee.kind {} else {
-                try record.pointee.arch.map(virt: base, phys: pointer.commit(at: offset)!, size: size,
-                                            attributes(rights, pointer.pointee.cache))
-            }
-            pointer.retain()
-            let mapping = Mapping(base: base, size: size, vmo: pointer, offset: offset, rights: rights)
-            var index = 0
-            while index < record.pointee.mappings.count, record.pointee.mappings[index].base < base { index += 1 }
-            record.pointee.mappings.insert(mapping, at: index)
+            try insert(Mapping(base: base, size: size, vmo: pointer, offset: offset, rights: rights, region: id))
             return base
         }
     }
 
-    /// Removes the mapping that starts at `base` (whole mappings only until
-    /// K4b's reservations split them).
+    /// Ext 7: maps a view of `vmo` at [at, at+size) inside reservation
+    /// `id`, replacing whatever views were there, atomically: other threads
+    /// see the old view or the new one, never a hole (their faults wait for
+    /// the lock and find the new mapping).
+    func mapView(_ vmo: borrowing Vmo, offset: UInt64 = 0, size: UInt64, at base: UInt64, in id: UInt32,
+                 rights: VmRights) throws(VmError) {
+        try checkMapping(vmo, offset, size, rights)
+        let pointer = vmo.record
+        var released = UniqueArray<UInt64>()
+        try record.pointee.lock.withLock { () throws(VmError) in
+            let reservation = try region(id)
+            guard reservation.reservation, base % KernelLayout.pageSize == 0, reservation.contains(base, size),
+                  Jit.allows(rights, key: reservation.jitKey) else { throw .invalidArgument }
+            try removeMappings(base, size, collecting: &released)
+            try insert(Mapping(base: base, size: size, vmo: pointer, offset: offset, rights: rights, region: id,
+                               key: reservation.jitKey))
+        }
+        release(released)
+    }
+
+    /// Ext 7: unmaps the views in [at, at+size) of reservation `id`; the
+    /// range stays reserved.
+    func unmapView(at base: UInt64, size: UInt64, in id: UInt32) throws(VmError) {
+        var released = UniqueArray<UInt64>()
+        try record.pointee.lock.withLock { () throws(VmError) in
+            let reservation = try region(id)
+            guard reservation.reservation, reservation.contains(base, size) else { throw .invalidArgument }
+            try removeMappings(base, size, collecting: &released)
+        }
+        release(released)
+    }
+
+    /// Unmaps [base, base+size): mappings inside go, ones overlapping an
+    /// edge are trimmed, one spanning the range is split. Regions stay.
+    func unmap(_ base: UInt64, size: UInt64) throws(VmError) {
+        guard base % KernelLayout.pageSize == 0, size % KernelLayout.pageSize == 0, size > 0,
+              UserLayout.contains(base, size) else { throw .invalidArgument }
+        var released = UniqueArray<UInt64>()
+        try record.pointee.lock.withLock { () throws(VmError) in
+            try removeMappings(base, size, collecting: &released)
+        }
+        release(released)
+    }
+
+    /// Removes the mapping that starts at `base`, whole.
     func unmap(mappingAt base: UInt64) throws(VmError) {
-        let vmo = try record.pointee.lock.withLock { () throws(VmError) -> VmoPointer in
-            guard let index = index(of: base) else { throw .notFound(base) }
-            let mapping = record.pointee.mappings.remove(at: index)
-            try record.pointee.arch.unmap(virt: mapping.base, size: mapping.size)
-            return mapping.vmo
+        let size = try record.pointee.lock.withLock { () throws(VmError) -> UInt64 in
+            for i in 0..<record.pointee.mappings.count where record.pointee.mappings[i].base == base {
+                return record.pointee.mappings[i].size
+            }
+            throw .notFound(base)
         }
-        vmo.release()
+        try unmap(base, size: size)
     }
 
-    var mappingCount: Int { record.pointee.lock.withLock { record.pointee.mappings.count } }
-
-    private func index(of base: UInt64) -> Int? {
-        for i in 0..<record.pointee.mappings.count where record.pointee.mappings[i].base == base { return i }
-        return nil
+    /// Changes the rights of everything mapped in [base, base+size), which
+    /// must be mapped throughout; mappings are split at the edges.
+    func protect(_ base: UInt64, size: UInt64, rights: VmRights) throws(VmError) {
+        guard base % KernelLayout.pageSize == 0, size % KernelLayout.pageSize == 0, size > 0,
+              UserLayout.contains(base, size) else { throw .invalidArgument }
+        try record.pointee.lock.withLock { () throws(VmError) in
+            var covered: UInt64 = 0
+            for i in 0..<record.pointee.mappings.count where record.pointee.mappings[i].overlaps(base, size) {
+                let m = record.pointee.mappings[i]
+                covered += min(m.base + m.size, base + size) - max(m.base, base)
+            }
+            guard covered == size else { throw .notFound(base) }
+            var key: UInt8 = 0
+            for i in 0..<record.pointee.mappings.count where record.pointee.mappings[i].overlaps(base, size) {
+                key = record.pointee.mappings[i].key
+                guard Jit.allows(rights, key: key) else { throw .invalidArgument }  // W^X
+            }
+            try split(at: base)
+            try split(at: base + size)
+            var cache = CachePolicy.cached
+            for i in 0..<record.pointee.mappings.count where record.pointee.mappings[i].overlaps(base, size) {
+                record.pointee.mappings[i].rights = rights
+                cache = record.pointee.mappings[i].vmo.pointee.cache
+            }
+            try record.pointee.arch.protect(virt: base, size: size, attributes(rights, cache, key: key))
+        }
     }
 
-    private func overlaps(_ base: UInt64, _ size: UInt64) -> Bool {
+    // MARK: Helpers (lock held)
+
+    private func checkMapping(_ vmo: borrowing Vmo, _ offset: UInt64, _ size: UInt64, _ rights: VmRights) throws(VmError) {
+        let page = KernelLayout.pageSize
+        guard size > 0, size % page == 0, offset % page == 0, offset <= vmo.size, size <= vmo.size - offset,
+              !rights.isEmpty else { throw .invalidArgument }
+    }
+
+    private func region(_ id: UInt32) throws(VmError) -> Region {
+        if id == Self.root {
+            return Region(id: 0, base: UserLayout.base, size: UserLayout.top - UserLayout.base, parent: 0,
+                          reservation: false)
+        }
+        for i in 0..<record.pointee.regions.count where record.pointee.regions[i].id == id {
+            return record.pointee.regions[i]
+        }
+        throw .notFound(UInt64(id))
+    }
+
+    /// Whether [base, base+size) inside `container` touches none of its
+    /// mappings or sub-regions.
+    private func isFree(_ base: UInt64, _ size: UInt64, in container: Region) -> Bool {
+        for i in 0..<record.pointee.mappings.count where record.pointee.mappings[i].overlaps(base, size) {
+            return false
+        }
+        for i in 0..<record.pointee.regions.count {
+            let r = record.pointee.regions[i]
+            if r.parent == container.id, base < r.base + r.size, r.base < base + size { return false }
+        }
+        return true
+    }
+
+    /// First fit in `container`, a guard page from each mapping and
+    /// sub-region in it.
+    private func findGap(_ size: UInt64, _ alignment: UInt64, in container: Region) throws(VmError) -> UInt64 {
+        let page = KernelLayout.pageSize
+        var candidate = (container.base + alignment - 1) & ~(alignment - 1)
+        while container.contains(candidate, size) {
+            var bumped = false
+            for i in 0..<record.pointee.mappings.count {
+                let m = record.pointee.mappings[i]
+                if candidate < m.base + m.size + page, m.base < candidate + size + page {
+                    candidate = (m.base + m.size + page + alignment - 1) & ~(alignment - 1)
+                    bumped = true
+                }
+            }
+            for i in 0..<record.pointee.regions.count {
+                let r = record.pointee.regions[i]
+                if r.parent == container.id, candidate < r.base + r.size + page, r.base < candidate + size + page {
+                    candidate = (r.base + r.size + page + alignment - 1) & ~(alignment - 1)
+                    bumped = true
+                }
+            }
+            if !bumped { return candidate }
+        }
+        throw .noSpace
+    }
+
+    /// Adds a mapping (mapping physical/contiguous VMOs at once), taking a
+    /// VMO reference and listing this address space on the VMO.
+    private func insert(_ mapping: Mapping) throws(VmError) {
+        if case .anonymous = mapping.vmo.pointee.kind {} else {
+            try record.pointee.arch.map(virt: mapping.base, phys: mapping.vmo.commit(at: mapping.offset)!,
+                                        size: mapping.size,
+                                        attributes(mapping.rights, mapping.vmo.pointee.cache, key: mapping.key))
+        }
+        mapping.vmo.retain()
+        mapping.vmo.addMapper(record.address)
+        var index = 0
+        while index < record.pointee.mappings.count, record.pointee.mappings[index].base < mapping.base { index += 1 }
+        record.pointee.mappings.insert(mapping, at: index)
+    }
+
+    /// Splits the mapping spanning `at` (if any) into two at that address.
+    private func split(at: UInt64) throws(VmError) {
         for i in 0..<record.pointee.mappings.count {
             let m = record.pointee.mappings[i]
-            if base < m.base + m.size + KernelLayout.pageSize, m.base < base + size + KernelLayout.pageSize { return true }
+            guard at > m.base, at < m.base + m.size else { continue }
+            record.pointee.mappings[i].size = at - m.base
+            m.vmo.retain()
+            m.vmo.addMapper(record.address)
+            record.pointee.mappings.insert(Mapping(base: at, size: m.base + m.size - at, vmo: m.vmo,
+                                                   offset: m.offset + (at - m.base), rights: m.rights,
+                                                   region: m.region, key: m.key), at: i + 1)
+            return
         }
-        return false
     }
 
-    /// First fit above UserLayout.base, a guard page from each neighbour.
-    private func findGap(_ size: UInt64) throws(VmError) -> UInt64 {
-        var candidate = UserLayout.base
-        for i in 0..<record.pointee.mappings.count {
+    /// Unmaps [base, base+size): trims and splits mappings at the edges,
+    /// drops the ones inside (their VMOs go into `released`, to be released
+    /// once the lock is dropped).
+    private func removeMappings(_ base: UInt64, _ size: UInt64, collecting released: inout UniqueArray<UInt64>) throws(VmError) {
+        try split(at: base)
+        try split(at: base + size)
+        var i = 0
+        while i < record.pointee.mappings.count {
             let m = record.pointee.mappings[i]
-            if candidate + size + KernelLayout.pageSize <= m.base { return candidate }
-            candidate = max(candidate, m.base + m.size + KernelLayout.pageSize)
+            if m.base >= base, m.base + m.size <= base + size {
+                _ = record.pointee.mappings.remove(at: i)
+                m.vmo.removeMapper(record.address)
+                released.append(m.vmo.address)
+            } else {
+                i += 1
+            }
         }
-        guard UserLayout.contains(candidate, size) else { throw .noSpace }
-        return candidate
+        try record.pointee.arch.unmap(virt: base, size: size)
+    }
+
+    private func release(_ vmos: borrowing UniqueArray<UInt64>) {
+        for i in 0..<vmos.count { VmoPointer(address: vmos[i]).release() }
     }
 
     deinit {
@@ -182,22 +433,26 @@ struct UserAspace: ~Copyable {
               record.pointee.activeCpus.load(ordering: .acquiring) == 0 else {
             panic("aspace: destroyed while in use")
         }
-        while let mapping = record.pointee.mappings.popLast() {
-            mapping.vmo.release()  // the tables go below, all at once
+        var released = UniqueArray<UInt64>()
+        record.pointee.lock.withLock {
+            record.pointee.dead = true
+            while let region = record.pointee.regions.popLast() { Jit.freeKey(region.jitKey) }
+            while let mapping = record.pointee.mappings.popLast() {
+                mapping.vmo.removeMapper(record.address)
+                released.append(mapping.vmo.address)
+            }
+            record.pointee.arch.destroyUser()  // every table, at once
         }
-        record.pointee.arch.destroyUser()
+        release(released)
         Asids.free(record.pointee.asid)
-        let raw = unsafe UnsafeMutablePointer<UserAspaceRecord>(bitPattern: UInt(record.address))!
-        unsafe raw.deinitialize(count: 1)
-        unsafe heap.free(UnsafeMutableRawPointer(raw))
-        UserAspaces.live.subtract(1, ordering: .relaxed)
+        record.release()
     }
 }
 
-/// Page tables attributes for a mapping's rights.
-func attributes(_ rights: VmRights, _ cache: CachePolicy) -> MapAttributes {
+/// Page tables attributes for a mapping's rights (and JIT key).
+func attributes(_ rights: VmRights, _ cache: CachePolicy, key: UInt8 = 0) -> MapAttributes {
     MapAttributes(writable: rights.contains(.write), executable: rights.contains(.execute), cache: cache,
-                  global: false, user: true)
+                  global: false, user: true, protectionKey: key)
 }
 
 enum UserAspaces {
@@ -208,7 +463,12 @@ enum UserAspaces {
     /// A page fault at a user address in the running thread's address
     /// space: maps the page if a mapping allows the access (committing an
     /// anonymous page on first touch). False if it doesn't.
-    static func handleFault(at virt: UInt64, write: Bool, execute: Bool) -> Bool {
+    static func handleFault(at virt: UInt64, write: Bool, execute: Bool, protectionKey: Bool = false) -> Bool {
+        // A protection-key fault is this thread's PKRU saying no: final.
+        guard !protectionKey else {
+            Trace.event(CROI_TRACE_VM, UInt16(CROI_TK_FAULT), virt, write ? CROI_VM_FAULT_WRITE : 0)
+            return false
+        }
         guard UserLayout.contains(virt & ~(KernelLayout.pageSize - 1), KernelLayout.pageSize),
               let aspace = Scheduler.current.pointee.aspace else { return false }
         let page = virt & ~(KernelLayout.pageSize - 1)
@@ -230,7 +490,7 @@ enum UserAspaces {
             guard let phys = mapping.vmo.commit(at: mapping.offset + (page - mapping.base)) else { return false }
             do throws(VmError) {
                 try aspace.pointee.arch.map(virt: page, phys: phys, size: KernelLayout.pageSize,
-                                            attributes(mapping.rights, mapping.vmo.pointee.cache))
+                                            attributes(mapping.rights, mapping.vmo.pointee.cache, key: mapping.key))
             } catch {
                 return false
             }

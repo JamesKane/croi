@@ -245,6 +245,9 @@ func kernel_main_continue() -> Never {
         console.write(" core type(s)\n")
 
         UserAspaces.initialize()
+        ContiguousPool.initialize()
+        Jit.initialize()
+        VmoCache.initialize(acpi)
         ExtendedState.initialize(acpi)
         ExtendedStateSelfTest.run(console)
 
@@ -258,6 +261,10 @@ func kernel_main_continue() -> Never {
         TraceSelfTest.run(console)
         AspaceSelfTest.run(console)
         VmoSelfTest.run(console)
+        RegionSelfTest.run(console)
+        PhysicalSelfTest.run(console)
+        AccountSelfTest.run(console)
+        JitSelfTest.run(console)
         SelfTestDeadman.done.store(true, ordering: .relaxed)
     } else {
         console.write("  cpus:   no ACPI tables; boot cpu only\n")

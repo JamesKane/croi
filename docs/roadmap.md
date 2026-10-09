@@ -171,11 +171,17 @@ late, and missed). Model: NeoVectra ADR-0049 (kernel trace) and ADR-0050
 Progress: **K4a done**: user address spaces (kernel half shared, ASIDs,
 switched with threads), VMOs (anonymous, physical, contiguous), mappings
 in the root region, demand-paging faults with fixup-based recovery, the
-`vm` trace category, trace rings in VMOs. Next: K4b (reservations with
-map-view/unmap-view, commit/decommit, sub-regions, partial unmap,
-contiguous with an address limit and the boot pool, cache ops, the RAM
-deny list, device-local accounting, a sparse page list), then K4c (choose
-the per-thread W^X mechanism).
+`vm` trace category, trace rings in VMOs. **K4b done**: sub-regions and
+reservations with atomic view map/unmap (ext 7), partial unmap, protect,
+commit/decommit, contiguous VMOs with an address limit and a boot-time
+pool (loaning still to come), cache ops and cache policy changes, the RAM
+deny list for physical VMOs, memory accounts with pressure and
+device-local/pinned VMOs (ext 6), a sparse page list. **K4c done**
+(decided 2026-10-09): protection keys where the hardware has them (amd64
+PKU; arm64 POE detected only, until a target has it) give per-thread JIT
+write toggling; elsewhere a JIT uses dual RW/RX views; W^X holds for every
+other mapping. K4 is complete apart from page loaning and phase B
+(copy-on-write clones).
 - **VMOs:** anonymous, physical, contiguous, and **device-local**
   (BAR/VRAM/pinned). Device-local VMOs are accounted to the owning process
   for the combined CPU+GPU budget, never paged or evicted, and the budget

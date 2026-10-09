@@ -9,5 +9,7 @@ module CKernel {
   header "xstate.h"
   header "aspace.h"
   header "usercopy.h"
+  header "cache.h"
+  header "jit.h"
   export *
 }

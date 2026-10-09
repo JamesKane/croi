@@ -19,6 +19,8 @@ struct CpuScheduler {
     var sliceTimer: UInt32 = 0
     /// The user address space whose tables are loaded here, if any.
     var activeAspace: UserAspacePointer?
+    /// The PKRU loaded here (amd64 with PKU).
+    var pkru: UInt32 = 0
     /// Wakes the CPU when the first throttled thread's period starts.
     var eligibilityTimer: UInt32 = 0
     var eligibilityAt: UInt64 = 0
@@ -1016,6 +1018,7 @@ enum Scheduler {
             UserAspaces.activate(next.pointee.aspace, replacing: cpus[me].activeAspace)
             cpus[me].activeAspace = next.pointee.aspace
         }
+        loadPkru(next.pointee.pkru, me)
         unsafe arch_context_switch(UnsafeMutablePointer<UInt64>(bitPattern: UInt(current.address))!,
                                    next.pointee.savedSp)
         finishSwitch()
@@ -1128,13 +1131,18 @@ enum Scheduler {
     /// threads if asked to and the running one should give way: its budget
     /// or slice is used up, or an eligible deadline thread comes first.
     static func preemptIfRequested() {
-        guard started.load(ordering: .acquiring) else { return }
-        let me = Int(Cpu.current)
-        guard preemptPending.load(ordering: .relaxed) & (1 << UInt64(me)) != 0 else { return }
+        guard started.load(ordering: .acquiring),
+              preemptPending.load(ordering: .relaxed) & (1 << UInt64(Cpu.current)) != 0 else { return }
         lock.lockMasked()
         // Loop: the thread switched to may raise a new request in
-        // `finishSwitch` (a wakeup onto this CPU).
-        while preemptPending.load(ordering: .relaxed) & (1 << UInt64(me)) != 0 {
+        // `finishSwitch` (a wakeup onto this CPU). `me` is read afresh each
+        // time round: after switchAway this thread may be running on
+        // another CPU, and a stale `me` would cancel that CPU's timers by
+        // ids from another CPU's numbering (it cancelled a sleeper's
+        // timeout).
+        while true {
+            let me = Int(Cpu.current)
+            guard preemptPending.load(ordering: .relaxed) & (1 << UInt64(me)) != 0 else { break }
             _ = preemptPending.bitwiseAnd(~(1 << UInt64(me)), ordering: .relaxed)
             guard cpus[me].ready else { break }
             let now = Clock.now()
@@ -1336,6 +1344,7 @@ enum Scheduler {
     }
 
     /// Runs the calling thread in `aspace` from now on (nil: kernel only).
+    /// A user address space starts it with JIT writes closed.
     static func setAspace(_ aspace: UserAspacePointer?) {
         locked {
             let me = Int(Cpu.current)
@@ -1347,7 +1356,29 @@ enum Scheduler {
                 UserAspaces.activate(aspace, replacing: cpus[me].activeAspace)
                 cpus[me].activeAspace = aspace
             }
+            thread.pointee.pkru = aspace == nil ? 0 : Jit.defaultUserPkru
+            loadPkru(thread.pointee.pkru, me)
         }
+    }
+
+    /// Opens or closes writes to JIT key `key` for the running thread only
+    /// (PKU; what user space will do with WRPKRU).
+    static func setJitWritable(_ key: UInt8, _ writable: Bool) {
+        locked {
+            let me = Int(Cpu.current)
+            let thread = cpus[me].current!
+            let bit: UInt32 = 1 << UInt32(2 * Int(key) + 1)  // WD
+            if writable { thread.pointee.pkru &= ~bit } else { thread.pointee.pkru |= bit }
+            loadPkru(thread.pointee.pkru, me)
+        }
+    }
+
+    private static func loadPkru(_ value: UInt32, _ me: Int) {
+        #if arch(x86_64)
+        guard Jit.mechanism == .protectionKeys, cpus[me].pkru != value else { return }
+        arch_write_pkru(value)
+        cpus[me].pkru = value
+        #endif
     }
 
     /// CPUs that have an idle thread and take threads.

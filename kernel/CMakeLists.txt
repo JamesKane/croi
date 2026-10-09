@@ -37,8 +37,16 @@ add_library(kernel-swift OBJECT
   Kernel/Vm/KernelAspace.swift
   Kernel/Vm/UserAspace.swift
   Kernel/Vm/Vmo.swift
+  Kernel/Vm/PageList.swift
+  Kernel/Vm/MemoryAccount.swift
+  Kernel/Vm/Jit.swift
+  Kernel/Vm/ContiguousPool.swift
   Kernel/Vm/AspaceSelfTest.swift
-  Kernel/Vm/VmoSelfTest.swift)
+  Kernel/Vm/VmoSelfTest.swift
+  Kernel/Vm/RegionSelfTest.swift
+  Kernel/Vm/PhysicalSelfTest.swift
+  Kernel/Vm/AccountSelfTest.swift
+  Kernel/Vm/JitSelfTest.swift)
 set_target_properties(kernel-swift PROPERTIES Swift_MODULE_NAME Kernel)
 target_include_directories(kernel-swift PRIVATE include)
 target_link_libraries(kernel-swift PRIVATE croi-fmt croi-handoff croi-pagetables)

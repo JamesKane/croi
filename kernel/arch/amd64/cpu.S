@@ -248,3 +248,81 @@ arch_asid_bits:
     xor     %eax, %eax
     ret
 .size arch_asid_bits, . - arch_asid_bits
+
+// --- Cache maintenance (cache.h) -----------------------------------------
+
+// void arch_cache_op(addr, size, op, line): clflush writes back and drops,
+// so every op is clean+invalidate here.
+.globl arch_cache_op
+.type arch_cache_op, @function
+arch_cache_op:
+    test    %rcx, %rcx
+    jz      2f
+    lea     (%rdi, %rsi), %rsi          // end
+    lea     -1(%rcx), %rax
+    not     %rax
+    and     %rax, %rdi                  // first line
+    mfence
+1:  clflush (%rdi)
+    add     %rcx, %rdi
+    cmp     %rsi, %rdi
+    jb      1b
+    mfence
+2:  ret
+.size arch_cache_op, . - arch_cache_op
+
+// uint64_t arch_cache_line(void): CPUID.1 EBX[15:8] x 8 bytes.
+.globl arch_cache_line
+.type arch_cache_line, @function
+arch_cache_line:
+    push    %rbx
+    mov     $1, %eax
+    xor     %ecx, %ecx
+    cpuid
+    shr     $8, %ebx
+    and     $0xff, %ebx
+    lea     (, %rbx, 8), %rax
+    pop     %rbx
+    ret
+.size arch_cache_line, . - arch_cache_line
+
+// --- Protection keys (jit.h) ----------------------------------------------
+
+// uint64_t arch_pku_enable(void): CPUID.7.0:ECX[3] PKU -> CR4.PKE (bit 22).
+.globl arch_pku_enable
+.type arch_pku_enable, @function
+arch_pku_enable:
+    push    %rbx
+    mov     $7, %eax
+    xor     %ecx, %ecx
+    cpuid
+    xor     %eax, %eax
+    test    $(1 << 3), %ecx
+    jz      1f
+    mov     %cr4, %rax
+    or      $(1 << 22), %rax
+    mov     %rax, %cr4
+    mov     $1, %eax
+1:  pop     %rbx
+    ret
+.size arch_pku_enable, . - arch_pku_enable
+
+// uint32_t arch_read_pkru(void)
+.globl arch_read_pkru
+.type arch_read_pkru, @function
+arch_read_pkru:
+    xor     %ecx, %ecx
+    rdpkru
+    ret
+.size arch_read_pkru, . - arch_read_pkru
+
+// void arch_write_pkru(uint32_t value)
+.globl arch_write_pkru
+.type arch_write_pkru, @function
+arch_write_pkru:
+    mov     %edi, %eax
+    xor     %ecx, %ecx
+    xor     %edx, %edx
+    wrpkru
+    ret
+.size arch_write_pkru, . - arch_write_pkru

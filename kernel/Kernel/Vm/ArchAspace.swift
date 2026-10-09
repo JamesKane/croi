@@ -13,6 +13,8 @@ enum VmError: Error, Equatable {
     case notFound(UInt64)
     /// Bad size, offset or rights for the object.
     case invalidArgument
+    /// The physical range is RAM or firmware memory (the deny list).
+    case denied(UInt64)
 }
 
 /// What a virtual address translates to.

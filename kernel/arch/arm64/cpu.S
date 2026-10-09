@@ -330,3 +330,56 @@ arch_asid_bits:
     mov     x0, #8
     ret
 .size arch_asid_bits, . - arch_asid_bits
+
+// --- Cache maintenance (cache.h) -----------------------------------------
+
+// void arch_cache_op(x0 addr, x1 size, w2 op, x3 line)
+.globl arch_cache_op
+.type arch_cache_op, %function
+arch_cache_op:
+    cbz     x3, 9f
+    add     x1, x0, x1                  // end
+    sub     x4, x3, #1
+    bic     x0, x0, x4                  // first line
+    dsb     sy
+    cmp     w2, #1
+    b.eq    1f
+    cmp     w2, #2
+    b.eq    2f
+3:  dc      civac, x0
+    add     x0, x0, x3
+    cmp     x0, x1
+    b.lo    3b
+    b       8f
+1:  dc      cvac, x0
+    add     x0, x0, x3
+    cmp     x0, x1
+    b.lo    1b
+    b       8f
+2:  dc      ivac, x0
+    add     x0, x0, x3
+    cmp     x0, x1
+    b.lo    2b
+8:  dsb     sy
+9:  ret
+.size arch_cache_op, . - arch_cache_op
+
+// uint64_t arch_cache_line(void): 4 << CTR_EL0.DminLine bytes.
+.globl arch_cache_line
+.type arch_cache_line, %function
+arch_cache_line:
+    mrs     x1, ctr_el0
+    ubfx    x1, x1, #16, #4
+    mov     x0, #4
+    lsl     x0, x0, x1
+    ret
+.size arch_cache_line, . - arch_cache_line
+
+// uint64_t arch_has_poe(void): ID_AA64MMFR3_EL1.S1POE [19:16] != 0.
+.globl arch_has_poe
+.type arch_has_poe, %function
+arch_has_poe:
+    mrs     x0, S3_0_C0_C7_3            // ID_AA64MMFR3_EL1
+    ubfx    x0, x0, #16, #4
+    ret
+.size arch_has_poe, . - arch_has_poe

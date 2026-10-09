@@ -35,7 +35,8 @@ func arch_exception(_ frame: UnsafeMutablePointer<arch_exception_frame_t>) {
         // lock it still answers IPIs (a TLB shootdown from the holder).
         let enable = unsafe ExceptionFrame.interruptsWereEnabled(frame.pointee)
         if enable { arch_interrupts_enable() }
-        let resolved = UserAspaces.handleFault(at: fault.address, write: fault.write, execute: fault.execute)
+        let resolved = UserAspaces.handleFault(at: fault.address, write: fault.write, execute: fault.execute,
+                                               protectionKey: fault.protectionKey)
         if enable { _ = arch_interrupts_save() }
         if !resolved {
             unsafe ExceptionFrame.setProgramCounter(&frame.pointee, recovery)
@@ -66,7 +67,8 @@ enum ExceptionFrame {
     static func isBreakpoint(_ f: arch_exception_frame_t) -> Bool { f.vector == 3 }
     static func pageFault(_ f: arch_exception_frame_t) -> PageFault? {
         guard f.vector == 14 else { return nil }  // #PF: CR2 and the error code
-        return PageFault(address: arch_read_cr2(), write: f.error_code & 2 != 0, execute: f.error_code & 16 != 0)
+        return PageFault(address: arch_read_cr2(), write: f.error_code & 2 != 0, execute: f.error_code & 16 != 0,
+                         protectionKey: f.error_code & 32 != 0)
     }
     static func programCounter(_ f: arch_exception_frame_t) -> UInt64 { f.rip }
     static func interruptsWereEnabled(_ f: arch_exception_frame_t) -> Bool { f.rflags & (1 << 9) != 0 }  // IF
@@ -343,6 +345,8 @@ struct PageFault {
     var address: UInt64
     var write: Bool
     var execute: Bool
+    /// amd64: the access broke the thread's PKRU (error code bit 5).
+    var protectionKey = false
 }
 
 /// The .croi_fixups table (usercopy.h): user-access instructions and where

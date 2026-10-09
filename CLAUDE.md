@@ -156,7 +156,41 @@ User address spaces and VMOs (K4a, Kernel/Vm/):
   faulting context's interrupt state, so a CPU waiting for the aspace
   lock still answers the holder's TLB shootdown (it deadlocked masked).
   `vm` trace category: fault (resolved or refused) and commit records.
-- Lock order: aspace -> vmo -> heap -> pmm (and vm for the kernel aspace).
+- Regions (K4b): each aspace keeps `regions` (sub-regions, sorted, with a
+  parent; region 0 is the root) and non-overlapping `mappings`. A
+  reservation's range is held for views: `mapView`/`unmapView` replace
+  views under the aspace lock, so faults (which take the lock) see the old
+  view or the new one, never a hole (ext 7). `unmap(range)` trims and
+  splits mappings; `protect` splits at the edges. VMOs list the aspaces
+  mapping them (`mappers`); `decommit` takes pages out of the VMO, then
+  unmaps them from each aspace (held by a reference, skipped if `dead`),
+  then frees them, so the aspace -> vmo lock order holds.
+- Physical (K4b): `PhysicalMap` keeps every memory-map range that is RAM
+  or firmware's; physical VMOs over them are refused (`.denied`).
+  Contiguous VMOs take an address `limit` and come from `ContiguousPool`
+  first (`croi.contiguous_pool=<MiB>`, default 8, below 4 GiB if it can).
+  `cacheOp` (include/cache.h: clflush, dc cvac/ivac/civac, Zicbom cbo.*
+  when the RHCT lists it) and `setCachePolicy` (unmapped VMOs only).
+- Accounts (ext 6): `MemoryAccount` limit + pressure level; anonymous VMOs
+  charge per committed page, contiguous (pinned) and `deviceLocal` VMOs in
+  full and are `neverEvict`; over-budget commits fail; the pressure hook
+  fires once per crossing and re-arms below 80% of the level.
+- Anonymous pages live in a sparse 512-way radix `PageList`.
+- W^X and JIT (K4c, Vm/Jit.swift): no mapping is writable and executable
+  (map, mapView and protect refuse it), except in a JIT reservation
+  (`allocateRegion(reservation: true, jit: true)`) on hardware with
+  protection keys: amd64 PKU (CR4.PKE on every CPU), where the
+  reservation gets a key (1-15, `MapAttributes.protectionKey`, PTE bits
+  62:59), its pages map RWX, and each thread's PKRU (`Thread.pkru`,
+  loaded at switch; user threads start with writes to keys 1-15
+  disabled) gates writes per thread (`Scheduler.setJitWritable`; WRPKRU
+  in user space). A PKU fault (error code bit 5) is refused outright.
+  Without keys (arm64: POE is Armv9.4 and neither target board has it;
+  rv64) a JIT maps two views of one VMO, RW and RX. Swift note: a failed
+  `guard` may end the lifetime of `~Copyable` values early (their deinit
+  runs before the else branch), so join threads before judging them.
+- Lock order: aspace -> vmo -> account -> heap -> pmm (and vm for the
+  kernel aspace).
 
 ACPI (`Kernel/Acpi/`, after Zircon's acpi_lite): `AcpiTables` validates
 RSDP/XSDT and finds tables by signature; `withPhysicalBytes` reads through
@@ -239,7 +273,9 @@ waiting IPI (`Ipi.call`) while holding it. Use `Scheduler.locked { ... }`
 to check a condition and `block(on:deadline:)` without lost wakeups.
 Timers belong to the CPU that armed them, so a timeout left on another CPU
 is cancelled by IPI after the lock drops; a timer must never outlive its
-thread. Preemption: a timeslice (10 ms), or a wakeup onto an idle CPU,
+thread. Timer ids are only unique per CPU, and a thread can resume on
+another CPU after any `switchAway`: re-read `Cpu.current` after one (a
+stale CPU number in the preemption loop cancelled other CPUs' timers). Preemption: a timeslice (10 ms), or a wakeup onto an idle CPU,
 sets a per-CPU request that is acted on when an interrupt returns.
 Interrupt frames don't restore the per-CPU register (rv64 `tp` is skipped),
 because a preempted thread can resume on another CPU. Queues are ordered

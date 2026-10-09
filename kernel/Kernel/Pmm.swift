@@ -84,6 +84,7 @@ let pmmLock = SpinLock()
 
     private mutating func initializeLocked(from boot: inout BootAllocator) throws(InitError) {
         let pageSize = KernelLayout.pageSize
+        PhysicalMap.record(boot)
 
         // Arenas: maximal runs of contiguous RAM the kernel owns.
         var runStart: UInt64 = 0
@@ -168,19 +169,23 @@ let pmmLock = SpinLock()
     }
 
     /// `count` physically contiguous pages whose base is aligned to
-    /// 2^`alignLog2` bytes (at least page aligned). Not zeroed.
-    mutating func allocateContiguous(_ count: UInt64, alignLog2: Int = 12, _ state: PageState = .alloc) -> UInt64? {
-        pmmLock.withLock { allocateContiguousLocked(count, alignLog2: alignLog2, state) }
+    /// 2^`alignLog2` bytes (at least page aligned), ending at or below
+    /// `limit` (e.g. 4 GiB for a 32-bit DMA engine). Not zeroed.
+    mutating func allocateContiguous(_ count: UInt64, alignLog2: Int = 12, _ state: PageState = .alloc,
+                                     limit: UInt64 = .max) -> UInt64? {
+        pmmLock.withLock { allocateContiguousLocked(count, alignLog2: alignLog2, state, limit: limit) }
     }
 
-    private mutating func allocateContiguousLocked(_ count: UInt64, alignLog2: Int, _ state: PageState) -> UInt64? {
+    private mutating func allocateContiguousLocked(_ count: UInt64, alignLog2: Int, _ state: PageState,
+                                                   limit: UInt64) -> UInt64? {
         guard count > 0, alignLog2 < 64 else { return nil }
         let pageSize = KernelLayout.pageSize
         let alignment = max(UInt64(1) << alignLog2, pageSize)
         for a in 0..<arenaCount {
             let arena = arenas[a]
             var phys = (arena.base + alignment - 1) & ~(alignment - 1)
-            while arena.contains(phys), arena.pageCount - (phys - arena.base) / pageSize >= count {
+            while arena.contains(phys), arena.pageCount - (phys - arena.base) / pageSize >= count,
+                  count <= limit / pageSize, phys <= limit - count * pageSize {
                 let first = (phys - arena.base) / pageSize
                 var run: UInt64 = 0
                 while run < count, unsafe page(arena, first + run).pointee.state == .free {
@@ -302,5 +307,41 @@ let pmmLock = SpinLock()
         unsafe page.pointee.next = 0
         unsafe page.pointee.prev = 0
         freePages -= 1
+    }
+}
+
+/// Physical ranges physical VMOs may never cover (Todhchai's RAM deny
+/// list): every memory-map range that is RAM or firmware's, kept after the
+/// handoff is gone. MMIO, the framebuffer and holes in the map are allowed.
+enum PhysicalMap {
+    nonisolated(unsafe) private static var denied = InlineArray<64, (UInt64, UInt64)>(repeating: (0, 0))
+    nonisolated(unsafe) private(set) static var deniedCount = 0
+
+    static func record(_ boot: borrowing BootAllocator) {
+        for i in 0..<boot.rangeCount {
+            let r = boot.range(i)
+            guard r.type != CROI_MEM_MMIO, r.type != CROI_MEM_FRAMEBUFFER, r.size > 0 else { continue }
+            if deniedCount > 0, denied[deniedCount - 1].1 == r.base {
+                denied[deniedCount - 1].1 = r.base + r.size  // merge with the previous range
+            } else if deniedCount < 64 {
+                denied[deniedCount] = (r.base, r.base + r.size)
+                deniedCount += 1
+            } else {
+                denied[63].1 = max(denied[63].1, r.base + r.size)  // be conservative, never permissive
+            }
+        }
+    }
+
+    /// The end of the highest range (a physical address above it is a hole).
+    static var highestEnd: UInt64 {
+        var end: UInt64 = 0
+        for i in 0..<deniedCount { end = max(end, denied[i].1) }
+        return end
+    }
+
+    /// Whether [base, base+size) touches RAM or firmware memory.
+    static func overlapsDenied(_ base: UInt64, _ size: UInt64) -> Bool {
+        for i in 0..<deniedCount where base < denied[i].1 && denied[i].0 < base &+ size { return true }
+        return false
     }
 }

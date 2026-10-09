@@ -119,18 +119,72 @@ enum MutexSelfTest {
         } catch {
             panic("mutex self-test: deadline waiter not admitted")
         }
+        // Traced, so a failure shows what the CPU did (see dumpTrace).
+        do throws(VmError) {
+            try Trace.start(categories: CROI_TRACE_SCHED, pages: 64, mode: CROI_TRACE_ONESHOT)
+        } catch {
+            panic("mutex self-test: no memory for trace rings")
+        }
         let low = spawn("low", cpu, 16, nil, lowHolder, 16 << 16 | 3)
         waitFor { a.owner != nil }
         let high = spawn("high", cpu, 16, context.record, highWaiter, 0)
         waitFor { a.waiters == 1 }
         let mid = spawn("mid", cpu, 16, nil, midSpinner, 0)
         flag.store(true, ordering: .releasing)
-        guard high.join() == 0, mid.join() == 0, low.join() == 0 else { panic("mutex self-test: deadline threads failed") }
+        let ids = (high.thread.pointee.traceId, mid.thread.pointee.traceId, low.thread.pointee.traceId)
+        let (h, m, l) = (high.join(), mid.join(), low.join())
+        Trace.stop()
+        guard h == 0, m == 0, l == 0 else {
+            if let console = panicConsole {
+                console.write("  mutex:  deadline inheritance: high ")
+                console.write(decimal: UInt64(h))
+                console.write(", mid ")
+                console.write(decimal: UInt64(m))
+                console.write(", low ")
+                console.write(decimal: UInt64(l))
+                console.write("; trace ids high ")
+                console.write(decimal: UInt64(ids.0))
+                console.write(" mid ")
+                console.write(decimal: UInt64(ids.1))
+                console.write(" low ")
+                console.write(decimal: UInt64(ids.2))
+                console.write("\n")
+                dumpTrace(cpu, to: console)
+            }
+            panic("mutex self-test: deadline threads failed")
+        }
+        Trace.release()
         guard observed.load(ordering: .relaxed) == -1 else { panic("mutex self-test: deadline not inherited") }
         // Mid may run while Low sleeps waiting to start; while Low runs on
         // the inherited reservation, it must not.
         guard midDuringHold.load(ordering: .relaxed) == 0 else {
             panic("mutex self-test: fair thread ran during inherited deadline work")
+        }
+    }
+
+    /// The last 120 sched records of `cpu`: µs since the first, kind,
+    /// thread, a, b.
+    private static func dumpTrace(_ cpu: Int, to console: Uart) {
+        guard let header = Trace.header(cpu) else { return }
+        let total = Int(min(header.head, header.capacity))
+        var index = 0
+        var first: UInt64 = 0
+        Trace.forEachRecord(cpu) { record in
+            if index == 0 { first = record.time }
+            if index >= total - 120 {
+                console.write("    ")
+                console.write(decimal: (record.time - first) * 1_000_000 / max(1, header.frequency))
+                console.write(" us kind ")
+                console.write(decimal: UInt64(record.kind))
+                console.write(" thread ")
+                console.write(decimal: UInt64(record.thread))
+                console.write(" a ")
+                console.write(decimal: record.a)
+                console.write(" b ")
+                console.write(decimal: record.b)
+                console.write("\n")
+            }
+            index += 1
         }
     }
 

@@ -71,7 +71,17 @@ enum VmoSelfTest {
             let big = try Vmo(contiguous: 2 << 20, alignLog2: 21)
             let at = try a.map(big, size: big.size, at: 0x4000_0000, rights: [.read, .write])
             guard a.query(at + 0x1234)?.pageSize == 2 << 20 else { panic("vmo self-test: no large page") }
-            guard let phys = pmm.allocatePage() else { panic("vmo self-test: out of memory") }
+            // RAM is refused (the deny list); a hole in the memory map, as
+            // device memory would be, is fine.
+            guard let ram = pmm.allocatePage() else { panic("vmo self-test: out of memory") }
+            do throws(VmError) {
+                _ = try Vmo(physical: ram, size: KernelLayout.pageSize, cache: .uncached)
+                panic("vmo self-test: a physical VMO over RAM was allowed")
+            } catch {
+                guard error == .denied(ram) else { panic("vmo self-test: wrong refusal for RAM") }
+            }
+            pmm.free(ram)
+            let phys = (PhysicalMap.highestEnd + (2 << 30)) & ~((1 << 30) - 1)
             let device = try Vmo(physical: phys, size: KernelLayout.pageSize, cache: .uncached)
             let mapped = try a.map(device, size: KernelLayout.pageSize, rights: [.read])
             guard a.query(mapped)?.physical == phys else { panic("vmo self-test: physical VMO misplaced") }
@@ -79,7 +89,6 @@ enum VmoSelfTest {
             try a.unmap(mappingAt: readOnly)
             guard a.query(readOnly) == nil, a.mappingCount == 4 else { panic("vmo self-test: unmap") }
             _ = consume device
-            pmm.free(phys)
         } catch {
             panic("vmo self-test: out of memory")
         }

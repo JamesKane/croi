@@ -37,6 +37,28 @@ enum RiscvIsa {
         return nodes > 0 && matches == nodes
     }
 
+    /// The Zicbom block size from the RHCT's CMO node (bytes), if any.
+    static func cacheBlockSize(_ acpi: AcpiTables) -> UInt64? {
+        guard let rhct = acpi.table("RHCT") else { return nil }
+        return acpi.withTable(rhct) { (table: RawSpan) -> UInt64? in
+            guard table.byteCount >= 56 else { return nil }
+            let count = Int(table.load(fromByteOffset: 48, as: UInt32.self))
+            var offset = Int(table.load(fromByteOffset: 52, as: UInt32.self))
+            for _ in 0..<count {
+                guard offset + 8 <= table.byteCount else { return nil }
+                let type = table.load(fromByteOffset: offset, as: UInt16.self)
+                let length = Int(table.load(fromByteOffset: offset + 2, as: UInt16.self))
+                guard length >= 8 else { return nil }
+                if type == 1 {  // CMO node: CBOM block size (log2) at offset 7
+                    let log2 = table.load(fromByteOffset: offset + 7, as: UInt8.self)
+                    return log2 > 0 && log2 < 16 ? 1 << UInt64(log2) : nil
+                }
+                offset += length
+            }
+            return nil
+        }
+    }
+
     /// Writes the first ISA string (the harts' are identical on QEMU).
     static func writeBootIsa(_ acpi: AcpiTables, to out: some TextOutput) {
         var written = false

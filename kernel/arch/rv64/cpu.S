@@ -232,3 +232,42 @@ arch_asid_bits:
     j       2b
 3:  ret
 .size arch_asid_bits, . - arch_asid_bits
+
+// --- Cache maintenance (cache.h) -----------------------------------------
+
+// void arch_cache_op(a0 addr, a1 size, a2 op, a3 line): Zicbom cbo.clean /
+// cbo.inval / cbo.flush on (a0), as raw encodings (rs1 = a0).
+.globl arch_cache_op
+.type arch_cache_op, %function
+arch_cache_op:
+    beqz    a3, 9f
+    add     a1, a0, a1                  // end
+    addi    t0, a3, -1
+    not     t0, t0
+    and     a0, a0, t0                  // first line
+    fence   rw, rw
+    li      t0, 1
+    beq     a2, t0, 1f
+    li      t0, 2
+    beq     a2, t0, 2f
+3:  .4byte  0x0025200f                  // cbo.flush (a0)
+    add     a0, a0, a3
+    bltu    a0, a1, 3b
+    j       8f
+1:  .4byte  0x0015200f                  // cbo.clean (a0)
+    add     a0, a0, a3
+    bltu    a0, a1, 1b
+    j       8f
+2:  .4byte  0x0005200f                  // cbo.inval (a0)
+    add     a0, a0, a3
+    bltu    a0, a1, 2b
+8:  fence   rw, rw
+9:  ret
+.size arch_cache_op, . - arch_cache_op
+
+.globl arch_cache_line
+.type arch_cache_line, %function
+arch_cache_line:
+    li      a0, 0
+    ret
+.size arch_cache_line, . - arch_cache_line

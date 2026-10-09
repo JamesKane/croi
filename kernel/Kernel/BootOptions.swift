@@ -39,6 +39,32 @@ enum BootOptions {
         return false
     }
 
+    /// The decimal number in a `prefix<digits>` word (e.g.
+    /// "croi.contiguous_pool=" in "croi.contiguous_pool=16"), if present.
+    static func number(after prefix: StaticString) -> UInt64? {
+        let wanted = unsafe Span<UInt8>(_unsafeStart: prefix.utf8Start, count: prefix.utf8CodeUnitCount)
+        var start = 0
+        while start < length {
+            var end = start
+            while end < length, storage[end] != UInt8(ascii: " ") { end += 1 }
+            if end - start > wanted.count {
+                var same = true
+                for i in 0..<wanted.count where storage[start + i] != wanted[i] { same = false }
+                if same {
+                    var value: UInt64 = 0
+                    for i in (start + wanted.count)..<end {
+                        let digit = storage[i] &- UInt8(ascii: "0")
+                        guard digit < 10 else { return nil }
+                        value = value * 10 + UInt64(digit)
+                    }
+                    return value
+                }
+            }
+            start = end + 1
+        }
+        return nil
+    }
+
     static func write(to out: some TextOutput) {
         out.write(utf8: storage.span.extracting(0..<length))
     }
