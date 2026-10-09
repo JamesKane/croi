@@ -76,6 +76,25 @@ func kernel_main(_ handoffAddress: UInt64) -> Never {
     }
     reportMemory(allocator, to: console)
 
+    // The PMM takes over all RAM; then the loader's handoff data and boot
+    // page tables are released. `handoff` (a copy) stays usable.
+    do throws(Pmm.InitError) {
+        try pmm.initialize(from: &allocator)
+    } catch {
+        panic(error == .tooManyArenas ? "pmm: too many arenas" : "pmm: no memory for page arrays")
+    }
+    pmmSelfTest()
+    let reclaimed = pmm.endHandoff(allocator)
+    console.write("  pmm:    ")
+    console.write(decimal: (pmm.totalPages * KernelLayout.pageSize) >> 20)
+    console.write(" MiB in ")
+    console.write(decimal: UInt64(pmm.arenaCount))
+    console.write(" arenas, ")
+    console.write(decimal: (pmm.freePages * KernelLayout.pageSize) >> 20)
+    console.write(" MiB free (")
+    console.write(decimal: reclaimed)
+    console.write(" handoff pages reclaimed)\n")
+
     // Exception round trip: take a breakpoint and resume after it.
     arch_breakpoint()
     guard breakpointsHandled == 1 else { panic("breakpoint did not round-trip") }
@@ -118,4 +137,32 @@ private func reportMemory(_ allocator: BootAllocator, to console: some TextOutpu
     console.write(" MiB free, ")
     console.write(decimal: reclaimable >> 10)
     console.write(" KiB reclaimable\n")
+}
+
+/// Allocates, touches and frees pages through every PMM entry point, and
+/// checks the books balance.
+private func pmmSelfTest() {
+    let before = pmm.freePages
+    guard let a = pmm.allocatePage(), let b = pmm.allocatePage(), a != b,
+          pmm.state(of: a) == .alloc, pmm.state(of: b) == .alloc
+    else { panic("pmm self-test: single page allocation") }
+
+    let runPages: UInt64 = 16
+    guard let run = pmm.allocateContiguous(runPages, alignLog2: 16), run % 0x1_0000 == 0 else {
+        panic("pmm self-test: contiguous allocation")
+    }
+    for i in 0..<runPages {
+        let phys = run + i * KernelLayout.pageSize
+        guard pmm.state(of: phys) == .alloc else { panic("pmm self-test: contiguous page state") }
+        // The page must be reachable and writable through the physmap.
+        let word = unsafe UnsafeMutablePointer<UInt64>(bitPattern: UInt(KernelLayout.physmap(phys)))!
+        unsafe word.pointee = phys ^ 0x5A5A_5A5A
+        guard unsafe word.pointee == phys ^ 0x5A5A_5A5A else { panic("pmm self-test: physmap write") }
+    }
+    guard pmm.freePages == before - 2 - runPages else { panic("pmm self-test: free count") }
+
+    pmm.free(a)
+    pmm.free(b)
+    pmm.free(run, count: runPages)
+    guard pmm.freePages == before, pmm.state(of: a) == .free else { panic("pmm self-test: free") }
 }

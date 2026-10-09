@@ -56,6 +56,18 @@ the kernel uses are mapped in the physmap as device memory; the image at
 CROI_KERNEL_BASE with text RX, rodata R, data RW. amd64 loads its own GDT
 first thing, since firmware's sits in memory reported free.
 
+Physical memory (`Kernel/Pmm.swift`, global `pmm`, after Zircon's
+PmmNode): arenas over contiguous RAM the kernel owns (free, kernel,
+handoff, ACPI reclaim; firmware runtime/NVS get none), each with a `Page`
+array (32 B/page) carved by the boot allocator. Pages start `.wired`;
+free RAM the boot allocator never handed out (it records exact spans) goes
+on a doubly linked free list. amd64 keeps the first MiB wired for SMP
+trampolines. `allocatePage`, `allocateContiguous(count, alignLog2:)`,
+`free` (panics on double free), `endHandoff()` (frees the loader's handoff
+data and boot page tables; nothing may read the handoff afterwards). No
+lock yet: single CPU, interrupts masked. ACPI reclaim stays wired until
+ACPI is parsed. Boot runs a PMM self-test.
+
 Exceptions: `arch/<arch>/exceptions.S` saves an `arch_exception_frame_t`
 (kernel.h) and calls Swift `arch_exception` (Kernel/Exceptions.swift);
 the handler may edit the frame to resume elsewhere. Installed at the top
@@ -98,6 +110,8 @@ kernel must not use PAC until it does.
   allocation fails the link (find it with `ld.lld --why-live=swift_slowAlloc`).
   `withTemporaryAllocation` can fall back to the heap; use `InlineArray`
   stack buffers instead.
+- Swift precedence trap: `<<`/`>>` bind tighter than `*`, so write
+  `(pages * pageSize) >> 20`, never `pages * pageSize >> 20`.
 - C constants Swift must see are typed C23 enums (`enum : uint64_t {...}`),
   not macros with casts, which Swift does not import.
 - Small Swift globals are fine (`nonisolated(unsafe) var`; zero/nil
