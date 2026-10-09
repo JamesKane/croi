@@ -26,6 +26,15 @@ extern const uint8_t croi_user_test_end[];
 static inline uint64_t croi_user_test_address(void) { return (uint64_t)croi_user_test_start; }
 static inline uint64_t croi_user_test_size(void) { return (uint64_t)(croi_user_test_end - croi_user_test_start); }
 
+// The K6b self-test's C program (user/test), a flat binary linked to run
+// at UserSelfTest.codeAt.
+extern const uint8_t croi_user_program_start[];
+extern const uint8_t croi_user_program_end[];
+static inline uint64_t croi_user_program_address(void) { return (uint64_t)croi_user_program_start; }
+static inline uint64_t croi_user_program_size(void) {
+  return (uint64_t)(croi_user_program_end - croi_user_program_start);
+}
+
 #if defined(__x86_64__)
 // SYSCALL setup on this CPU: EFER.SCE, STAR, LSTAR, FMASK.
 void arch_syscall_init(void);

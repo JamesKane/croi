@@ -223,8 +223,11 @@ Progress: **K6a done**: user mode on all three arches (amd64 SYSCALL/
 SYSRET + swapgs, arm64 EL0 vectors + svc, rv64 sscratch swap + ecall),
 syscall dispatch, user faults and preemption, fault-recovering copies, a
 built-in user test program; null syscall ~40 ns under KVM (budget 100).
-Next: K6b (SMAP/PAN/SUM discipline, the object syscall surface, the
-`syscall` trace category and user marks), K6c (vDSO and shared pages,
+**K6b done**: SMEP/SMAP, PAN, SUM discipline with protection faults
+refused; range-checked user copies; object syscalls (handles, signals,
+waits, events, ports, VMOs, trace_configure with user marks); the
+`syscall` trace category; a C user test program built with user flags.
+Next: K6c (vDSO and shared pages,
 with the kernel/user build split), K6d (user FP/SIMD), K6e (sampling and
 PMU).
 - Syscall entry/exit per arch, user-copy with fault recovery, and SMAP, PAN

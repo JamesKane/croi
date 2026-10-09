@@ -95,3 +95,16 @@ arch_copy_to_user:
     ret
 FIXUP 1b, 2b
 .size arch_copy_to_user, . - arch_copy_to_user
+
+// int arch_user_probe_unprotected(uint64_t addr): a load from a user
+// address with SUM clear, for the self-test: it must fault.
+.globl arch_user_probe_unprotected
+.type arch_user_probe_unprotected, %function
+arch_user_probe_unprotected:
+1:  ld      t1, 0(a0)
+    li      a0, 0
+    ret
+2:  li      a0, -1
+    ret
+FIXUP 1b, 2b
+.size arch_user_probe_unprotected, . - arch_user_probe_unprotected

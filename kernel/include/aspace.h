@@ -16,11 +16,17 @@ void arch_switch_user_tables(uint64_t root, uint64_t asid, uint64_t flush);
 // rv64 on this hart only (the caller reaches the others); amd64 nothing.
 void arch_tlb_invalidate_asid(uint64_t asid);
 
-// Brackets kernel accesses to user pages: rv64 sets sstatus.SUM. amd64
-// SMAP and arm64 PAN aren't enabled yet (K6 turns them on and these
-// become stac/clac and PAN toggles).
+// Brackets kernel accesses to user pages: amd64 stac/clac and arm64 PAN
+// when croi_user_protection is set, rv64 sstatus.SUM.
 void arch_user_access_begin(void);
 void arch_user_access_end(void);
+
+// Turns on this CPU's protection against the kernel touching (SMAP, PAN)
+// or running (SMEP) user pages outside the accessors. Returns 1 if this
+// CPU has it (amd64 SMAP / arm64 PAN; rv64 always: SUM is off by default).
+uint64_t arch_user_protection_enable(void);
+
+extern uint8_t croi_user_protection;
 
 // How many ASID bits the MMU implements (amd64 0: no PCIDs used).
 uint64_t arch_asid_bits(void);

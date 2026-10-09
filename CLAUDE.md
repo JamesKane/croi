@@ -217,6 +217,21 @@ thread's stack top.
   to tell the origins apart; ecall with the number in a7.
 - `arch_copy_from_user`/`to_user`: byte loops listed in .croi_fixups
   (arm64 ldtrb/sttrb; rv64 with SUM).
+- K6b: user-access protection on every CPU (`arch_user_protection_enable`,
+  `croi_user_protection`): amd64 SMEP + SMAP (stac/clac in the accessors
+  and `arch_user_access_begin/end`), arm64 PAN set on every kernel entry
+  (SPAN clear; accessors use ldtr/sttr, which PAN doesn't block), rv64 SUM
+  only inside the accessors. A fault the protection caused
+  (`ExceptionFrame.userAccessBlocked`) goes straight to recovery.
+  Syscalls touch user memory only through `UserCopy`, which checks the
+  user range first: the arch copies don't, and on amd64/rv64 would write
+  kernel pages through a pointer user space chose (a test caught it).
+  The object syscalls (user/include/croi/syscall.h: handles, signals,
+  waits, events, ports, VMOs, vmo_map until VMARs, trace_configure) use
+  the thread's `handleTable` (K7: the process's). `syscall` trace
+  category (enter/exit). User programs: `user/` is built with user flags
+  (CMake custom command, static at the address the kernel maps it) and
+  included with `.incbin` (kernel/userprogram.S).
 - The boot test runs `usertest.S` (per arch) from a VMO: registers kept
   across syscalls, a message, a fault and a privileged instruction killed,
   preemption of user code; it reports the null syscall time (KVM: ~40 ns).

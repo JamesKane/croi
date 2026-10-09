@@ -314,14 +314,41 @@ arch_tlb_invalidate_asid:
 .globl arch_user_access_begin
 .type arch_user_access_begin, %function
 arch_user_access_begin:
-    ret
+    adrp    x0, croi_user_protection
+    ldrb    w0, [x0, :lo12:croi_user_protection]
+    cbz     w0, 1f
+    .inst   0xd500409f              // msr pan, #0
+1:  ret
 .size arch_user_access_begin, . - arch_user_access_begin
 
 .globl arch_user_access_end
 .type arch_user_access_end, %function
 arch_user_access_end:
-    ret
+    adrp    x0, croi_user_protection
+    ldrb    w0, [x0, :lo12:croi_user_protection]
+    cbz     w0, 1f
+    .inst   0xd500419f              // msr pan, #1
+1:  ret
 .size arch_user_access_end, . - arch_user_access_end
+
+// uint64_t arch_user_protection_enable(void): with FEAT_PAN
+// (ID_AA64MMFR1_EL1.PAN), PSTATE.PAN set now and on every exception entry
+// (SCTLR_EL1.SPAN clear). EL0 execution by EL1 is never allowed anyway
+// (user pages are PXN).
+.globl arch_user_protection_enable
+.type arch_user_protection_enable, %function
+arch_user_protection_enable:
+    mrs     x0, id_aa64mmfr1_el1
+    ubfx    x0, x0, #20, #4
+    cbz     x0, 1f
+    mrs     x1, sctlr_el1
+    bic     x1, x1, #(1 << 23)      // SPAN
+    msr     sctlr_el1, x1
+    isb
+    .inst   0xd500419f              // msr pan, #1
+    mov     x0, #1
+1:  ret
+.size arch_user_protection_enable, . - arch_user_protection_enable
 
 // 8 (TCR_EL1.AS = 0, set by the loader).
 .globl arch_asid_bits

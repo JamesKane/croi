@@ -1,0 +1,107 @@
+// The boot self-test's user program (K6b): exercises the object syscalls
+// from user mode and exits with 0x600D, or with the number of the first
+// check that failed. arg0 selects a mode; arg1 is a handle the kernel
+// gave it (mode 1: a tracing resource).
+
+#include <croi/syscall.h>
+
+#define ERR_BAD_HANDLE (-11)
+#define ERR_INVALID_ARGS (-10)
+#define ERR_TIMED_OUT (-21)
+#define ERR_ACCESS_DENIED (-30)
+#define SIGNALED (1u << 3)
+#define USER_SIGNAL_0 (1u << 24)
+#define RIGHT_READ (1u << 2)
+#define RIGHT_MAP (1u << 5)
+#define RIGHT_DUPLICATE (1u << 0)
+#define RIGHT_TRANSFER (1u << 1)
+#define RIGHT_WAIT (1u << 14)
+
+static inline int64_t sys(uint64_t n, uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e) {
+  return croi_syscall(n, a, b, c, d, e);
+}
+
+[[noreturn]] static void exit_with(int64_t code) {
+  sys(CROI_SYS_THREAD_EXIT, (uint64_t)code, 0, 0, 0, 0);
+  for (;;) {
+  }
+}
+
+#define CHECK(n, condition) \
+  do {                      \
+    if (!(condition)) exit_with(n); \
+  } while (0)
+
+static int64_t objects(void) {
+  uint32_t event = 0, port = 0, dup = 0, vmo = 0, observed = 0;
+  int64_t now = sys(CROI_SYS_CLOCK_MONOTONIC, 0, 0, 0, 0, 0);
+
+  // Events, signals, waits.
+  CHECK(1, sys(CROI_SYS_EVENT_CREATE, 0, (uint64_t)&event, 0, 0, 0) == 0 && event != 0);
+  CHECK(2, sys(CROI_SYS_OBJECT_WAIT_ONE, event, SIGNALED, (uint64_t)now + 1000000, (uint64_t)&observed, 0)
+               == ERR_TIMED_OUT);
+  CHECK(3, sys(CROI_SYS_OBJECT_SIGNAL, event, 0, SIGNALED, 0, 0) == 0);
+  CHECK(4, sys(CROI_SYS_OBJECT_WAIT_ONE, event, SIGNALED, (uint64_t)now + 1000000000, (uint64_t)&observed, 0) == 0
+               && (observed & SIGNALED));
+  CHECK(5, sys(CROI_SYS_OBJECT_SIGNAL, event, 0, 1, 0, 0) == ERR_INVALID_ARGS);
+
+  // Handles: duplicate with fewer rights, then a refused signal.
+  CHECK(6, sys(CROI_SYS_HANDLE_DUPLICATE, event, RIGHT_WAIT | RIGHT_TRANSFER, (uint64_t)&dup, 0, 0) == 0);
+  CHECK(7, sys(CROI_SYS_OBJECT_SIGNAL, dup, SIGNALED, 0, 0, 0) == ERR_ACCESS_DENIED);
+  CHECK(8, sys(CROI_SYS_HANDLE_CLOSE, dup, 0, 0, 0, 0) == 0);
+  CHECK(9, sys(CROI_SYS_HANDLE_CLOSE, dup, 0, 0, 0, 0) == ERR_BAD_HANDLE);
+
+  // Ports: a user packet, then an async wait on the event.
+  croi_port_packet_t packet = {.key = 42, .payload = {1, 2, 3, 4}};
+  CHECK(10, sys(CROI_SYS_PORT_CREATE, 0, (uint64_t)&port, 0, 0, 0) == 0);
+  CHECK(11, sys(CROI_SYS_PORT_QUEUE, port, (uint64_t)&packet, 0, 0, 0) == 0);
+  croi_port_packet_t got = {0};
+  CHECK(12, sys(CROI_SYS_PORT_WAIT, port, (uint64_t)now + 1000000000, (uint64_t)&got, 0, 0) == 0
+                && got.key == 42 && got.payload[3] == 4);
+  CHECK(13, sys(CROI_SYS_OBJECT_WAIT_ASYNC, event, port, 7, USER_SIGNAL_0, 0) == 0);
+  CHECK(14, sys(CROI_SYS_OBJECT_SIGNAL, event, 0, USER_SIGNAL_0, 0, 0) == 0);
+  CHECK(15, sys(CROI_SYS_PORT_WAIT, port, (uint64_t)now + 1000000000, (uint64_t)&got, 0, 0) == 0 && got.key == 7
+                && got.type == 1 && (got.payload[0] >> 32) & USER_SIGNAL_0);
+
+  // VMOs: write, read back, map and use directly.
+  CHECK(16, sys(CROI_SYS_VMO_CREATE, 8192, 0, (uint64_t)&vmo, 0, 0) == 0);
+  static const char text[] = "written through vmo_write";
+  CHECK(17, sys(CROI_SYS_VMO_WRITE, vmo, (uint64_t)text, 4090, sizeof text, 0) == 0);  // spans two pages
+  char back[sizeof text];
+  CHECK(18, sys(CROI_SYS_VMO_READ, vmo, (uint64_t)back, 4090, sizeof back, 0) == 0);
+  for (unsigned i = 0; i < sizeof text; i++) CHECK(19, back[i] == text[i]);
+  uint64_t address = 0;
+  CHECK(20, sys(CROI_SYS_VMO_MAP, vmo, 0, 8192, CROI_VM_READ | CROI_VM_WRITE, (uint64_t)&address) == 0);
+  volatile char *mapped = (volatile char *)address;
+  CHECK(21, mapped[4090] == 'w');
+  mapped[0] = 'Z';
+  CHECK(22, sys(CROI_SYS_VMO_READ, vmo, (uint64_t)back, 0, 1, 0) == 0 && back[0] == 'Z');
+
+  // Bad pointers are errors, not crashes.
+  CHECK(23, sys(CROI_SYS_EVENT_CREATE, 0, 0x10, 0, 0, 0) == ERR_INVALID_ARGS);
+  CHECK(24, sys(CROI_SYS_VMO_READ, vmo, 0xFFFF800000000000ull, 0, 16, 0) == ERR_INVALID_ARGS);
+  CHECK(25, sys(CROI_SYS_DEBUG_WRITE, 0x10, 4, 0, 0, 0) == ERR_INVALID_ARGS);
+  // A kernel address valid on every arch (the kernel image): never copied.
+  CHECK(29, sys(CROI_SYS_VMO_WRITE, vmo, 0xFFFFFFFF80000000ull, 0, 16, 0) == ERR_INVALID_ARGS);
+  CHECK(30, sys(CROI_SYS_VMO_READ, vmo, 0xFFFFFFFF80000000ull, 0, 16, 0) == ERR_INVALID_ARGS);
+
+  CHECK(26, sys(CROI_SYS_HANDLE_CLOSE, event, 0, 0, 0, 0) == 0);
+  CHECK(27, sys(CROI_SYS_HANDLE_CLOSE, port, 0, 0, 0, 0) == 0);
+  CHECK(28, sys(CROI_SYS_HANDLE_CLOSE, vmo, 0, 0, 0, 0) == 0);
+  static const char done[] = "object syscalls from user mode ok";
+  sys(CROI_SYS_DEBUG_WRITE, (uint64_t)done, sizeof done - 1, 0, 0, 0);
+  return 0x600D;
+}
+
+// Mode 1: user marks through trace_configure with the tracing resource.
+static int64_t marks(uint32_t resource) {
+  CHECK(40, sys(CROI_SYS_TRACE_CONFIGURE, resource, CROI_TRACE_OP_START, 1u << 7 | 1u << 5, 4, 0) == 0);
+  CHECK(41, sys(CROI_SYS_TRACE_CONFIGURE, resource, CROI_TRACE_OP_MARK, 0xC401, 0xFEED, 0) == 0);
+  CHECK(42, sys(CROI_SYS_TRACE_CONFIGURE, resource, CROI_TRACE_OP_STOP, 0, 0, 0) == 0);
+  CHECK(43, sys(CROI_SYS_TRACE_CONFIGURE, 0x7FF, CROI_TRACE_OP_STOP, 0, 0, 0) == ERR_BAD_HANDLE);
+  return 0x600D;
+}
+
+__attribute__((section(".text.start"))) [[noreturn]] void _start(uint64_t mode, uint64_t handle) {
+  exit_with(mode == 1 ? marks((uint32_t)handle) : objects());
+}

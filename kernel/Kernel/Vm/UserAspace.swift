@@ -112,6 +112,20 @@ struct UserAspace: ~Copyable {
     /// The root region's id.
     static var root: UInt32 { 0 }
 
+    fileprivate static func view(_ record: UserAspacePointer) -> UserAspace {
+        UserAspace(viewing: record)
+    }
+
+    private init(viewing record: UserAspacePointer) {
+        self.record = record
+    }
+
+    /// Ends a view without tearing anything down.
+    @export(interface)
+    consuming func forget() {
+        discard self
+    }
+
     init() throws(VmError) {
         let arch = try kernelAspace.makeUserTables()
         guard let raw = unsafe heap.allocate(size: MemoryLayout<UserAspaceRecord>.size,
@@ -123,6 +137,12 @@ struct UserAspace: ~Copyable {
             .initialize(to: UserAspaceRecord(arch: arch, asid: Asids.allocate()))
         record = UserAspacePointer(address: UInt64(UInt(bitPattern: raw)))
         UserAspaces.live.add(1, ordering: .relaxed)
+    }
+
+    /// A non-owning view of a running thread's address space (the owner
+    /// keeps it alive); `mapKeeping` is all it is for.
+    static func borrowing(_ record: UserAspacePointer) -> BorrowedAspace {
+        BorrowedAspace(record: record)
     }
 
     /// Maps physical memory at a user address, outside the region and
@@ -569,5 +589,24 @@ enum Asids {
 
     private static let invalidate: Ipi.Function = { asid in
         arch_tlb_invalidate_asid(asid)
+    }
+}
+
+/// A running thread's own address space, borrowed for a syscall.
+struct BorrowedAspace {
+    let record: UserAspacePointer
+
+    /// `UserAspace.map` in the root region (vmo_map, until VMARs).
+    func mapKeeping(_ vmo: borrowing Vmo, offset: UInt64, size: UInt64, rights: VmRights) throws(VmError) -> UInt64 {
+        let view = UserAspace.view(record)
+        let base: UInt64
+        do throws(VmError) {
+            base = try view.map(vmo, offset: offset, size: size, rights: rights)
+        } catch {
+            view.forget()
+            throw error
+        }
+        view.forget()
+        return base
     }
 }

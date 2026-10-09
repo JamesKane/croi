@@ -210,6 +210,18 @@ arch_user_access_end:
     ret
 .size arch_user_access_end, . - arch_user_access_end
 
+// uint64_t arch_user_protection_enable(void): SUM is clear except inside
+// the accessors, so S-mode can't touch U pages anyway; and never execute
+// them (U pages can't be executed in S-mode at all).
+.globl arch_user_protection_enable
+.type arch_user_protection_enable, %function
+arch_user_protection_enable:
+    li      t0, (1 << 18)
+    csrc    sstatus, t0
+    li      a0, 1
+    ret
+.size arch_user_protection_enable, . - arch_user_protection_enable
+
 // ASIDLEN: write all ones to satp.ASID and count what sticks (the spec's
 // probe), then put satp back.
 .globl arch_asid_bits

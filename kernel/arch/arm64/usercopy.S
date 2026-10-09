@@ -71,3 +71,16 @@ arch_copy_to_user:
     ret
 FIXUP 1b, 2b
 .size arch_copy_to_user, . - arch_copy_to_user
+
+// int arch_user_probe_unprotected(uint64_t addr): a privileged load (ldr,
+// not ldtr) from a user address, for the self-test: PAN makes it fault.
+.globl arch_user_probe_unprotected
+.type arch_user_probe_unprotected, %function
+arch_user_probe_unprotected:
+1:  ldr     x1, [x0]
+    mov     w0, #0
+    ret
+2:  mov     w0, #-1
+    ret
+FIXUP 1b, 2b
+.size arch_user_probe_unprotected, . - arch_user_probe_unprotected

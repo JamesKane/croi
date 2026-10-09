@@ -37,6 +37,13 @@ func arch_exception(_ frame: UnsafeMutablePointer<arch_exception_frame_t>) {
         // A synchronous fault is thread context: run the handler with the
         // faulting code's interrupt state, so that while it waits for a
         // lock it still answers IPIs (a TLB shootdown from the holder).
+        // A protection fault (SMAP/PAN/SUM: the access didn't open user
+        // access) is final; retrying the present page would loop.
+        guard unsafe !ExceptionFrame.userAccessBlocked(frame.pointee) else {
+            Trace.event(CROI_TRACE_VM, UInt16(CROI_TK_FAULT), fault.address, fault.write ? CROI_VM_FAULT_WRITE : 0)
+            unsafe ExceptionFrame.setProgramCounter(&frame.pointee, recovery)
+            return
+        }
         let enable = unsafe ExceptionFrame.interruptsWereEnabled(frame.pointee)
         if enable { arch_interrupts_enable() }
         let resolved = UserAspaces.handleFault(at: fault.address, write: fault.write, execute: fault.execute,
@@ -77,6 +84,11 @@ enum ExceptionFrame {
     static func programCounter(_ f: arch_exception_frame_t) -> UInt64 { f.rip }
     static func interruptsWereEnabled(_ f: arch_exception_frame_t) -> Bool { f.rflags & (1 << 9) != 0 }  // IF
     static func fromUser(_ f: arch_exception_frame_t) -> Bool { f.cs & 3 == 3 }
+    /// SMAP: a supervisor access to a present user page with AC clear.
+    static func userAccessBlocked(_ f: arch_exception_frame_t) -> Bool {
+        f.vector == 14 && f.error_code & 1 != 0 && f.error_code & 4 == 0 && croi_user_protection != 0
+            && f.rflags & (1 << 18) == 0
+    }
     static func isSyscall(_ f: arch_exception_frame_t) -> Bool { f.vector == 0x100 }
     static func syscallNumber(_ f: arch_exception_frame_t) -> UInt64 { f.rax }
     static func syscallArgument(_ f: arch_exception_frame_t, _ i: Int) -> UInt64 {
@@ -173,6 +185,12 @@ enum ExceptionFrame {
     }
     static func programCounter(_ f: arch_exception_frame_t) -> UInt64 { f.elr }
     static func interruptsWereEnabled(_ f: arch_exception_frame_t) -> Bool { f.spsr & (1 << 7) == 0 }  // PSTATE.I
+    /// PAN: a permission fault with PSTATE.PAN set (ldtr/sttr, which the
+    /// accessors use, aren't subject to PAN, so it was a plain access).
+    static func userAccessBlocked(_ f: arch_exception_frame_t) -> Bool {
+        let ec = exceptionClass(f)
+        return (ec == 0x24 || ec == 0x25) && (0x0C...0x0F).contains(f.esr & 0x3F) && f.spsr & (1 << 22) != 0
+    }
     /// Slots 8-15: from a lower EL.
     static func fromUser(_ f: arch_exception_frame_t) -> Bool { f.slot >= 8 && f.slot < 16 }
     static func isSyscall(_ f: arch_exception_frame_t) -> Bool { f.slot == 8 && exceptionClass(f) == 0x15 }  // SVC64
@@ -257,6 +275,8 @@ enum ExceptionFrame {
     }
     static func programCounter(_ f: arch_exception_frame_t) -> UInt64 { f.sepc }
     static func interruptsWereEnabled(_ f: arch_exception_frame_t) -> Bool { f.sstatus & (1 << 5) != 0 }  // SPIE
+    /// SUM was clear: the access didn't go through an accessor.
+    static func userAccessBlocked(_ f: arch_exception_frame_t) -> Bool { f.sstatus & (1 << 18) == 0 }
     /// sstatus.SPP clear: the trap came from U-mode.
     static func fromUser(_ f: arch_exception_frame_t) -> Bool { f.sstatus & (1 << 8) == 0 }
     static func isSyscall(_ f: arch_exception_frame_t) -> Bool { f.scause == 8 }  // ecall from U

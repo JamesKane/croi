@@ -13,6 +13,10 @@ int arch_user_load_u64(uint64_t addr, uint64_t *_Nonnull out);
 // 0 after storing `value` at user address `addr`, or -1.
 int arch_user_store_u64(uint64_t addr, uint64_t value);
 
+// A kernel load from a user address without opening user access (self-test
+// of SMAP/PAN/SUM): -1 when the protection works.
+int arch_user_probe_unprotected(uint64_t addr);
+
 // The fixup table: pairs of 32-bit offsets, each from its own slot, to the
 // faulting instruction and to where to resume.
 typedef struct {

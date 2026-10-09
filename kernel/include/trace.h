@@ -40,6 +40,8 @@ enum : uint16_t {
   CROI_TK_OVERRUN = 6,  // thread: overrunning; a: overruns so far
   CROI_TK_IRQ_ENTER = 16,  // a: vector / INTID / scause
   CROI_TK_IRQ_EXIT = 17,   // a: as for enter
+  CROI_TK_SYSCALL_ENTER = 48,  // a: number; b: first argument
+  CROI_TK_SYSCALL_EXIT = 49,   // a: number; b: result
   CROI_TK_FAULT = 32,      // a: faulting user address; b: CROI_VM_FAULT_* bits
   CROI_TK_COMMIT = 33,     // a: VMO trace id; b: page index committed
   CROI_TK_MARK = 112,      // a, b: 16 bytes of the marker's choosing

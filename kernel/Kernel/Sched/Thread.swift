@@ -71,6 +71,9 @@ struct Thread: ~Copyable {
     var detached = false
     /// The user address space it runs in, or nil (kernel threads).
     var aspace: UserAspacePointer?
+    /// The handle table its syscalls use (a HandleTable's address; K7's
+    /// process owns it), or 0.
+    var handleTable: UInt64 = 0
     /// amd64 PKRU for JIT write gating (Jit.swift): 0 for kernel threads.
     var pkru: UInt32 = 0
     /// Its extended register state area (ExtendedState), or 0: kernel

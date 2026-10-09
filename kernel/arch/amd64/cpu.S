@@ -233,14 +233,44 @@ arch_tlb_invalidate_asid:
 .globl arch_user_access_begin
 .type arch_user_access_begin, @function
 arch_user_access_begin:
-    ret
+    cmpb    $0, croi_user_protection(%rip)
+    je      1f
+    stac
+1:  ret
 .size arch_user_access_begin, . - arch_user_access_begin
 
 .globl arch_user_access_end
 .type arch_user_access_end, @function
 arch_user_access_end:
-    ret
+    cmpb    $0, croi_user_protection(%rip)
+    je      1f
+    clac
+1:  ret
 .size arch_user_access_end, . - arch_user_access_end
+
+// uint64_t arch_user_protection_enable(void): CPUID.7.0:EBX SMEP (7) and
+// SMAP (20) -> CR4 bits 20 and 21.
+.globl arch_user_protection_enable
+.type arch_user_protection_enable, @function
+arch_user_protection_enable:
+    push    %rbx
+    mov     $7, %eax
+    xor     %ecx, %ecx
+    cpuid
+    mov     %cr4, %rax
+    test    $(1 << 7), %ebx
+    jz      1f
+    or      $(1 << 20), %rax        // SMEP
+1:  xor     %edx, %edx
+    test    $(1 << 20), %ebx
+    jz      2f
+    or      $(1 << 21), %rax        // SMAP
+    mov     $1, %edx
+2:  mov     %rax, %cr4
+    mov     %rdx, %rax
+    pop     %rbx
+    ret
+.size arch_user_protection_enable, . - arch_user_protection_enable
 
 .globl arch_asid_bits
 .type arch_asid_bits, @function

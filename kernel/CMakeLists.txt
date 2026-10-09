@@ -20,6 +20,7 @@ add_library(kernel-swift OBJECT
   Kernel/Smp.swift
   Kernel/User/Syscalls.swift
   Kernel/User/UserSelfTest.swift
+  Kernel/User/SyscallSelfTest.swift
   Kernel/Object/Status.swift
   Kernel/Object/KernelObject.swift
   Kernel/Object/Wait.swift
@@ -70,6 +71,7 @@ add_executable(kernel
   arch/${CROI_ARCH}/thread.S
   arch/${CROI_ARCH}/usercopy.S
   arch/${CROI_ARCH}/usertest.S
+  userprogram.S
   trace.c)
 target_include_directories(kernel PRIVATE include)
 target_link_libraries(kernel PRIVATE kernel-swift croi-rt)
@@ -82,3 +84,28 @@ add_custom_command(TARGET kernel POST_BUILD
   COMMAND ${CMAKE_COMMAND} -DNM=${CROI_TOOLCHAIN_DIR}/usr/bin/llvm-nm -DIMAGE=$<TARGET_FILE:kernel>
           -P ${PROJECT_SOURCE_DIR}/cmake/CheckNoArc.cmake
   COMMENT "Checking kernel is free of Swift refcounting")
+
+# The K6b self-test's user program: C built with user-mode flags (no
+# kernel code model, red zone allowed) into a flat binary at its fixed
+# user address, then included in the kernel image (userprogram.S).
+if(CROI_ARCH STREQUAL amd64)
+  set(_user_flags -mgeneral-regs-only)
+elseif(CROI_ARCH STREQUAL arm64)
+  set(_user_flags -mgeneral-regs-only)
+else()
+  set(_user_flags -march=rv64imac -mabi=lp64 -mcmodel=medany)
+endif()
+set(_user_dir ${PROJECT_SOURCE_DIR}/user)
+set(_user_elf ${CMAKE_CURRENT_BINARY_DIR}/usertest.elf)
+set(_user_bin ${CMAKE_CURRENT_BINARY_DIR}/usertest.bin)
+add_custom_command(OUTPUT ${_user_bin}
+  COMMAND ${CMAKE_C_COMPILER} --target=${CROI_CLANG_TRIPLE} ${_user_flags} -std=c23 -O2 -ffreestanding
+          -fno-pic -fno-pie -fno-stack-protector -fno-builtin -nostdlib -static -fuse-ld=lld
+          -Wl,--no-pie -Wl,-T,${_user_dir}/test/user.ld -I${_user_dir}/include
+          ${_user_dir}/test/usertest.c -o ${_user_elf}
+  COMMAND ${CMAKE_OBJCOPY} -O binary ${_user_elf} ${_user_bin}
+  DEPENDS ${_user_dir}/test/usertest.c ${_user_dir}/test/user.ld ${_user_dir}/include/croi/syscall.h
+  COMMENT "Building the user test program")
+set_source_files_properties(userprogram.S PROPERTIES
+  OBJECT_DEPENDS ${_user_bin}
+  COMPILE_DEFINITIONS "CROI_USER_PROGRAM=\"${_user_bin}\"")
