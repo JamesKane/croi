@@ -20,6 +20,56 @@
 // `root_high` into TTBR1.
 void arch_load_page_tables(uint64_t root, uint64_t root_high);
 
+// --- Exceptions ---------------------------------------------------------------
+//
+// Each arch's vectors (arch/<arch>/exceptions.S) save the interrupted state
+// as an arch_exception_frame_t on the current stack and call
+// arch_exception. Whatever the handler leaves in the frame is restored on
+// return, so it can resume past an instruction or redirect execution.
+
+#if defined(__x86_64__)
+typedef struct {
+  uint64_t r15, r14, r13, r12, r11, r10, r9, r8;
+  uint64_t rbp, rdi, rsi, rdx, rcx, rbx, rax;
+  uint64_t vector;
+  uint64_t error_code;  // 0 for vectors where the CPU pushes none
+  uint64_t rip, cs, rflags, rsp, ss;  // pushed by the CPU
+} arch_exception_frame_t;
+static_assert(sizeof(arch_exception_frame_t) == 22 * 8);
+#elif defined(__aarch64__)
+typedef struct {
+  uint64_t x[31];
+  uint64_t sp;     // at the time of the exception
+  uint64_t elr;
+  uint64_t spsr;
+  uint64_t esr;
+  uint64_t far;
+  uint64_t slot;   // vector table entry, 0..15
+  uint64_t reserved;
+} arch_exception_frame_t;
+static_assert(sizeof(arch_exception_frame_t) == 38 * 8);
+#elif defined(__riscv)
+typedef struct {
+  uint64_t x[32];  // x[0] unused; x[2] is sp at the time of the trap
+  uint64_t sepc;
+  uint64_t sstatus;
+  uint64_t scause;
+  uint64_t stval;
+} arch_exception_frame_t;
+static_assert(sizeof(arch_exception_frame_t) == 36 * 8);
+#endif
+
+// Swift (Kernel/Exceptions.swift). Every exception lands here.
+void arch_exception(arch_exception_frame_t *_Nonnull frame);
+
+// Assembly (arch/<arch>/exceptions.S). Installs the exception vectors (and
+// on amd64 the IDT and a TSS with a separate stack for #DF/NMI/#MC).
+void arch_init_exceptions(void);
+
+// Assembly (arch/<arch>/exceptions.S). Executes a breakpoint instruction;
+// used to check the exception path round-trips.
+void arch_breakpoint(void);
+
 #if defined(__aarch64__)
 // Assembly (arch/arm64/start.S). The current exception level.
 uint64_t arch_current_el(void);
@@ -29,6 +79,9 @@ uint64_t arch_current_el(void);
 // Assembly (arch/amd64/start.S). Port I/O, which Swift cannot express.
 uint8_t arch_inb(uint16_t port);
 void arch_outb(uint16_t port, uint8_t value);
+
+// Assembly (arch/amd64/exceptions.S). The page-fault linear address.
+uint64_t arch_read_cr2(void);
 #endif
 
 // Kernel image segment bounds (virtual), from ld/image.ld. Inline C because

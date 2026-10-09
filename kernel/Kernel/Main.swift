@@ -29,6 +29,8 @@ func kernel_main(_ handoffAddress: UInt64) -> Never {
     else { arch_halt() }
 
     var console = unsafe Uart(handoff.uart)
+    panicConsole = console
+    arch_init_exceptions()
     console.write("croi kernel (")
     console.write(archName)
     console.write(")\n")
@@ -57,6 +59,7 @@ func kernel_main(_ handoffAddress: UInt64) -> Never {
     var allocator = tables.memory
     allocator.useKernelMappings()
     console = unsafe Uart(handoff.uart.inPhysmap)
+    panicConsole = console
 
     console.write("  paging: kernel page tables, ")
     console.write(decimal: allocator.pagesAllocated)
@@ -72,6 +75,12 @@ func kernel_main(_ handoffAddress: UInt64) -> Never {
         arch_halt()
     }
     reportMemory(allocator, to: console)
+
+    // Exception round trip: take a breakpoint and resume after it.
+    arch_breakpoint()
+    guard breakpointsHandled == 1 else { panic("breakpoint did not round-trip") }
+    console.write("  traps:  vectors installed, breakpoint resumed\n")
+
     console.write("croi kernel: halting\n")
     arch_halt()
 }

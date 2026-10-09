@@ -56,6 +56,16 @@ the kernel uses are mapped in the physmap as device memory; the image at
 CROI_KERNEL_BASE with text RX, rodata R, data RW. amd64 loads its own GDT
 first thing, since firmware's sits in memory reported free.
 
+Exceptions: `arch/<arch>/exceptions.S` saves an `arch_exception_frame_t`
+(kernel.h) and calls Swift `arch_exception` (Kernel/Exceptions.swift);
+the handler may edit the frame to resume elsewhere. Installed at the top
+of kernel_main. amd64: IDT of 256 stubs, TSS with IST1 for NMI/#DF/#MC.
+arm64: VBAR_EL1. rv64: stvec, S-mode traps only. Breakpoints resume (the
+boot test checks one round trip); anything else prints a register dump to
+`panicConsole` and halts via `panic()`. No stack guard pages yet, so kernel
+stack overflow is not caught. A deliberate fault in kernel code must use a
+volatile access, or LLVM may delete it (e.g. stores to const symbols).
+
 Kernel enters on the loader's page tables with the handoff's physical
 address as its argument, at EL1 on arm64: if firmware ran at EL2, the
 trampoline neutralizes EL2 (HCR_EL2 = RW only; timer, PMU and GICv3 sysregs
@@ -90,5 +100,8 @@ kernel must not use PAC until it does.
   stack buffers instead.
 - C constants Swift must see are typed C23 enums (`enum : uint64_t {...}`),
   not macros with casts, which Swift does not import.
+- Small Swift globals are fine (`nonisolated(unsafe) var`; zero/nil
+  initializers are static at -Osize). Large tables and stacks go in
+  assembly `.bss`: Swift still emits lazy initializers for them.
 - Linking uses `--orphan-handling=error`: new sections must be placed in
   `ld/image.ld` explicitly.

@@ -58,6 +58,11 @@ gdt:
     .quad   0
     .quad   0x00af9a000000ffff      // KERNEL_CS: present, ring 0, code, long mode
     .quad   0x00cf92000000ffff      // KERNEL_DS: present, ring 0, data, writable
+.globl gdt_tss
+.hidden gdt_tss
+gdt_tss:                            // 0x18: TSS, filled in by arch_init_exceptions
+    .quad   0
+    .quad   0
 gdt_end:
 gdt_pointer:
     .word   gdt_end - gdt - 1
