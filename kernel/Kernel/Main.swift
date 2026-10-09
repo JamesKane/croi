@@ -98,7 +98,9 @@ func kernel_main(_ handoffAddress: UInt64) -> Never {
     heapSelfTest()
     swiftAllocationSelfTest()
     refSelfTest()
+    spinLockSelfTest()
     console.write("  heap:   slabs + large pages; UniqueBox, UniqueArray and Ref allocate and free\n")
+    console.write("  locks:  spinlocks mask interrupts, nest, release on throw; pmm and heap locked\n")
 
     // Exception round trip: take a breakpoint and resume after it.
     arch_breakpoint()
@@ -269,3 +271,38 @@ private func refSelfTest() {
 }
 
 private func drop<T: ~Copyable>(_ value: consuming T) {}
+
+private enum SpinLockProbe: Error { case thrown }
+
+/// SpinLock: held state, interrupt masking and restore, nesting of
+/// distinct locks, and release when the body throws.
+private func spinLockSelfTest() {
+    let lock = SpinLock()
+    let other = SpinLock()
+    let interruptsBefore = arch_interrupts_enabled()
+    var steps = 0
+    lock.withLock {
+        guard lock.isHeldByCurrentCpu, !arch_interrupts_enabled() else {
+            panic("spinlock self-test: not held, or interrupts not masked")
+        }
+        other.withLock {
+            guard other.isHeldByCurrentCpu else { panic("spinlock self-test: nested lock not held") }
+            steps += 1
+        }
+        guard !other.isHeldByCurrentCpu, lock.isHeldByCurrentCpu else {
+            panic("spinlock self-test: nested release")
+        }
+        steps += 1
+    }
+    do throws(SpinLockProbe) {
+        try lock.withLock { () throws(SpinLockProbe) in throw .thrown }
+    } catch {
+        steps += 1
+    }
+    guard steps == 3, !lock.isHeldByCurrentCpu, arch_interrupts_enabled() == interruptsBefore else {
+        panic("spinlock self-test: release or interrupt restore")
+    }
+    guard !heapLock.isHeldByCurrentCpu, !pmmLock.isHeldByCurrentCpu else {
+        panic("spinlock self-test: pmm or heap lock left held")
+    }
+}

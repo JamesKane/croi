@@ -12,8 +12,12 @@ import CKernel
 ///
 /// All bookkeeping lives in the PMM's `Page` records, so allocations carry
 /// no headers. `free` validates the pointer, catches double frees and
-/// poisons freed memory. Not locked yet, like the PMM.
+/// poisons freed memory. Entry points take `heapLock`, and may take
+/// `pmmLock` inside it.
 nonisolated(unsafe) var heap = Heap()
+
+/// Guards `heap`'s slab lists and counters (see SpinLock for lock order).
+let heapLock = SpinLock()
 
 @safe struct Heap {
     /// Size classes: multiples of 16, roughly 1.5x apart, all dividing a page
@@ -52,6 +56,10 @@ nonisolated(unsafe) var heap = Heap()
 
     /// `size` bytes aligned to `alignment` (a power of two), or nil.
     mutating func allocate(size: Int, alignment: Int = 16) -> UnsafeMutableRawPointer? {
+        unsafe heapLock.withLock { unsafe allocateLocked(size: size, alignment: alignment) }
+    }
+
+    private mutating func allocateLocked(size: Int, alignment: Int) -> UnsafeMutableRawPointer? {
         guard alignment > 0, alignment & (alignment - 1) == 0 else { return nil }
         let size = max(size, 1)
         for c in 0..<Self.classCount {
@@ -118,6 +126,10 @@ nonisolated(unsafe) var heap = Heap()
     /// Frees an allocation. Anything that isn't the start of a live heap
     /// allocation panics.
     mutating func free(_ pointer: UnsafeMutableRawPointer) {
+        heapLock.withLock { unsafe freeLocked(pointer) }
+    }
+
+    private mutating func freeLocked(_ pointer: UnsafeMutableRawPointer) {
         let virt = UInt64(UInt(bitPattern: pointer))
         guard virt >= KernelLayout.physmapBase else { panic("heap: free of a non-heap pointer") }
         let phys = virt - KernelLayout.physmapBase

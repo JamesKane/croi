@@ -51,10 +51,11 @@ struct Arena {
 }
 
 /// The kernel's physical memory manager (Zircon's PmmNode, single node).
-///
-/// Not yet locked: callers run on one CPU with interrupts masked. A lock
-/// arrives with SMP.
+/// Every entry point that touches allocation state takes `pmmLock`.
 nonisolated(unsafe) var pmm = Pmm()
+
+/// Guards `pmm`'s free list and page states. Innermost lock (see SpinLock).
+let pmmLock = SpinLock()
 
 @safe struct Pmm {
     private var arenas = InlineArray<32, Arena>(repeating: Arena())
@@ -73,6 +74,10 @@ nonisolated(unsafe) var pmm = Pmm()
     /// wired; free RAM the boot allocator never handed out goes on the free
     /// list. The boot allocator must not be used afterwards.
     mutating func initialize(from boot: inout BootAllocator) throws(InitError) {
+        try pmmLock.withLock { () throws(InitError) in try initializeLocked(from: &boot) }
+    }
+
+    private mutating func initializeLocked(from boot: inout BootAllocator) throws(InitError) {
         let pageSize = KernelLayout.pageSize
 
         // Arenas: maximal runs of contiguous RAM the kernel owns.
@@ -139,6 +144,10 @@ nonisolated(unsafe) var pmm = Pmm()
 
     /// One page, not zeroed. Returns its physical address.
     mutating func allocatePage(_ state: PageState = .alloc) -> UInt64? {
+        pmmLock.withLock { allocatePageLocked(state) }
+    }
+
+    private mutating func allocatePageLocked(_ state: PageState) -> UInt64? {
         guard freeHead != 0 else { return nil }
         let page = unsafe pointer(freeHead)
         unsafe unlinkFree(page)
@@ -149,6 +158,10 @@ nonisolated(unsafe) var pmm = Pmm()
     /// `count` physically contiguous pages whose base is aligned to
     /// 2^`alignLog2` bytes (at least page aligned). Not zeroed.
     mutating func allocateContiguous(_ count: UInt64, alignLog2: Int = 12, _ state: PageState = .alloc) -> UInt64? {
+        pmmLock.withLock { allocateContiguousLocked(count, alignLog2: alignLog2, state) }
+    }
+
+    private mutating func allocateContiguousLocked(_ count: UInt64, alignLog2: Int, _ state: PageState) -> UInt64? {
         guard count > 0, alignLog2 < 64 else { return nil }
         let pageSize = KernelLayout.pageSize
         let alignment = max(UInt64(1) << alignLog2, pageSize)
@@ -180,22 +193,32 @@ nonisolated(unsafe) var pmm = Pmm()
     /// Returns a page to the free list. Freeing a page that isn't allocated
     /// (double free, or not RAM the PMM manages) panics.
     mutating func free(_ phys: UInt64) {
-        guard let page = unsafe page(for: phys) else { panic("pmm: freeing a page outside every arena") }
-        guard unsafe page.pointee.state != .free else { panic("pmm: double free") }
-        unsafe pushFree(page)
+        pmmLock.withLock { freeLocked(phys) }
     }
 
     mutating func free(_ phys: UInt64, count: UInt64) {
-        for i in 0..<count {
-            free(phys + i * KernelLayout.pageSize)
+        pmmLock.withLock {
+            for i in 0..<count {
+                freeLocked(phys + i * KernelLayout.pageSize)
+            }
         }
+    }
+
+    private mutating func freeLocked(_ phys: UInt64) {
+        guard let page = unsafe page(for: phys) else { panic("pmm: freeing a page outside every arena") }
+        guard unsafe page.pointee.state != .free else { panic("pmm: double free") }
+        unsafe pushFree(page)
     }
 
     /// Frees the loader's handoff memory (its range table and boot page
     /// tables), like Zircon's pmm_end_handoff. Reads the range table while
     /// freeing it, which is fine: freeing only touches Page records. After
     /// this, nothing may read the handoff.
-    mutating func endHandoff(_ boot: borrowing BootAllocator) -> UInt64 {
+    mutating func endHandoff(_ boot: BootAllocator) -> UInt64 {
+        pmmLock.withLock { endHandoffLocked(boot) }
+    }
+
+    private mutating func endHandoffLocked(_ boot: BootAllocator) -> UInt64 {
         var freed: UInt64 = 0
         for i in 0..<boot.rangeCount {
             let r = boot.range(i)
@@ -223,7 +246,7 @@ nonisolated(unsafe) var pmm = Pmm()
     }
 
     func state(of phys: UInt64) -> PageState? {
-        unsafe page(for: phys)?.pointee.state
+        pmmLock.withLock { unsafe page(for: phys)?.pointee.state }
     }
 
     func arena(_ i: Int) -> Arena { arenas[i] }

@@ -20,6 +20,19 @@
 // `root_high` into TTBR1.
 void arch_load_page_tables(uint64_t root, uint64_t root_high);
 
+// --- CPU ----------------------------------------------------------------------
+//
+// Assembly (arch/<arch>/cpu.S).
+
+// Masks interrupts on this CPU and returns the previous state, to be passed
+// to arch_interrupts_restore. Nests: restore puts back exactly what was saved.
+uint64_t arch_interrupts_save(void);
+void arch_interrupts_restore(uint64_t state);
+bool arch_interrupts_enabled(void);
+
+// Spin-wait hint (x86 pause, arm64 yield, RISC-V Zihintpause pause).
+void arch_spin_pause(void);
+
 // --- Exceptions ---------------------------------------------------------------
 //
 // Each arch's vectors (arch/<arch>/exceptions.S) save the interrupted state

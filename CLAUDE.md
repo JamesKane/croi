@@ -64,9 +64,9 @@ free RAM the boot allocator never handed out (it records exact spans) goes
 on a doubly linked free list. amd64 keeps the first MiB wired for SMP
 trampolines. `allocatePage`, `allocateContiguous(count, alignLog2:)`,
 `free` (panics on double free), `endHandoff()` (frees the loader's handoff
-data and boot page tables; nothing may read the handoff afterwards). No
-lock yet: single CPU, interrupts masked. ACPI reclaim stays wired until
-ACPI is parsed. Boot runs a PMM self-test.
+data and boot page tables; nothing may read the handoff afterwards).
+Guarded by `pmmLock`. ACPI reclaim stays wired until ACPI is parsed. Boot
+runs a PMM self-test.
 
 Kernel heap (`Kernel/Heap.swift`, global `heap`): PMM pages (state `.heap`)
 through the physmap, like Zircon's. Requests up to 2 KiB use one-page slabs
@@ -74,7 +74,17 @@ in 13 size classes (per-slab free lists; empty slabs go back to the PMM);
 larger or >2 KiB-aligned requests get contiguous PMM pages. Bookkeeping is
 in the `Page` records (no headers). `free` validates, catches double frees
 and poisons. `posix_memalign`/`malloc`/`free` are `@c @implementation`
-(the Swift runtime allocates through them). Not locked yet.
+(the Swift runtime allocates through them). Guarded by `heapLock`.
+
+Locking (`Kernel/SpinLock.swift`): `SpinLock` masks interrupts on this CPU
+while held (Zircon's SpinLock + IrqSave) and spins test-and-test-and-set;
+`withLock { }` is the API (releases on throw). The lock word holds the
+holder's CPU + 1, so a recursive acquire or a release by a non-holder
+panics. `Cpu.current` is 0 until per-CPU data exists. Lock order: heap ->
+pmm (the heap calls the PMM with its lock held). Locks are global `let`s
+next to the global state they guard; public mutating methods of `Pmm` and
+`Heap` take the lock and call `*Locked` internals. Restoring an
+*enabled* interrupt state is untested until interrupt controllers exist.
 
 Exceptions: `arch/<arch>/exceptions.S` saves an `arch_exception_frame_t`
 (kernel.h) and calls Swift `arch_exception` (Kernel/Exceptions.swift);
