@@ -170,6 +170,125 @@ shootdown, interrupts on in idle. ITS and AIA (APLIC/IMSIC) setup moves to the d
 - Todhchai M4 needs **ext 1** (display timeline) and **ext 4** (admission
   with a reason). Their foundations are in K2, K3 and K5.
 
+## Review: board requirements (2026-10-09)
+
+Todhchai's requirements gained notes from scouting the Orange Pi 6 Plus
+(CIX Sky1) and Radxa Dragon Q8B (SC8280XP), which follow the amd64
+reference machine. Each new point was checked against Zircon
+(`../fuchsia`, pinned revision) to separate reusable designs from real
+extensions.
+
+**Zircon already has a design; follow it**
+- **SMC from user space:** `zx_smc_call` with an SMC resource. Zircon scopes
+  by SMCCC service-call number (OEN), not by function-ID range as the
+  requirement says. The SCMI call on the Sky1 (`0xc2000001`) is a SiP call,
+  so an OEN-scoped resource grants every SiP call. croi can scope by
+  function-ID range, which is a small, deliberate extension.
+- **VMO cache maintenance:** `zx_vmo_op_range` with `CACHE_SYNC`, `CLEAN`,
+  `CLEAN_INVALIDATE` and `INVALIDATE`, plus the vDSO's `zx_cache_flush`.
+  Zircon gates invalidate-only behind a debugging option, because it can
+  discard data and expose stale memory. Clean+invalidate covers DMA from a
+  non-coherent device. Keep that gate.
+- **Physical VMOs for firmware carve-outs:** Zircon's root-resource filter
+  denies MMIO resources that overlap RAM. croi's PMM already leaves reserved
+  types out, so carve-outs only need to stay non-RAM in the handoff.
+- **Thread-direct IRQ wakeup (ext 5):** `zx_interrupt_wait` already blocks a
+  thread on an interrupt object and wakes it straight from the handler, with
+  no port. ext 5 is mostly this. What's new would be scheduling-context
+  handoff on the wakeup, which should be stated if it's meant.
+- **Capacity-aware scheduling (item 5):** Zircon has a per-CPU processing
+  rate, deadline utilization normalized per CPU, an energy model, and
+  `zx_system_set_performance_info`. The rate is set from user space. Not
+  in Zircon: admission (it has none; "TODO: shed load") and CPPC.
+- **DBG2 console:** Zircon's acpi_lite parses DBG2 (16550 only). Its uart
+  library has a Qualcomm GENI driver to study for the Q8B.
+- **Contiguous pools:** Zircon has no kernel boot pool. It uses *page
+  loaning*: a decommitted contiguous VMO lends its pages to the system and
+  reclaims them on commit. A contiguous VMO created at boot plus loaning is
+  the Zircon-shaped answer to the Q8B fragmentation problem, without
+  wasting the pool.
+
+**Genuine gaps (Zircon has nothing, or only a stub)**
+- **Contiguous allocation with a physical address limit** (Q8B scan-out
+  below 4 GiB). Trivial in croi's PMM: add it with K4's contiguous VMOs.
+- **BTI properties:**
+  - an IOVA window and a DMA address width;
+  - a per-device memory type (Normal WB or Normal NC, never Device);
+  - firmware identity regions (IORT RMR, DMAR RMRR);
+  - leaving firmware-owned or hypervisor-policed IOMMUs alone;
+  - VT-d and AMD-Vi.
+
+  Zircon's SMMU BTI has a fixed window, no width and no memory-type
+  control, and a stub BTI.
+- **Interrupt affinity as policy:** Zircon's GICv3 can't set affinity (all
+  SPIs go to CPU 0), and x86 MSIs go to the BSP. croi already routes
+  nothing without an explicit affinity (K2a). Item 13 exposes it.
+- **GICv3 MSI (ITS):** unimplemented in Zircon (`PANIC_UNIMPLEMENTED`).
+  Already in croi's plan for the drivers phase.
+- **Deep idle and wake timers:**
+  - Zircon uses WFI for ordinary idle, a static PSCI suspend state, and a
+    simple MWAIT governor on x86. It has no general broadcast timer, and no
+    ARAT check on x86.
+  - A deadline-aware idle governor with an always-on wake timer (ext 11) is
+    new.
+  - So is a CPPC frequency floor (ext 12); Zircon has only x86 HWP requests.
+- **SError:** Zircon only counts it. Delivering a recoverable SError to the
+  faulting process is new. croi currently panics on any SError.
+- **GIC errata, the SBSA generic watchdog, board quirks:** none in Zircon
+  beyond a devicetree-described watchdog. croi is ACPI-only, so kernel-level
+  board rules need a data channel, i.e. handoff v4 from an ESP file keyed
+  on SMBIOS / SoC ID. The rules cover the console access width, the
+  watchdog refresh method, and IOMMUs to leave alone.
+
+**Cross-cutting: AML.** `_CPC` (capacity, CPPC registers) and `_LPI` (idle
+states) are AML, and croi's kernel doesn't run AML: Todhchai's interpreter
+is in user space. Capacity, idle states and frequency-floor registers
+therefore come from the user-space power service through privileged
+calls, as Zircon's `zx_system_set_performance_info` does. Until then the
+kernel uses only safe defaults:
+- capacity from the core type;
+- shallow idle (WFI/HLT, where per-CPU timers keep running);
+- no frequency floor.
+
+**What this changes in the plan**
+- **K2 follow-ups (small, soon):**
+  - record x86 ARAT (CPUID 6 EAX bit 2);
+  - parse GTDT watchdogs and keep the SBSA watchdog refreshed during
+    bring-up;
+  - a DBG2 console fallback in the loader;
+  - an arm64 SError policy: report it, and later deliver it to a user
+    process.
+- **K3:**
+  - Each CPU has a capacity (processing rate) from day one: a core-type
+    default, overridable from user space. EDF admission, with a reason,
+    counts budget in capacity-scaled time.
+  - Admitted deadline work publishes a per-CPU wake-latency bound and a
+    frequency-floor request. Only the hooks for now; enforcement comes in
+    KP.
+- **K4:**
+  - contiguous VMOs with an address limit and alignment;
+  - a boot-time contiguous reservation path, with page loaning later;
+  - VMO cache ops: x86 `clflushopt`, arm64 `dc`, rv64 Zicbom;
+  - physical VMOs checked against a RAM deny list.
+- **KP, power (new, after K3; needs the user-space power service):**
+  - an idle governor using `_LPI`-derived states, bounded by K3's latency
+    bounds;
+  - an always-on wake timer (MMIO generic timer, or a board timer such as
+    the Sky1's GPT), and knowing which CPUs it can wake;
+  - a CPPC minimum-performance floor.
+- **Drivers phase:**
+  - an SMC resource scoped by function-ID range;
+  - BTI with window, width and memory type;
+  - RMR/RMRR identity maps and leave-alone IOMMUs;
+  - a BTI without an IOMMU, as a recorded trust decision;
+  - VT-d first;
+  - ITS and AIA MSIs;
+  - interrupt affinity on interrupt objects.
+- **Board bring-up:**
+  - handoff v4 board rules;
+  - a GENI UART;
+  - GIC erratum checks keyed on IIDR.
+
 ## Shared read-only pages
 
 ext 1 (next vblank per output), ext 9 (topology and power) and the vDSO
