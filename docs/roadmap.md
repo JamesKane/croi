@@ -18,13 +18,13 @@ QEMU.
 
 | # | Item | Status |
 |---|---|---|
-| 1 | Handoff: bootfs, GOP framebuffer, command line | **Todo.** croi's handoff v2 only added the rv64 boot hart ID, so this becomes handoff v3 |
+| 1 | Handoff: bootfs, GOP framebuffer, command line | **Done** (K1): handoff v3. The bootfs format itself comes with userboot (K8) |
 | 2 | Interrupt controllers, tickless timer, monotonic clock | Todo (K2) |
 | 3 | PMM (contiguous, reclaim), heap, slab | **Done**, except ACPI-reclaim memory, which stays wired until ACPI parsing is finished |
 | 4 | Threads, wait queues, PI owned wait queues, timers | Todo (K3) |
 | 5 | Scheduler: fair + EDF | Todo (K3) |
 | 6 | SMP: AP bring-up, IPIs, TLB shootdown, per-CPU data | **Partial**: AP bring-up and per-CPU data are done. IPIs and TLB shootdown are in K2 |
-| 7 | VMM phase A: VMARs, VMOs, faults, cache policy, huge pages | **Partial**: ArchAspace (map/unmap/protect/query, large pages) and the kernel aspace exist. Cache policy is in K1; the rest is in K4 |
+| 7 | VMM phase A: VMARs, VMOs, faults, cache policy, huge pages | **Partial**: ArchAspace (map/unmap/protect/query, large pages), the kernel aspace, and the cache policy (K1; rv64 Svpbmt pending) exist. The rest is in K4 |
 | 8 | Handles, rights, koids, dispatchers, signals, waits | Todo (K5) |
 | 9 | Syscalls, user-copy, vDSO, user FP/SIMD | Todo (K6) |
 | 10 | Channel, port, event(pair), futex with owner, timer | Todo (K7) |
@@ -37,7 +37,9 @@ QEMU.
 Each milestone ends with boot self-tests on all three arches, like the work
 so far.
 
-### K1: Handoff v3 and cache policy (requirements 1, part of 7)
+### K1: Handoff v3 and cache policy (requirements 1, part of 7): done
+Still open: rv64 Svpbmt (needs ISA detection from the RHCT, which comes
+with K2's ACPI work), and a text console on the framebuffer (needs a font).
 - Loader: read `\croi\bootfs.img` (`CROI_MEM_BOOTFS` range), GOP framebuffer
   (base, size, stride, pixel format), and the command line (loader options,
   or `\croi\cmdline`). Handoff v3.

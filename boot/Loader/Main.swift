@@ -46,7 +46,10 @@ func croi_loader_main(
     guard unsupported == 0 else { throw .unsupported("CPU state left by firmware", unsupported) }
 
     // Kernel image, loaded at its link address.
-    let file = try unsafe readKernelFile(image: image, boot: boot)
+    let volume = try unsafe BootVolume(image: image, boot: boot)
+    guard let file = try unsafe volume.readIntoPool("\\croi\\kernel.elf") else {
+        throw .kernel("\\croi\\kernel.elf not found")
+    }
     let (elf, kernelPhys) = try unsafe withPhysical(UInt64(UInt(bitPattern: file.buffer)), size: file.size) {
         (bytes: RawSpan) throws(LoaderError) -> (KernelElf, UInt64) in
         let elf = try KernelElf(parsing: bytes)
@@ -82,6 +85,28 @@ func croi_loader_main(
     console.write(hex: uart.base)
     console.write("\n")
 
+    // Optional: the boot filesystem image and the kernel command line.
+    let bootfs = try volume.readIntoPages("\\croi\\bootfs.img", type: CroiMemoryType.bootfs)
+    let cmdline = try unsafe volume.readIntoPool("\\croi\\cmdline")
+    // Close the volume now. Its deinit calls firmware, and bootKernel never
+    // returns, so left alone it could run after ExitBootServices.
+    _ = consume volume
+    console.write("bootfs: ")
+    console.write(decimal: UInt64(bootfs?.size ?? 0))
+    console.write(" bytes, cmdline: ")
+    console.write(decimal: UInt64(unsafe cmdline?.size ?? 0))
+    console.write(" bytes\n")
+
+    // The GOP framebuffer, if there is a linear one.
+    let framebuffer = unsafe findFramebuffer(boot)
+    console.write("framebuffer: ")
+    console.write(decimal: UInt64(framebuffer.width))
+    console.write("x")
+    console.write(decimal: UInt64(framebuffer.height))
+    console.write(" at ")
+    console.write(hex: framebuffer.base)
+    console.write("\n")
+
     // RISC-V S-mode can't read its own hart ID; firmware knows it.
     var bootHartId: UInt64 = 0
     #if arch(riscv64)
@@ -92,12 +117,22 @@ func croi_loader_main(
     bootHartId = UInt64(hartId)
     #endif
 
-    // Handoff block and range table, sized for the largest possible map.
+    // Handoff block, range table (sized for the largest possible map, plus
+    // two for the framebuffer overlay) and the command line.
     var map = try MemoryMap(boot: boot)
-    let rangeCapacity = map.maxCount
-    let handoffBytes = UInt64(MemoryLayout<croi_handoff_t>.size + rangeCapacity * MemoryLayout<croi_mem_range_t>.size)
+    let rangeCapacity = map.maxCount + 2
+    let rangesOffset = MemoryLayout<croi_handoff_t>.size
+    let cmdlineOffset = rangesOffset + rangeCapacity * MemoryLayout<croi_mem_range_t>.size
+    let cmdlineSize = unsafe cmdline?.size ?? 0
+    let handoffBytes = UInt64(cmdlineOffset + cmdlineSize)
     let handoffPhys = try boot.allocatePages(roundUp(handoffBytes, to: pageSize) / pageSize, type: CroiMemoryType.handoff)
-    let rangesPhys = handoffPhys + UInt64(MemoryLayout<croi_handoff_t>.size)
+    let rangesPhys = handoffPhys + UInt64(rangesOffset)
+    let cmdlinePhys = handoffPhys + UInt64(cmdlineOffset)
+    if let cmdline = unsafe cmdline {
+        unsafe UnsafeMutableRawPointer(bitPattern: UInt(cmdlinePhys))!
+            .copyMemory(from: cmdline.buffer, byteCount: cmdline.size)
+        unsafe boot.freePool(cmdline.buffer)
+    }
 
     // Boot page tables. Mapping all RAM up front covers everything allocated
     // later too, since allocations only change the type of RAM ranges.
@@ -150,7 +185,14 @@ func croi_loader_main(
     guard status == EFI_SUCCESS else { throw .firmware("ExitBootServices", status) }
 
     let ranges = unsafe UnsafeMutablePointer<croi_mem_range_t>(bitPattern: UInt(rangesPhys))!
-    let rangeCount = unsafe buildRangeTable(from: map, into: ranges, capacity: rangeCapacity)
+    var rangeCount = unsafe buildRangeTable(from: map, into: ranges, capacity: rangeCapacity)
+    if framebuffer.format != CROI_PIXEL_NONE {
+        // Never cached, never allocated: whatever memory it sits in.
+        let base = framebuffer.base & ~(pageSize - 1)
+        unsafe rangeCount = overlayRange(ranges, count: rangeCount, capacity: rangeCapacity, base: base,
+                                         size: roundUp(framebuffer.base + framebuffer.size, to: pageSize) - base,
+                                         type: CROI_MEM_FRAMEBUFFER)
+    }
     let handoff = unsafe UnsafeMutablePointer<croi_handoff_t>(bitPattern: UInt(handoffPhys))!
     unsafe handoff.pointee = croi_handoff_t(
         magic: CROI_HANDOFF_MAGIC,
@@ -164,7 +206,12 @@ func croi_loader_main(
         memory_map: rangesPhys,
         memory_map_count: UInt64(rangeCount),
         uart: uart,
-        boot_hart_id: bootHartId)
+        boot_hart_id: bootHartId,
+        bootfs: bootfs?.phys ?? 0,
+        bootfs_size: UInt64(bootfs?.size ?? 0),
+        cmdline: cmdlineSize > 0 ? cmdlinePhys : 0,
+        cmdline_size: UInt64(cmdlineSize),
+        framebuffer: framebuffer)
 
     // Everything the kernel reads early must be visible with the MMU off.
     for i in 0..<rangeCount {
@@ -185,4 +232,32 @@ private func mapping(
     } catch {
         throw LoaderError(error)
     }
+}
+
+/// The GOP's current mode as a croi framebuffer; format CROI_PIXEL_NONE if
+/// there's no GOP or it has no linear framebuffer (Blt only).
+@unsafe private func findFramebuffer(_ boot: BootServices) -> croi_framebuffer_t {
+    var framebuffer = croi_framebuffer_t()
+    guard let gop = try? unsafe boot.locateProtocol(.graphicsOutput, as: EFI_GRAPHICS_OUTPUT_PROTOCOL.self),
+          let mode = unsafe gop.pointee.Mode, let info = unsafe mode.pointee.Info
+    else { return framebuffer }
+    let format: UInt32 = switch unsafe info.pointee.PixelFormat {
+    case PixelRedGreenBlueReserved8BitPerColor: CROI_PIXEL_RGBX8888
+    case PixelBlueGreenRedReserved8BitPerColor: CROI_PIXEL_BGRX8888
+    case PixelBitMask: CROI_PIXEL_BITMASK
+    default: CROI_PIXEL_NONE
+    }
+    guard format != CROI_PIXEL_NONE, unsafe mode.pointee.FrameBufferBase != 0 else { return framebuffer }
+    unsafe framebuffer.base = mode.pointee.FrameBufferBase
+    unsafe framebuffer.size = UInt64(mode.pointee.FrameBufferSize)
+    unsafe framebuffer.width = info.pointee.HorizontalResolution
+    unsafe framebuffer.height = info.pointee.VerticalResolution
+    unsafe framebuffer.stride = info.pointee.PixelsPerScanLine
+    framebuffer.format = format
+    let masks = unsafe info.pointee.PixelInformation
+    framebuffer.red_mask = masks.RedMask
+    framebuffer.green_mask = masks.GreenMask
+    framebuffer.blue_mask = masks.BlueMask
+    framebuffer.reserved_mask = masks.ReservedMask
+    return framebuffer
 }

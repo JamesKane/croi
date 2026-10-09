@@ -283,7 +283,7 @@ enum X86ApStartup {
         let window: UInt64
         do throws(VmError) {
             window = try kernelAspace.mapPhysical(phys, size: KernelLayout.pageSize,
-                                                  MapAttributes(writable: true, device: true, global: true))
+                                                  MapAttributes(writable: true, cache: .device, global: true))
         } catch {
             return false
         }

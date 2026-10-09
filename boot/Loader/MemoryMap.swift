@@ -55,7 +55,7 @@ import CHandoff
         case EfiLoaderCode, EfiLoaderData, EfiBootServicesCode, EfiBootServicesData,
              EfiRuntimeServicesCode, EfiRuntimeServicesData, EfiConventionalMemory,
              EfiACPIReclaimMemory, EfiACPIMemoryNVS, EfiPersistentMemory,
-             CroiMemoryType.kernel, CroiMemoryType.handoff:
+             CroiMemoryType.kernel, CroiMemoryType.handoff, CroiMemoryType.bootfs:
             return true
         default:
             return false
@@ -76,6 +76,7 @@ import CHandoff
         case EfiUnusableMemory: return CROI_MEM_UNUSABLE
         case CroiMemoryType.kernel: return CROI_MEM_KERNEL
         case CroiMemoryType.handoff: return CROI_MEM_HANDOFF
+        case CroiMemoryType.bootfs: return CROI_MEM_BOOTFS
         default: return CROI_MEM_RESERVED  // includes unaccepted memory
         }
     }
@@ -103,6 +104,60 @@ import CHandoff
         }
         unsafe ranges[j] = item
     }
+    return unsafe mergeRanges(ranges, count: count)
+}
+
+/// Re-types [base, base+size) as `type`, splitting the ranges it overlaps.
+/// Needs room for two more ranges. Returns the new count.
+@unsafe func overlayRange(
+    _ ranges: UnsafeMutablePointer<croi_mem_range_t>, count: Int, capacity: Int,
+    base: UInt64, size: UInt64, type: UInt32
+) -> Int {
+    guard size > 0 else { return count }
+    let end = base + size
+    var i = 0
+    var count = count
+    while i < count {
+        let r = unsafe ranges[i]
+        let rEnd = r.base + r.size
+        guard r.base < end, base < rEnd, count + 2 <= capacity else {
+            i += 1
+            continue
+        }
+        // Up to three pieces: before, overlapped, after.
+        var pieces = InlineArray<3, croi_mem_range_t>(repeating: croi_mem_range_t())
+        var n = 0
+        if r.base < base {
+            pieces[n] = croi_mem_range_t(base: r.base, size: base - r.base, type: r.type, reserved: 0)
+            n += 1
+        }
+        let midBase = max(r.base, base)
+        let midEnd = min(rEnd, end)
+        pieces[n] = croi_mem_range_t(base: midBase, size: midEnd - midBase, type: type, reserved: 0)
+        n += 1
+        if rEnd > end {
+            pieces[n] = croi_mem_range_t(base: end, size: rEnd - end, type: r.type, reserved: 0)
+            n += 1
+        }
+        // Make room for n - 1 extra entries after i.
+        if n > 1 {
+            var j = count - 1
+            while j > i {
+                unsafe ranges[j + n - 1] = ranges[j]
+                j -= 1
+            }
+            count += n - 1
+        }
+        for k in 0..<n {
+            unsafe ranges[i + k] = pieces[k]
+        }
+        i += n
+    }
+    return unsafe mergeRanges(ranges, count: count)
+}
+
+/// Merges adjacent same-type ranges (input sorted by base).
+@unsafe private func mergeRanges(_ ranges: UnsafeMutablePointer<croi_mem_range_t>, count: Int) -> Int {
     var merged = 0
     for i in 0..<count {
         let item = unsafe ranges[i]

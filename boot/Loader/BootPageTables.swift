@@ -33,7 +33,7 @@ extension MapAttributes {
     /// The temporary RAM identity map: RWX so the loader keeps running
     /// across the switch. The kernel replaces it.
     static var identityRam: MapAttributes { MapAttributes(writable: true, executable: true) }
-    static var identityDevice: MapAttributes { MapAttributes(writable: true, device: true) }
+    static var identityDevice: MapAttributes { MapAttributes(writable: true, cache: .device) }
 }
 
 extension LoaderError {

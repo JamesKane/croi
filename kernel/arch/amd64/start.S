@@ -6,6 +6,12 @@
 #define KERNEL_CS 0x08
 #define KERNEL_DS 0x10
 
+// PAT entries 0-7: WB, WC, UC-, UC, repeated. Index 1 becomes WC; 0 and 3
+// keep firmware's WB and UC, which the loader's mappings use.
+#define MSR_PAT       0x277
+#define PAT_LOW       0x00070106
+#define PAT_HIGH      0x00070106
+
 .section .text.boot, "ax", @progbits
 .globl _start
 .type _start, @function
@@ -28,8 +34,10 @@ _start:
     mov     %eax, %fs
     mov     %eax, %gs
 
-    // No per-CPU record yet (arch_percpu reads 0).
     mov     %rdi, %r12
+    call    arch_init_pat
+
+    // No per-CPU record yet (arch_percpu reads 0).
     mov     $0xc0000101, %ecx       // IA32_GS_BASE
     xor     %eax, %eax
     xor     %edx, %edx
@@ -47,6 +55,19 @@ arch_halt:
     hlt
     jmp     1b
 .size arch_halt, . - arch_halt
+
+// void arch_init_pat(void): this CPU's memory types (see PageTableFormat).
+.section .text.arch_init_pat, "ax", @progbits
+.globl arch_init_pat
+.hidden arch_init_pat
+.type arch_init_pat, @function
+arch_init_pat:
+    mov     $MSR_PAT, %ecx
+    mov     $PAT_LOW, %eax
+    mov     $PAT_HIGH, %edx
+    wrmsr
+    ret
+.size arch_init_pat, . - arch_init_pat
 
 // void arch_load_page_tables(uint64_t root, uint64_t root_high)
 .section .text.arch_load_page_tables, "ax", @progbits

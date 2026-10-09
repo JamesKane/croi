@@ -23,10 +23,26 @@ func kernel_main(_ handoffAddress: UInt64) -> Never {
     // its physical address. Nothing to report to if it's bad: just stop.
     guard handoffAddress != 0 else { arch_halt() }
     let handoff = unsafe UnsafePointer<croi_handoff_t>(bitPattern: UInt(handoffAddress))!.pointee
-    guard handoff.magic == CROI_HANDOFF_MAGIC, handoff.version == CROI_HANDOFF_VERSION,
-          handoff.size == UInt32(MemoryLayout<croi_handoff_t>.size),
+    guard handoff.magic == CROI_HANDOFF_MAGIC else { arch_halt() }  // nothing in it can be trusted
+    guard handoff.version == CROI_HANDOFF_VERSION, handoff.size == UInt32(MemoryLayout<croi_handoff_t>.size),
           handoff.kernel_virt == kernel_image_start()
-    else { arch_halt() }
+    else {
+        // The magic matched, so the UART description (unchanged since v1) is
+        // probably usable: say why before stopping.
+        let console = unsafe Uart(handoff.uart)
+        console.write("croi kernel: handoff mismatch: version ")
+        console.write(decimal: UInt64(handoff.version))
+        console.write(" (want ")
+        console.write(decimal: UInt64(CROI_HANDOFF_VERSION))
+        console.write("), size ")
+        console.write(decimal: UInt64(handoff.size))
+        console.write(" (want ")
+        console.write(decimal: UInt64(MemoryLayout<croi_handoff_t>.size))
+        console.write("), image ")
+        console.write(hex: handoff.kernel_virt)
+        console.write("\n")
+        arch_halt()
+    }
 
     bootHandoff = handoff
     var console = unsafe Uart(handoff.uart)
@@ -76,6 +92,14 @@ func kernel_main(_ handoffAddress: UInt64) -> Never {
         arch_halt()
     }
     reportMemory(allocator, to: console)
+    BootOptions.capture(handoff)  // before the handoff memory is reclaimed
+    console.write("  boot:   cmdline \"")
+    BootOptions.write(to: console)
+    console.write("\", bootfs ")
+    console.write(decimal: handoff.bootfs_size)
+    console.write(" bytes at ")
+    console.write(hex: handoff.bootfs)
+    console.write("\n")
 
     // The PMM takes over all RAM; then the loader's handoff data and boot
     // page tables are released. `handoff` (a copy) stays usable.
@@ -128,6 +152,8 @@ func kernel_main_continue() -> Never {
     console.write("  vm:     kernel aspace at ")
     console.write(hex: KernelLayout.dynamicBase)
     console.write("; guards, protect, large-page split, table reclaim\n")
+
+    framebufferSelfTest(console)
 
     kernelStackSelfTest()
     console.write("  stacks: boot thread on a guarded stack at ")
@@ -449,4 +475,53 @@ private func kernelStackSelfTest() {
         panic("stack self-test: allocation failed")
     }
     guard pmm.freePages == freeBefore else { panic("stack self-test: stack not reclaimed") }
+}
+
+/// Maps the GOP framebuffer write-combining and draws a pattern the boot
+/// test checks with a QEMU screendump: background (16, 48, 96), and a
+/// (240, 192, 32) block at (16, 16) sized 64x32.
+private func framebufferSelfTest(_ console: Uart) {
+    let framebuffer: Framebuffer?
+    do throws(VmError) {
+        framebuffer = try Framebuffer(bootHandoff.framebuffer)
+    } catch {
+        panic("framebuffer: can't map it")
+    }
+    guard let framebuffer else {
+        console.write("  fb:     none\n")
+        return
+    }
+    #if arch(riscv64)
+    let expected = CachePolicy.cached  // no Svpbmt yet: the PMAs decide
+    #else
+    let expected = CachePolicy.writeCombining
+    #endif
+    guard kernelAspace.query(framebuffer.pixels)?.attributes.cache == expected else {
+        panic("framebuffer: not mapped write-combining")
+    }
+    #if arch(x86_64)
+    guard arch_rdmsr(0x277) == 0x0007_0106_0007_0106 else { panic("framebuffer: PAT has no WC entry") }
+    #endif
+    // Never cached: the loader typed it CROI_MEM_FRAMEBUFFER, so it is in no
+    // PMM arena and not in the (cached) physmap, even when it is RAM (ramfb).
+    let fbPhys = bootHandoff.framebuffer.base
+    guard pmm.state(of: fbPhys) == nil, kernelAspace.query(KernelLayout.physmap(fbPhys)) == nil else {
+        panic("framebuffer: also reachable as cached RAM")
+    }
+    let background = framebuffer.pixel(red: 16, green: 48, blue: 96)
+    let block = framebuffer.pixel(red: 240, green: 192, blue: 32)
+    framebuffer.fill(x: 0, y: 0, width: framebuffer.width, height: framebuffer.height, background)
+    framebuffer.fill(x: 16, y: 16, width: 64, height: 32, block)
+    guard framebuffer.read(x: 40, y: 30) == block, framebuffer.read(x: 0, y: 0) == background else {
+        panic("framebuffer: pixels did not stick")
+    }
+    console.write("  fb:     ")
+    console.write(decimal: UInt64(framebuffer.width))
+    console.write("x")
+    console.write(decimal: UInt64(framebuffer.height))
+    console.write(", format ")
+    console.write(decimal: UInt64(bootHandoff.framebuffer.format))
+    console.write(", mapped write-combining at ")
+    console.write(hex: framebuffer.pixels)
+    console.write("\n")
 }

@@ -49,14 +49,33 @@ override); `build/<arch>/esp/` is served to it as a FAT drive.
 ## Boot flow
 
 Loader (`boot/Loader/Main.swift`): read `\croi\kernel.elf` from the boot
-volume -> load + relocate it at its link address -> RSDP from the UEFI
+volume -> load + relocate it at its link address -> optional
+`\croi\bootfs.img` (own memory type, CROI_MEM_BOOTFS) and `\croi\cmdline`
+(copied into the handoff pages) -> GOP framebuffer (linear only) -> RSDP
+from the UEFI
 config table, early UART from ACPI SPCR (COM1 fallback on amd64) -> boot
 page tables (all RAM identity mapped RWX, UART as device, kernel segments
 W^X at CROI_KERNEL_BASE; Sv39 on rv64, TTBR0/TTBR1 on arm64) ->
-ExitBootServices -> memory map converted into the handoff ->
+ExitBootServices -> memory map converted into the handoff, framebuffer
+range overlaid as CROI_MEM_FRAMEBUFFER -> handoff v3 ->
 `croi_arch_enter_kernel` (boot/arch/<arch>/enter.S). Loader allocations
 use OS-defined memory types 0x80000001 (kernel) / 0x80000002 (handoff and
-page tables) so they show up as CROI_MEM_KERNEL / CROI_MEM_HANDOFF.
+page tables) / 0x80000003 (bootfs) so they show up as CROI_MEM_KERNEL /
+CROI_MEM_HANDOFF / CROI_MEM_BOOTFS. Nothing may call firmware after
+ExitBootServices, including deinits: `BootVolume` (whose deinit closes the
+volume) is consumed explicitly, because `bootKernel` never returns and
+Swift may otherwise run the deinit at the very end.
+
+Memory types (`CachePolicy` in lib/pagetables): cached, uncached,
+writeCombining, device. amd64: the kernel programs the PAT (WB, WC, UC-,
+UC) on every CPU (`arch_init_pat`); uncached = device = UC. arm64: MAIR set
+by the loader (Normal WB, Device-nGnRE, Normal-NC, Device-nGnRnE); WC =
+uncached = Normal-NC. rv64: PMAs decide until Svpbmt detection (RHCT)
+exists. The framebuffer (CROI_MEM_FRAMEBUFFER) is in no PMM arena and not
+in the cached physmap; `Framebuffer` maps it WC. The boot test draws a
+pattern and checks it with a QEMU screendump (`qemu.sh --screendump`,
+`tools/check-pixels.py`); arm64/rv64 get a framebuffer from
+`-device ramfb`.
 
 Kernel (`kernel/Kernel/Main.swift`): validates the handoff, builds its own
 page tables from free RAM with `BootAllocator` (front-to-back, never frees;

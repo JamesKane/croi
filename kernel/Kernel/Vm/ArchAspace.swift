@@ -139,7 +139,7 @@ struct ArchAspace {
                     case .protect(let attributes):
                         let old = Format.attributes(entry, level: level)
                         let new = Format.leaf(Format.leafAddress(entry, level: level), level: level, attributes)
-                        unsafe replace(slot, with: new, at: entryBase, breakFirst: old.device != attributes.device)
+                        unsafe replace(slot, with: new, at: entryBase, breakFirst: old.cache != attributes.cache)
                     }
                 } else {
                     let child = unsafe try split(slot, level: level, at: entryBase)

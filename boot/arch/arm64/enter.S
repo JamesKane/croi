@@ -11,8 +11,9 @@
 // execution continues), the new regime installed, then the MMU re-enabled.
 // The caller has cleaned everything the kernel will touch to PoC.
 
-// MAIR: attr0 = Normal WB RA/WA, attr1 = Device-nGnRE.
-#define MAIR_VALUE 0x04ff
+// MAIR: attr0 = Normal WB RA/WA, attr1 = Device-nGnRE, attr2 = Normal
+// non-cacheable, attr3 = Device-nGnRnE (see PageTableFormat).
+#define MAIR_VALUE 0x004404ff
 
 // TCR: 48-bit VAs in both halves (T0SZ = T1SZ = 16), 4 KiB granules
 // (TG0 = 0b00, TG1 = 0b10), walks inner/outer WB-WA and inner shareable.
@@ -132,7 +133,7 @@ croi_arch_enter_kernel:
     dsb     nsh
     isb
 
-    mov     x10, #MAIR_VALUE
+    ldr     x10, =MAIR_VALUE
     msr     mair_el1, x10
     ldr     x10, =TCR_VALUE
     mrs     x11, id_aa64mmfr0_el1

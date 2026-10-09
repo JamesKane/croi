@@ -7,6 +7,8 @@ enum CroiMemoryType {
     static let kernel: EFI_MEMORY_TYPE = 0x8000_0001
     /// Handoff block, memory range table, boot page tables.
     static let handoff: EFI_MEMORY_TYPE = 0x8000_0002
+    /// The boot filesystem image.
+    static let bootfs: EFI_MEMORY_TYPE = 0x8000_0003
 }
 
 let pageSize: UInt64 = 0x1000
@@ -25,6 +27,10 @@ extension EFI_GUID {
                  Data4: (0xBC, 0x22, 0x00, 0x80, 0xC7, 0x3C, 0x88, 0x81))
     }
 
+    static var graphicsOutput: EFI_GUID {
+        EFI_GUID(Data1: 0x9042_A9DE, Data2: 0x23DC, Data3: 0x4A38,
+                 Data4: (0x96, 0xFB, 0x7A, 0xDE, 0xD0, 0x80, 0x51, 0x6A))
+    }
     static var riscvBoot: EFI_GUID {
         EFI_GUID(Data1: 0xCCD1_5FEC, Data2: 0x6F73, Data3: 0x4EEC,
                  Data4: (0x83, 0x95, 0x3E, 0x69, 0xE4, 0xB9, 0x40, 0xBF))

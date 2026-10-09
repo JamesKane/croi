@@ -48,16 +48,17 @@ func buildKernelPageTables(
     if handoff.uart.kind == CROI_UART_NS16550_MMIO || handoff.uart.kind == CROI_UART_PL011 {
         let page = handoff.uart.base & ~(KernelLayout.pageSize - 1)
         try tables.map(virt: KernelLayout.physmap(page), phys: page, size: KernelLayout.pageSize,
-                       MapAttributes(writable: true, device: true, global: true))
+                       MapAttributes(writable: true, cache: .device, global: true))
     }
     return tables
 }
 
-/// RAM the physmap covers: anything the kernel may read or reuse.
+/// RAM the physmap covers: anything the kernel may read or reuse. Not the
+/// framebuffer, which is only ever mapped write-combining.
 private func isRam(_ type: UInt32) -> Bool {
     switch type {
     case CROI_MEM_FREE, CROI_MEM_KERNEL, CROI_MEM_HANDOFF, CROI_MEM_ACPI_RECLAIM,
-         CROI_MEM_ACPI_NVS, CROI_MEM_FIRMWARE_RUNTIME, CROI_MEM_PERSISTENT:
+         CROI_MEM_ACPI_NVS, CROI_MEM_FIRMWARE_RUNTIME, CROI_MEM_PERSISTENT, CROI_MEM_BOOTFS:
         return true
     default:
         return false

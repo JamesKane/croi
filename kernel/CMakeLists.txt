@@ -2,7 +2,9 @@ add_library(kernel-swift OBJECT
   Kernel/Acpi/AcpiTables.swift
   Kernel/Acpi/Madt.swift
   Kernel/BootAllocator.swift
+  Kernel/BootOptions.swift
   Kernel/Exceptions.swift
+  Kernel/Framebuffer.swift
   Kernel/Heap.swift
   Kernel/KernelLayout.swift
   Kernel/KernelPageTables.swift

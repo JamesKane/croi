@@ -32,6 +32,7 @@ enum : EFI_STATUS {
   EFI_LOAD_ERROR = EFI_ERROR_BIT | 1,
   EFI_INVALID_PARAMETER = EFI_ERROR_BIT | 2,
   EFI_BUFFER_TOO_SMALL = EFI_ERROR_BIT | 5,
+  EFI_NOT_FOUND = EFI_ERROR_BIT | 14,
 };
 
 typedef struct {
@@ -249,6 +250,46 @@ struct EFI_SIMPLE_FILE_SYSTEM_PROTOCOL {
   uint64_t Revision;
   EFI_STATUS (EFIAPI *OpenVolume)(EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *self, EFI_FILE_PROTOCOL **root);
 };
+
+// 9042A9DE-23DC-4A38-96FB-7ADED080516A
+enum : uint32_t {
+  PixelRedGreenBlueReserved8BitPerColor,
+  PixelBlueGreenRedReserved8BitPerColor,
+  PixelBitMask,
+  PixelBltOnly,
+};
+
+typedef struct {
+  uint32_t RedMask;
+  uint32_t GreenMask;
+  uint32_t BlueMask;
+  uint32_t ReservedMask;
+} EFI_PIXEL_BITMASK;
+
+typedef struct {
+  uint32_t Version;
+  uint32_t HorizontalResolution;
+  uint32_t VerticalResolution;
+  uint32_t PixelFormat;  // EFI_GRAPHICS_PIXEL_FORMAT (an enum, so 32 bits)
+  EFI_PIXEL_BITMASK PixelInformation;
+  uint32_t PixelsPerScanLine;
+} EFI_GRAPHICS_OUTPUT_MODE_INFORMATION;
+
+typedef struct {
+  uint32_t MaxMode;
+  uint32_t Mode;
+  EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *Info;
+  UINTN SizeOfInfo;
+  EFI_PHYSICAL_ADDRESS FrameBufferBase;
+  UINTN FrameBufferSize;
+} EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE;
+
+typedef struct {
+  void *QueryMode;
+  void *SetMode;
+  void *Blt;
+  EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE *Mode;
+} EFI_GRAPHICS_OUTPUT_PROTOCOL;
 
 // --- Calling-convention wrappers --------------------------------------------
 

@@ -132,6 +132,7 @@ ap_long_mode:
     mov     %cr4, %rax
     or      $(1 << 7), %rax         // PGE, as on the boot CPU
     mov     %rax, %cr4
+    call    arch_init_pat           // needs the stack; before any WC mapping is used
     lgdt    gdt_pointer(%rip)
     lea     1f(%rip), %rax
     pushq   $KERNEL_CS

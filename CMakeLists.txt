@@ -11,6 +11,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
 
 set(CROI_EDK2_DIR /usr/share/edk2 CACHE PATH "edk2 firmware images for QEMU")
+set(CROI_CMDLINE "croi.test=1" CACHE STRING "Kernel command line written to the ESP (\\croi\\cmdline)")
 set(CROI_ELF2EFI ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/elf2efi.py)
 set(CROI_QEMU ${CMAKE_SOURCE_DIR}/tools/qemu.sh)
 
@@ -30,13 +31,18 @@ add_subdirectory(kernel)
 add_subdirectory(boot)
 
 # EFI system partition layout, served to QEMU as a virtual FAT drive.
+# bootfs.img is a placeholder until the bootfs format exists (roadmap K8).
 set(CROI_ESP_DIR ${CMAKE_BINARY_DIR}/esp)
+file(CONFIGURE OUTPUT ${CMAKE_BINARY_DIR}/cmdline CONTENT "${CROI_CMDLINE}\n")
+file(WRITE ${CMAKE_BINARY_DIR}/bootfs.img "croi bootfs placeholder\n")
 add_custom_target(esp ALL
   COMMAND ${CMAKE_COMMAND} -E make_directory ${CROI_ESP_DIR}/EFI/BOOT ${CROI_ESP_DIR}/croi
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
           $<TARGET_PROPERTY:loader-efi,CROI_EFI_FILE> ${CROI_ESP_DIR}/EFI/BOOT/${CROI_EFI_BOOT_NAME}
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
           $<TARGET_FILE:kernel> ${CROI_ESP_DIR}/croi/kernel.elf
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          ${CMAKE_BINARY_DIR}/cmdline ${CMAKE_BINARY_DIR}/bootfs.img ${CROI_ESP_DIR}/croi/
   DEPENDS loader-efi kernel
   COMMENT "Assembling EFI system partition")
 
@@ -45,11 +51,17 @@ add_custom_target(run
   DEPENDS esp USES_TERMINAL)
 
 enable_testing()
-# Boots through the loader into the kernel, which reports and halts.
+# Boots through the loader into the kernel, which reports and halts; then
+# checks the pattern the kernel drew on the framebuffer.
+set(_fb_dump ${CMAKE_BINARY_DIR}/qemu/framebuffer.ppm)
 add_test(NAME boot-smoke
-  COMMAND ${CROI_QEMU} --test "croi kernel: halting"
+  COMMAND ${CROI_QEMU} --test "croi kernel: halting" --screendump ${_fb_dump}
           ${CROI_ARCH} ${CROI_ESP_DIR} ${CMAKE_BINARY_DIR}/qemu ${CROI_EDK2_DIR})
-set_tests_properties(boot-smoke PROPERTIES TIMEOUT 120)
+set_tests_properties(boot-smoke PROPERTIES TIMEOUT 120 FIXTURES_SETUP framebuffer)
+add_test(NAME framebuffer-pixels
+  COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/check-pixels.py ${_fb_dump}
+          0,0,16,48,96 40,30,240,192,32 100,100,16,48,96)
+set_tests_properties(framebuffer-pixels PROPERTIES FIXTURES_REQUIRED framebuffer)
 
 if(CROI_ARCH STREQUAL arm64)
   # Firmware at EL2 with a GICv3: the loader must drop to EL1.

@@ -3,10 +3,10 @@
 add_library(loader-swift OBJECT
   Loader/Acpi.swift
   Loader/BootPageTables.swift
+  Loader/BootVolume.swift
   Loader/Console.swift
   Loader/Firmware.swift
   Loader/KernelElf.swift
-  Loader/KernelFile.swift
   Loader/LoaderError.swift
   Loader/Main.swift
   Loader/MemoryMap.swift

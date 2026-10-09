@@ -146,7 +146,8 @@ let pmmLock = SpinLock()
     /// RAM the PMM tracks. Firmware runtime/NVS and persistent memory are
     /// never the kernel's to allocate, so they get no arena.
     private static func isManaged(_ type: UInt32) -> Bool {
-        type == CROI_MEM_FREE || type == CROI_MEM_KERNEL || type == CROI_MEM_HANDOFF || type == CROI_MEM_ACPI_RECLAIM
+        type == CROI_MEM_FREE || type == CROI_MEM_KERNEL || type == CROI_MEM_HANDOFF
+            || type == CROI_MEM_ACPI_RECLAIM || type == CROI_MEM_BOOTFS
     }
 
     // MARK: Allocation
