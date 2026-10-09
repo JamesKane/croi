@@ -1,4 +1,4 @@
-// Boot handoff from the croi loader to the kernel (version 1).
+// Boot handoff from the croi loader to the kernel (version 2).
 //
 // The loader fills one croi_handoff_t and passes its physical address to the
 // kernel entry point. All addresses here are physical. On entry the boot
@@ -13,7 +13,7 @@
 
 // Enum constants rather than macros so Swift imports them.
 enum : uint64_t { CROI_HANDOFF_MAGIC = 0x31464f444e414843 };  // "CHANDOF1"
-enum : uint32_t { CROI_HANDOFF_VERSION = 1 };
+enum : uint32_t { CROI_HANDOFF_VERSION = 2 };
 
 // Physical memory range types.
 enum : uint32_t {
@@ -69,8 +69,12 @@ typedef struct {
   uint64_t memory_map_count;  // sorted by base, adjacent same-type merged
 
   croi_uart_t uart;
+
+  // The boot CPU's hardware ID where the kernel can't read it itself:
+  // the RISC-V hart ID (from RISCV_EFI_BOOT_PROTOCOL). 0 elsewhere.
+  uint64_t boot_hart_id;
 } croi_handoff_t;
 
 static_assert(sizeof(croi_mem_range_t) == 24);
 static_assert(sizeof(croi_uart_t) == 24);
-static_assert(sizeof(croi_handoff_t) == 96);
+static_assert(sizeof(croi_handoff_t) == 104);

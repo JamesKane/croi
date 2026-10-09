@@ -117,11 +117,14 @@ exception_common:
     add     sp, sp, #FRAME_SIZE
     eret
 
-// void arch_init_exceptions(void)
+// void arch_init_exceptions(void) / void arch_ap_init_exceptions(void)
 .section .text.arch_init_exceptions, "ax", %progbits
 .globl arch_init_exceptions
 .type arch_init_exceptions, %function
+.globl arch_ap_init_exceptions
+.type arch_ap_init_exceptions, %function
 arch_init_exceptions:
+arch_ap_init_exceptions:
     adr     x0, vectors
     msr     vbar_el1, x0
     isb

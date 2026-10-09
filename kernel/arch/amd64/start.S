@@ -28,6 +28,14 @@ _start:
     mov     %eax, %fs
     mov     %eax, %gs
 
+    // No per-CPU record yet (arch_percpu reads 0).
+    mov     %rdi, %r12
+    mov     $0xc0000101, %ecx       // IA32_GS_BASE
+    xor     %eax, %eax
+    xor     %edx, %edx
+    wrmsr
+    mov     %r12, %rdi
+
     call    kernel_main
     // kernel_main does not return.
 .size _start, . - _start
@@ -66,6 +74,8 @@ gdt_tss:                            // 0x18: TSS, filled in by arch_init_excepti
     .quad   0
     .quad   0
 gdt_end:
+.globl gdt_pointer
+.hidden gdt_pointer
 gdt_pointer:
     .word   gdt_end - gdt - 1
     .quad   gdt

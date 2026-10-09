@@ -1,9 +1,14 @@
 import CKernel
 import Synchronization
 
-/// This CPU's number. Always 0 until per-CPU data exists (SMP bring-up).
+/// This CPU's number, from its PerCpu record (0 before the boot CPU's
+/// record is installed).
 enum Cpu {
-    static var current: UInt32 { 0 }
+    static var current: UInt32 {
+        let record = arch_percpu()
+        guard record != 0 else { return 0 }
+        return unsafe UnsafePointer<PerCpu>(bitPattern: UInt(record))!.pointee.number
+    }
 }
 
 /// Interrupt state saved by `SpinLock.acquire`, restored by `release`.

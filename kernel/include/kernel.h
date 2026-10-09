@@ -40,6 +40,19 @@ bool arch_interrupts_enabled(void);
 // Spin-wait hint (x86 pause, arm64 yield, RISC-V Zihintpause pause).
 void arch_spin_pause(void);
 
+// The per-CPU register (amd64 GS base, arm64 TPIDR_EL1, rv64 tp): holds
+// this CPU's PerCpu record, 0 until set. Zeroed at kernel entry.
+void arch_set_percpu(uint64_t percpu);
+uint64_t arch_percpu(void);
+
+// This CPU's hardware ID: local APIC ID (amd64), MPIDR affinity (arm64).
+// rv64 S-mode can't read its hart ID; returns 0 (the loader passes it).
+uint64_t arch_cpu_hardware_id(void);
+
+// Cleans data cache lines for [va, va+size) to the point of coherency, for
+// data read with the MMU off (arm64; no-op where caches are coherent).
+void arch_clean_dcache(uint64_t va, uint64_t size);
+
 // Invalidates TLB (and page-walk cache) entries for va after its page-table
 // entry changed. amd64 and rv64: this CPU only (shootdowns come with SMP);
 // arm64: broadcast to all CPUs.

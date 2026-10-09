@@ -144,7 +144,7 @@ typedef struct {
   void *OpenProtocolInformation;
   void *ProtocolsPerHandle;
   void *LocateHandleBuffer;
-  void *LocateProtocol;
+  EFI_STATUS (EFIAPI *LocateProtocol)(const EFI_GUID *protocol, void *registration, void **interface);
   void *InstallMultipleProtocolInterfaces;
   void *UninstallMultipleProtocolInterfaces;
   void *CalculateCrc32;
@@ -236,6 +236,13 @@ struct EFI_FILE_PROTOCOL {
 
 #define EFI_FILE_MODE_READ UINT64_C(1)
 
+// CCD15FEC-6F73-4EEC-8395-3E69E4B940BF
+typedef struct RISCV_EFI_BOOT_PROTOCOL RISCV_EFI_BOOT_PROTOCOL;
+struct RISCV_EFI_BOOT_PROTOCOL {
+  uint64_t Revision;
+  EFI_STATUS (EFIAPI *GetBootHartId)(RISCV_EFI_BOOT_PROTOCOL *self, UINTN *hart_id);
+};
+
 // 964E5B22-6459-11D2-8E39-00A0C969723B
 typedef struct EFI_SIMPLE_FILE_SYSTEM_PROTOCOL EFI_SIMPLE_FILE_SYSTEM_PROTOCOL;
 struct EFI_SIMPLE_FILE_SYSTEM_PROTOCOL {
@@ -284,6 +291,15 @@ static inline EFI_STATUS croi_efi_disable_watchdog(EFI_BOOT_SERVICES *bs) {
 static inline EFI_STATUS croi_efi_handle_protocol(EFI_BOOT_SERVICES *bs, EFI_HANDLE handle,
                                                   const EFI_GUID *protocol, void **interface) {
   return bs->HandleProtocol(handle, protocol, interface);
+}
+
+static inline EFI_STATUS croi_efi_locate_protocol(EFI_BOOT_SERVICES *bs, const EFI_GUID *protocol,
+                                                  void **interface) {
+  return bs->LocateProtocol(protocol, nullptr, interface);
+}
+
+static inline EFI_STATUS croi_efi_boot_hart_id(RISCV_EFI_BOOT_PROTOCOL *protocol, UINTN *hart_id) {
+  return protocol->GetBootHartId(protocol, hart_id);
 }
 
 static inline EFI_STATUS croi_efi_open_volume(EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *fs, EFI_FILE_PROTOCOL **root) {

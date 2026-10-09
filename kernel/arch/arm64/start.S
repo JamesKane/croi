@@ -12,6 +12,7 @@ _start:
     mov     sp, x9
     mov     x29, xzr
     mov     x30, xzr
+    msr     tpidr_el1, xzr          // no per-CPU record yet
     bl      kernel_main
     // kernel_main does not return.
 .size _start, . - _start
@@ -47,6 +48,7 @@ arch_continue_on_stack:
     mov     sp, x0
     mov     x29, xzr
     mov     x30, xzr
+    msr     tpidr_el1, xzr          // no per-CPU record yet
     bl      kernel_main_continue
     udf     #0
 .size arch_continue_on_stack, . - arch_continue_on_stack

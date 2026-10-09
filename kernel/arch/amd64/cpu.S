@@ -50,3 +50,59 @@ arch_tlb_invalidate_page:
     invlpg  (%rdi)
     ret
 .size arch_tlb_invalidate_page, . - arch_tlb_invalidate_page
+
+#define MSR_GS_BASE 0xc0000101
+
+// void arch_set_percpu(uint64_t percpu)
+.globl arch_set_percpu
+.type arch_set_percpu, @function
+arch_set_percpu:
+    mov     $MSR_GS_BASE, %ecx
+    mov     %edi, %eax
+    mov     %rdi, %rdx
+    shr     $32, %rdx
+    wrmsr
+    ret
+.size arch_set_percpu, . - arch_set_percpu
+
+// uint64_t arch_percpu(void)
+.globl arch_percpu
+.type arch_percpu, @function
+arch_percpu:
+    mov     $MSR_GS_BASE, %ecx
+    rdmsr
+    shl     $32, %rdx
+    or      %rdx, %rax
+    ret
+.size arch_percpu, . - arch_percpu
+
+// uint64_t arch_cpu_hardware_id(void): x2APIC ID (CPUID 0xB) if
+// available, else the xAPIC ID (CPUID 1).
+.globl arch_cpu_hardware_id
+.type arch_cpu_hardware_id, @function
+arch_cpu_hardware_id:
+    push    %rbx
+    xor     %eax, %eax
+    cpuid
+    cmp     $0xb, %eax
+    jb      1f
+    mov     $0xb, %eax
+    xor     %ecx, %ecx
+    cpuid
+    mov     %edx, %eax
+    pop     %rbx
+    ret
+1:  mov     $1, %eax
+    cpuid
+    mov     %ebx, %eax
+    shr     $24, %eax
+    pop     %rbx
+    ret
+.size arch_cpu_hardware_id, . - arch_cpu_hardware_id
+
+// Caches are coherent on x86.
+.globl arch_clean_dcache
+.type arch_clean_dcache, @function
+arch_clean_dcache:
+    ret
+.size arch_clean_dcache, . - arch_clean_dcache

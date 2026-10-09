@@ -25,6 +25,11 @@ extension EFI_GUID {
                  Data4: (0xBC, 0x22, 0x00, 0x80, 0xC7, 0x3C, 0x88, 0x81))
     }
 
+    static var riscvBoot: EFI_GUID {
+        EFI_GUID(Data1: 0xCCD1_5FEC, Data2: 0x6F73, Data3: 0x4EEC,
+                 Data4: (0x83, 0x95, 0x3E, 0x69, 0xE4, 0xB9, 0x40, 0xBF))
+    }
+
     func matches(_ other: EFI_GUID) -> Bool {
         unsafe Data1 == other.Data1 && Data2 == other.Data2 && Data3 == other.Data3
             && unsafeBitCast(Data4, to: UInt64.self) == unsafeBitCast(other.Data4, to: UInt64.self)
@@ -86,6 +91,16 @@ extension EFI_GUID {
         _ buffer: UnsafeMutableRawPointer?, size: inout UInt, key: inout UInt, descriptorSize: inout UInt
     ) -> EFI_STATUS {
         unsafe croi_efi_get_memory_map(bs, &size, buffer, &key, &descriptorSize)
+    }
+
+    func locateProtocol<T>(_ guid: EFI_GUID, as _: T.Type) throws(LoaderError) -> UnsafeMutablePointer<T> {
+        var guid = guid
+        var interface: UnsafeMutableRawPointer? = nil
+        let status = unsafe croi_efi_locate_protocol(bs, &guid, &interface)
+        guard status == EFI_SUCCESS, let interface = unsafe interface else {
+            throw .firmware("LocateProtocol", status)
+        }
+        return unsafe interface.assumingMemoryBound(to: T.self)
     }
 
     func exitBootServices(image: EFI_HANDLE?, key: UInt) -> EFI_STATUS {

@@ -28,6 +28,7 @@ func kernel_main(_ handoffAddress: UInt64) -> Never {
           handoff.kernel_virt == kernel_image_start()
     else { arch_halt() }
 
+    bootHandoff = handoff
     var console = unsafe Uart(handoff.uart)
     panicConsole = console
     arch_init_exceptions()
@@ -112,6 +113,9 @@ func kernel_main(_ handoffAddress: UInt64) -> Never {
     arch_continue_on_stack(bootThreadStack.top)
 }
 
+/// A copy of the loader's handoff (the original is reclaimed by the PMM).
+nonisolated(unsafe) var bootHandoff = croi_handoff_t()
+
 /// The boot thread's stack once the VM is up. Lives forever.
 nonisolated(unsafe) var bootThreadStack = StackRange()
 
@@ -129,6 +133,32 @@ func kernel_main_continue() -> Never {
     console.write("  stacks: boot thread on a guarded stack at ")
     console.write(hex: bootThreadStack.base)
     console.write("\n")
+
+    // CPUs: this one's PerCpu record, then everyone else in the MADT.
+    #if arch(riscv64)
+    let bootHardwareId = bootHandoff.boot_hart_id
+    #else
+    let bootHardwareId = arch_cpu_hardware_id()
+    #endif
+    Smp.initializeBootCpu(hardwareId: bootHardwareId, stack: bootThreadStack)
+    guard Cpu.current == 0 else { panic("per-CPU register does not identify the boot CPU") }
+    if let acpi = AcpiTables(rsdp: bootHandoff.acpi_rsdp) {
+        let kernelDelta = bootHandoff.kernel_virt &- bootHandoff.kernel_phys
+        let (found, online) = Smp.startSecondaryCpus(acpi, bootHardwareId: bootHardwareId, kernelDelta: kernelDelta)
+        console.write("  cpus:   ")
+        console.write(decimal: UInt64(online))
+        console.write(" of ")
+        console.write(decimal: UInt64(found))
+        console.write(" online (boot cpu ")
+        console.write(hex: bootHardwareId)
+        console.write(")\n")
+        guard SmpSelfTest.run() else { panic("smp self-test: identity or lock contention") }
+        console.write("  smp:    per-CPU identity ok; ")
+        console.write(decimal: UInt64(online * SmpSelfTest.iterations))
+        console.write(" contended lock increments, none lost\n")
+    } else {
+        console.write("  cpus:   no ACPI tables; boot cpu only\n")
+    }
 
     // Exception round trip: take a breakpoint and resume after it.
     arch_breakpoint()

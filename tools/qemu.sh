@@ -63,7 +63,7 @@ case $arch in
     ;;
 esac
 
-qemu+=(-m 512M -smp 2 -net none "${disk[@]}")
+qemu+=(-m 512M -smp 4 -net none "${disk[@]}")
 
 if [[ -n $expect ]]; then
   coproc vm { exec timeout 90 "${qemu[@]}" -display none -serial stdio -monitor none -no-reboot "$@" 2>&1; }

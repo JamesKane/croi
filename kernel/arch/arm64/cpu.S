@@ -50,3 +50,50 @@ arch_tlb_invalidate_page:
     isb
     ret
 .size arch_tlb_invalidate_page, . - arch_tlb_invalidate_page
+
+// void arch_set_percpu(uint64_t percpu)
+.globl arch_set_percpu
+.type arch_set_percpu, %function
+arch_set_percpu:
+    msr     tpidr_el1, x0
+    ret
+.size arch_set_percpu, . - arch_set_percpu
+
+// uint64_t arch_percpu(void)
+.globl arch_percpu
+.type arch_percpu, %function
+arch_percpu:
+    mrs     x0, tpidr_el1
+    ret
+.size arch_percpu, . - arch_percpu
+
+// uint64_t arch_cpu_hardware_id(void): MPIDR_EL1 Aff3..Aff0.
+.globl arch_cpu_hardware_id
+.type arch_cpu_hardware_id, %function
+arch_cpu_hardware_id:
+    mrs     x0, mpidr_el1
+    and     x1, x0, #0xffffff
+    lsr     x0, x0, #32
+    and     x0, x0, #0xff
+    orr     x0, x1, x0, lsl #32
+    ret
+.size arch_cpu_hardware_id, . - arch_cpu_hardware_id
+
+// void arch_clean_dcache(uint64_t va, uint64_t size)
+.globl arch_clean_dcache
+.type arch_clean_dcache, %function
+arch_clean_dcache:
+    mrs     x3, ctr_el0
+    ubfx    x3, x3, #16, #4         // DminLine: log2(words per line)
+    mov     x2, #4
+    lsl     x2, x2, x3
+    add     x1, x0, x1
+    sub     x3, x2, #1
+    bic     x0, x0, x3
+1:  dc      cvac, x0
+    add     x0, x0, x2
+    cmp     x0, x1
+    b.lo    1b
+    dsb     sy
+    ret
+.size arch_clean_dcache, . - arch_clean_dcache

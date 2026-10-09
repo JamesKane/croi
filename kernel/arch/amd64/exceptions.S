@@ -150,6 +150,8 @@ arch_read_cr2:
 // The descriptor holds an absolute (relocated) address, so it is writable data.
 .section .data.idt_pointer, "aw", @progbits
 .balign 16
+.globl idt_pointer
+.hidden idt_pointer
 idt_pointer:
     .word   256 * 16 - 1
     .quad   idt

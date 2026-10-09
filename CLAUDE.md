@@ -80,7 +80,7 @@ Locking (`Kernel/SpinLock.swift`): `SpinLock` masks interrupts on this CPU
 while held (Zircon's SpinLock + IrqSave) and spins test-and-test-and-set;
 `withLock { }` is the API (releases on throw). The lock word holds the
 holder's CPU + 1, so a recursive acquire or a release by a non-holder
-panics. `Cpu.current` is 0 until per-CPU data exists. Lock order: vm ->
+panics. `Cpu.current` comes from the per-CPU register. Lock order: vm ->
 heap -> pmm (each calls the next with its own lock held). Locks are global `let`s
 next to the global state they guard; public mutating methods of `Pmm` and
 `Heap` take the lock and call `*Locked` internals. Restoring an
@@ -101,6 +101,36 @@ Virtual memory (`Kernel/Vm/`, after Zircon's VmAspace/ArchVmAspace):
   map via `withArch`), `free`. Not yet: VMOs/VMARs/user aspaces; kernel
   top-level entries are created on demand, so on amd64/rv64 they must be
   pre-populated before user address spaces copy the kernel half.
+
+ACPI (`Kernel/Acpi/`, after Zircon's acpi_lite): `AcpiTables` validates
+RSDP/XSDT and finds tables by signature; `withPhysicalBytes` reads through
+the physmap or a temporary mapping. `Madt.forEachCpu` yields local APIC /
+x2APIC (amd64), GICC MPIDR (arm64) and RINTC hart IDs (rv64).
+
+SMP (`Kernel/Smp.swift`, `include/smp.h`, `arch/<arch>/smp.S`):
+- `PerCpu` records (heap, never freed) found through the per-CPU register
+  (amd64 GS base, arm64 TPIDR_EL1, rv64 tp; zeroed at kernel entry);
+  `Cpu.current` reads it. The boot CPU's record is installed on its
+  guarded stack; rv64 learns its boot hart ID from the handoff (v2,
+  RISCV_EFI_BOOT_PROTOCOL), since S-mode can't read it.
+- Every other enabled MADT CPU gets a guarded KernelStack and a startup
+  block (`croi_ap_startup_t`, read by physical address with the MMU off)
+  and is started one at a time: rv64 SBI HSM hart_start; arm64 PSCI CPU_ON
+  (SMC/HVC from the FADT boot flags; repeats the EL2->EL1 drop); amd64
+  INIT-SIPI-SIPI with a real-mode trampoline copied to a low page the PMM
+  set aside (`lowTrampolinePage`) and a temporary bootstrap PML4 below
+  4 GiB. Trampolines turn the MMU on at a physical PC and let the next
+  fetch fault into a vector/stvec that holds the continuation's virtual
+  address (rv64, arm64); amd64 jumps via the bootstrap PML4's kernel half.
+- Secondaries run `kernel_ap_main`: exception vectors (amd64: shared IDT,
+  no TSS yet), self-test, then idle with interrupts masked.
+- Boot self-test: per-CPU identity, and all CPUs incrementing a counter
+  with a non-atomic load+store under one SpinLock after a start barrier
+  (verified to fail without the lock).
+- Not yet: TLB shootdowns (amd64/rv64 invalidation is still local, so no
+  kernel mapping may change while secondaries could use it), per-CPU
+  TSS/IST and emergency stacks (shared today), calibrated delays for
+  INIT/SIPI (spin loops), CPU hotplug, a scheduler.
 
 Exceptions: `arch/<arch>/exceptions.S` saves an `arch_exception_frame_t`
 (kernel.h) and calls Swift `arch_exception` (Kernel/Exceptions.swift);

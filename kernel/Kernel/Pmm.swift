@@ -64,6 +64,9 @@ let pmmLock = SpinLock()
     private var freeHead: UInt64 = 0
     private(set) var freePages: UInt64 = 0
     private(set) var totalPages: UInt64 = 0
+    /// A page of free RAM below 1 MiB kept out of the free list, for the
+    /// amd64 SMP trampoline (0 if there is none).
+    private(set) var lowTrampolinePage: UInt64 = 0
 
     enum InitError: Error {
         case tooManyArenas
@@ -103,6 +106,12 @@ let pmmLock = SpinLock()
             guard r.type == CROI_MEM_FREE else { continue }
             var phys = (r.base + r.size) & ~(pageSize - 1)
             let floor = max(r.base, BootAllocator.lowestUsable)
+            // Remember a free page below BootAllocator.lowestUsable (never page 0).
+            let lowStart = (max(r.base, pageSize) + pageSize - 1) & ~(pageSize - 1)
+            if lowTrampolinePage == 0, lowStart < BootAllocator.lowestUsable,
+               lowStart + pageSize <= min(r.base + r.size, BootAllocator.lowestUsable) {
+                lowTrampolinePage = lowStart
+            }
             while phys >= floor + pageSize {
                 phys -= pageSize
                 if !boot.isAllocated(phys), let page = unsafe page(for: phys) {

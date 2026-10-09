@@ -82,6 +82,16 @@ func croi_loader_main(
     console.write(hex: uart.base)
     console.write("\n")
 
+    // RISC-V S-mode can't read its own hart ID; firmware knows it.
+    var bootHartId: UInt64 = 0
+    #if arch(riscv64)
+    let riscvBoot = try unsafe boot.locateProtocol(.riscvBoot, as: RISCV_EFI_BOOT_PROTOCOL.self)
+    var hartId: UInt = 0
+    let hartStatus = unsafe croi_efi_boot_hart_id(riscvBoot, &hartId)
+    guard hartStatus == EFI_SUCCESS else { throw .firmware("GetBootHartId", hartStatus) }
+    bootHartId = UInt64(hartId)
+    #endif
+
     // Handoff block and range table, sized for the largest possible map.
     var map = try MemoryMap(boot: boot)
     let rangeCapacity = map.maxCount
@@ -153,7 +163,8 @@ func croi_loader_main(
         efi_system_table: UInt64(UInt(bitPattern: systemTable)),
         memory_map: rangesPhys,
         memory_map_count: UInt64(rangeCount),
-        uart: uart)
+        uart: uart,
+        boot_hart_id: bootHartId)
 
     // Everything the kernel reads early must be visible with the MMU off.
     for i in 0..<rangeCount {

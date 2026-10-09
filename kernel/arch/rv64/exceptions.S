@@ -81,11 +81,14 @@ emergency_stack:
     .skip   CROI_KERNEL_STACK_SIZE
 emergency_stack_top:
 
-// void arch_init_exceptions(void)
+// void arch_init_exceptions(void) / void arch_ap_init_exceptions(void)
 .section .text.arch_init_exceptions, "ax", %progbits
 .globl arch_init_exceptions
 .type arch_init_exceptions, %function
+.globl arch_ap_init_exceptions
+.type arch_ap_init_exceptions, %function
 arch_init_exceptions:
+arch_ap_init_exceptions:
     lla     t0, trap_entry          // direct mode: MODE bits 0
     csrw    stvec, t0
     ret

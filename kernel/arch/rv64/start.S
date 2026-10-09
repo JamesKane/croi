@@ -10,6 +10,7 @@ _start:
     lla     sp, boot_stack_top
     mv      s0, zero
     mv      ra, zero
+    mv      tp, zero                // no per-CPU record yet
     call    kernel_main
     // kernel_main does not return.
 .size _start, . - _start
@@ -44,6 +45,7 @@ arch_continue_on_stack:
     mv      sp, a0
     mv      s0, zero
     mv      ra, zero
+    mv      tp, zero                // no per-CPU record yet
     call    kernel_main_continue
     unimp
 .size arch_continue_on_stack, . - arch_continue_on_stack
