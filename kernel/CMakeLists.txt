@@ -34,7 +34,11 @@ add_library(kernel-swift OBJECT
   Kernel/Trace/TraceSelfTest.swift
   Kernel/Uart.swift
   Kernel/Vm/ArchAspace.swift
-  Kernel/Vm/KernelAspace.swift)
+  Kernel/Vm/KernelAspace.swift
+  Kernel/Vm/UserAspace.swift
+  Kernel/Vm/Vmo.swift
+  Kernel/Vm/AspaceSelfTest.swift
+  Kernel/Vm/VmoSelfTest.swift)
 set_target_properties(kernel-swift PROPERTIES Swift_MODULE_NAME Kernel)
 target_include_directories(kernel-swift PRIVATE include)
 target_link_libraries(kernel-swift PRIVATE croi-fmt croi-handoff croi-pagetables)
@@ -45,6 +49,7 @@ add_executable(kernel
   arch/${CROI_ARCH}/exceptions.S
   arch/${CROI_ARCH}/smp.S
   arch/${CROI_ARCH}/thread.S
+  arch/${CROI_ARCH}/usercopy.S
   trace.c)
 target_include_directories(kernel PRIVATE include)
 target_link_libraries(kernel PRIVATE kernel-swift croi-rt)

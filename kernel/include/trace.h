@@ -40,6 +40,8 @@ enum : uint16_t {
   CROI_TK_OVERRUN = 6,  // thread: overrunning; a: overruns so far
   CROI_TK_IRQ_ENTER = 16,  // a: vector / INTID / scause
   CROI_TK_IRQ_EXIT = 17,   // a: as for enter
+  CROI_TK_FAULT = 32,      // a: faulting user address; b: CROI_VM_FAULT_* bits
+  CROI_TK_COMMIT = 33,     // a: VMO trace id; b: page index committed
   CROI_TK_MARK = 112,      // a, b: 16 bytes of the marker's choosing
 };
 
@@ -48,6 +50,12 @@ enum : uint64_t {
   CROI_TRACE_PREEMPT_DEADLINE = 2,  // an earlier deadline became runnable
   CROI_TRACE_PREEMPT_SLICE = 3,     // a fair slice ended with others waiting
   CROI_TRACE_PREEMPT_RESERVED = 4,  // its CPU was reserved away from it
+};
+
+enum : uint64_t {
+  CROI_VM_FAULT_WRITE = 1,
+  CROI_VM_FAULT_EXECUTE = 2,
+  CROI_VM_FAULT_RESOLVED = 4,  // else the access was refused
 };
 
 // One record: 32 bytes. `time` is the raw counter (see the ring's

@@ -42,6 +42,29 @@ struct KernelAspace: ~Copyable {
         }
     }
 
+    // MARK: User address spaces
+
+    /// Fills in every kernel-half top-level slot (see ArchAspace), before
+    /// the first user address space copies them.
+    mutating func prepareForUserAspaces() throws(VmError) {
+        try vmLock.withLock { () throws(VmError) in try arch.populateKernelHalf() }
+    }
+
+    /// Tables for a new user address space sharing the kernel half.
+    func makeUserTables() throws(VmError) -> ArchAspace {
+        try vmLock.withLock { () throws(VmError) -> ArchAspace in try ArchAspace.makeUser(sharing: arch) }
+    }
+
+    /// What a CPU running no user address space loads: amd64/rv64 the
+    /// kernel's root, arm64 its empty TTBR0 table.
+    var kernelOnlyRoot: UInt64 {
+        #if arch(arm64)
+        arch.rootLow
+        #else
+        arch.rootHigh
+        #endif
+    }
+
     // MARK: Regions
 
     /// `pages` zeroed pages of fresh RAM, mapped read/write and never

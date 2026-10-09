@@ -135,6 +135,29 @@ Virtual memory (`Kernel/Vm/`, after Zircon's VmAspace/ArchVmAspace):
   top-level entries are created on demand, so on amd64/rv64 they must be
   pre-populated before user address spaces copy the kernel half.
 
+User address spaces and VMOs (K4a, Kernel/Vm/):
+- `UserAspace` (~Copyable owner of a heap `UserAspaceRecord`): lower-half
+  tables (UserLayout: 2 MiB up to the half's top less 1 GiB) sharing the
+  kernel half. amd64/rv64 copy the kernel root's upper 256 slots, which
+  `populateKernelHalf` fills once at boot and `pinsTopLevel` keeps forever;
+  arm64 uses TTBR0. ASIDs (arm64 8-bit, rv64 probed, amd64 none: CR3
+  reload) are recycled with a flush. Threads carry `aspace`; switchAway
+  loads the next thread's tables (kernel threads: the kernel's only).
+  `MapAttributes.user` marks EL0/U pages (never global, never kernel-exec).
+- `Vmo` (anonymous: zero pages committed on first touch; physical;
+  contiguous) with a refcount held by the handle and every mapping;
+  pages are PageState `.vmo`. Mappings (`Mapping`, rights read/write/
+  execute) are kept sorted in the aspace; anonymous ones fault in,
+  physical/contiguous ones map at once with large pages where aligned.
+- Faults: only instructions in the `.croi_fixups` table (usercopy.h,
+  `arch_user_load_u64`/`arch_user_store_u64`: arm64 ldtr/sttr, rv64 with
+  SUM) may fault user memory in from the kernel; unresolvable faults
+  resume at their recovery point with -1. The handler runs with the
+  faulting context's interrupt state, so a CPU waiting for the aspace
+  lock still answers the holder's TLB shootdown (it deadlocked masked).
+  `vm` trace category: fault (resolved or refused) and commit records.
+- Lock order: aspace -> vmo -> heap -> pmm (and vm for the kernel aspace).
+
 ACPI (`Kernel/Acpi/`, after Zircon's acpi_lite): `AcpiTables` validates
 RSDP/XSDT and finds tables by signature; `withPhysicalBytes` reads through
 the physmap or a temporary mapping. `Madt.forEachCpu` yields local APIC /

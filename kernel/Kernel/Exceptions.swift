@@ -25,6 +25,23 @@ func arch_exception(_ frame: UnsafeMutablePointer<arch_exception_frame_t>) {
         }
     }
     #endif
+    // A page fault on one of the kernel's user-access instructions: page
+    // the user memory in if a mapping allows it, else resume at the
+    // instruction's recovery point (it returns an error).
+    if let fault = unsafe ExceptionFrame.pageFault(frame.pointee),
+       let recovery = unsafe Fixups.recovery(for: ExceptionFrame.programCounter(frame.pointee)) {
+        // A synchronous fault is thread context: run the handler with the
+        // faulting code's interrupt state, so that while it waits for a
+        // lock it still answers IPIs (a TLB shootdown from the holder).
+        let enable = unsafe ExceptionFrame.interruptsWereEnabled(frame.pointee)
+        if enable { arch_interrupts_enable() }
+        let resolved = UserAspaces.handleFault(at: fault.address, write: fault.write, execute: fault.execute)
+        if enable { _ = arch_interrupts_save() }
+        if !resolved {
+            unsafe ExceptionFrame.setProgramCounter(&frame.pointee, recovery)
+        }
+        return
+    }
     if unsafe ExceptionFrame.isBreakpoint(frame.pointee) {
         unsafe ExceptionFrame.skipBreakpoint(&frame.pointee)
         breakpointsHandled += 1
@@ -47,6 +64,13 @@ func arch_exception(_ frame: UnsafeMutablePointer<arch_exception_frame_t>) {
 enum ExceptionFrame {
     #if arch(x86_64)
     static func isBreakpoint(_ f: arch_exception_frame_t) -> Bool { f.vector == 3 }
+    static func pageFault(_ f: arch_exception_frame_t) -> PageFault? {
+        guard f.vector == 14 else { return nil }  // #PF: CR2 and the error code
+        return PageFault(address: arch_read_cr2(), write: f.error_code & 2 != 0, execute: f.error_code & 16 != 0)
+    }
+    static func programCounter(_ f: arch_exception_frame_t) -> UInt64 { f.rip }
+    static func interruptsWereEnabled(_ f: arch_exception_frame_t) -> Bool { f.rflags & (1 << 9) != 0 }  // IF
+    static func setProgramCounter(_ f: inout arch_exception_frame_t, _ pc: UInt64) { f.rip = pc }
     static func isInterrupt(_ f: arch_exception_frame_t) -> Bool { f.vector >= 32 }
 
     /// Overflowing onto a guard page raises #PF, which can't push its frame
@@ -117,6 +141,20 @@ enum ExceptionFrame {
     /// SError from any of the four vector groups.
     static func isSError(_ f: arch_exception_frame_t) -> Bool { f.slot & 3 == 3 }
 
+    /// Data or instruction aborts whose status is a translation, access
+    /// flag or permission fault (DFSC/IFSC 0b0001xx..0b0011xx).
+    static func pageFault(_ f: arch_exception_frame_t) -> PageFault? {
+        let ec = exceptionClass(f)
+        guard ec == 0x20 || ec == 0x21 || ec == 0x24 || ec == 0x25, f.slot & 3 == 0 else { return nil }
+        let status = f.esr & 0x3F
+        guard status >= 0x04, status <= 0x0F else { return nil }
+        let instruction = ec == 0x20 || ec == 0x21
+        return PageFault(address: f.far, write: !instruction && f.esr & (1 << 6) != 0, execute: instruction)
+    }
+    static func programCounter(_ f: arch_exception_frame_t) -> UInt64 { f.elr }
+    static func interruptsWereEnabled(_ f: arch_exception_frame_t) -> Bool { f.spsr & (1 << 7) == 0 }  // PSTATE.I
+    static func setProgramCounter(_ f: inout arch_exception_frame_t, _ pc: UInt64) { f.elr = pc }
+
     /// IRQ from the current EL (SP_EL0 or SP_ELx).
     static func isInterrupt(_ f: arch_exception_frame_t) -> Bool { f.slot == 1 || f.slot == 5 }
 
@@ -185,6 +223,13 @@ enum ExceptionFrame {
 
     #elseif arch(riscv64)
     static func isBreakpoint(_ f: arch_exception_frame_t) -> Bool { f.scause == 3 && f.overflow == 0 }
+    static func pageFault(_ f: arch_exception_frame_t) -> PageFault? {
+        guard f.overflow == 0, f.scause == 12 || f.scause == 13 || f.scause == 15 else { return nil }
+        return PageFault(address: f.stval, write: f.scause == 15, execute: f.scause == 12)
+    }
+    static func programCounter(_ f: arch_exception_frame_t) -> UInt64 { f.sepc }
+    static func interruptsWereEnabled(_ f: arch_exception_frame_t) -> Bool { f.sstatus & (1 << 5) != 0 }  // SPIE
+    static func setProgramCounter(_ f: inout arch_exception_frame_t, _ pc: UInt64) { f.sepc = pc }
     static func isInterrupt(_ f: arch_exception_frame_t) -> Bool { f.scause >> 63 != 0 }
 
     /// The entry found the stack overflowed and switched stacks.
@@ -292,3 +337,31 @@ enum SErrorPolicy {
     }
 }
 #endif
+
+/// A page fault, decoded from an exception frame.
+struct PageFault {
+    var address: UInt64
+    var write: Bool
+    var execute: Bool
+}
+
+/// The .croi_fixups table (usercopy.h): user-access instructions and where
+/// each resumes if its fault can't be resolved.
+enum Fixups {
+    static func recovery(for pc: UInt64) -> UInt64? {
+        var here = croi_fixups_begin()
+        while here < croi_fixups_end() {
+            let entry = unsafe UnsafeRawPointer(bitPattern: UInt(here))!
+            let instruction = here &+ UInt64(bitPattern: Int64(unsafe entry.load(as: Int32.self)))
+            if instruction == pc {
+                return here &+ 4 &+ UInt64(bitPattern: Int64(unsafe entry.load(fromByteOffset: 4, as: Int32.self)))
+            }
+            here += 8
+        }
+        return nil
+    }
+
+    static var count: Int {
+        Int(croi_fixups_end() - croi_fixups_begin()) / 8
+    }
+}

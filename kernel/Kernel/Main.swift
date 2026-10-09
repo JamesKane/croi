@@ -244,6 +244,7 @@ func kernel_main_continue() -> Never {
         console.write(decimal: UInt64(CpuTopologies.distinct { $0.coreType }))
         console.write(" core type(s)\n")
 
+        UserAspaces.initialize()
         ExtendedState.initialize(acpi)
         ExtendedStateSelfTest.run(console)
 
@@ -255,6 +256,8 @@ func kernel_main_continue() -> Never {
         MutexSelfTest.run(console)
         DeadlineSelfTest.run(console)
         TraceSelfTest.run(console)
+        AspaceSelfTest.run(console)
+        VmoSelfTest.run(console)
         SelfTestDeadman.done.store(true, ordering: .relaxed)
     } else {
         console.write("  cpus:   no ACPI tables; boot cpu only\n")

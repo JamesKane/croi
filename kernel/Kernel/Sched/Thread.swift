@@ -69,6 +69,8 @@ struct Thread: ~Copyable {
     /// Dead and switched off its stack: safe to free.
     var switchedOut = false
     var detached = false
+    /// The user address space it runs in, or nil (kernel threads).
+    var aspace: UserAspacePointer?
     /// Its extended register state area (ExtendedState), or 0: kernel
     /// threads never use FP/SIMD.
     var extendedState: UInt64 = 0

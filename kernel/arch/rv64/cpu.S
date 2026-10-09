@@ -168,3 +168,67 @@ arch_rv_vlenb:
     csrc    sstatus, t0
     ret
 .size arch_rv_vlenb, . - arch_rv_vlenb
+
+// --- User address spaces (aspace.h) --------------------------------------
+
+// satp = MODE Sv39 (8) | ASID | root PPN.
+.globl arch_switch_user_tables
+.type arch_switch_user_tables, %function
+arch_switch_user_tables:
+    srli    a0, a0, 12
+    slli    a1, a1, 44
+    or      a0, a0, a1
+    li      t0, 8
+    slli    t0, t0, 60
+    or      a0, a0, t0
+    csrw    satp, a0
+    beqz    a2, 1f
+    sfence.vma
+1:  ret
+.size arch_switch_user_tables, . - arch_switch_user_tables
+
+.globl arch_tlb_invalidate_asid
+.type arch_tlb_invalidate_asid, %function
+arch_tlb_invalidate_asid:
+    sfence.vma zero, a0
+    ret
+.size arch_tlb_invalidate_asid, . - arch_tlb_invalidate_asid
+
+.globl arch_user_access_begin
+.type arch_user_access_begin, %function
+arch_user_access_begin:
+    li      t0, (1 << 18)               // sstatus.SUM
+    csrs    sstatus, t0
+    ret
+.size arch_user_access_begin, . - arch_user_access_begin
+
+.globl arch_user_access_end
+.type arch_user_access_end, %function
+arch_user_access_end:
+    li      t0, (1 << 18)
+    csrc    sstatus, t0
+    ret
+.size arch_user_access_end, . - arch_user_access_end
+
+// ASIDLEN: write all ones to satp.ASID and count what sticks (the spec's
+// probe), then put satp back.
+.globl arch_asid_bits
+.type arch_asid_bits, %function
+arch_asid_bits:
+    csrr    t0, satp
+    li      t1, 0xffff
+    slli    t1, t1, 44
+    or      t2, t0, t1
+    csrw    satp, t2
+    csrr    t2, satp
+    csrw    satp, t0
+    sfence.vma
+    and     t2, t2, t1
+    srli    t2, t2, 44
+    li      a0, 0
+2:  beqz    t2, 3f
+    addi    a0, a0, 1
+    srli    t2, t2, 1
+    j       2b
+3:  ret
+.size arch_asid_bits, . - arch_asid_bits

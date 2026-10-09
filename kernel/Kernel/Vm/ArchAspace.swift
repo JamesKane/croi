@@ -11,6 +11,8 @@ enum VmError: Error, Equatable {
     case noSpace
     /// No region starts at this address.
     case notFound(UInt64)
+    /// Bad size, offset or rights for the object.
+    case invalidArgument
 }
 
 /// What a virtual address translates to.
@@ -37,6 +39,14 @@ struct Translation: Equatable {
 struct ArchAspace {
     let rootLow: UInt64
     let rootHigh: UInt64
+    /// Never free the tables the root points at (the kernel's on amd64/
+    /// rv64: user roots copy those entries, so they must never change).
+    var pinsTopLevel = false
+
+    init(rootLow: UInt64, rootHigh: UInt64) {
+        self.rootLow = rootLow
+        self.rootHigh = rootHigh
+    }
 
     private typealias Format = PageTableFormat
     private static var entriesPerTable: Int { 512 }
@@ -129,7 +139,7 @@ struct ArchAspace {
             if Format.isTable(entry, level: level) {
                 let child = Format.address(entry)
                 try update(table: child, level: level + 1, start: virt, end: chunkEnd, operation)
-                if case .unmap = operation, unsafe isEmpty(child) {
+                if case .unmap = operation, !(level == 0 && pinsTopLevel), unsafe isEmpty(child) {
                     unsafe slot.pointee = 0
                     arch_tlb_invalidate_page(entryBase)  // drops walk-cache entries too
                     pmm.free(child)
@@ -202,6 +212,59 @@ struct ArchAspace {
                                attributes: Format.attributes(entry, level: level), pageSize: size)
         }
         return nil
+    }
+
+    // MARK: User address spaces
+
+    /// Top-level slots of the kernel half, in the root that holds it.
+    static var kernelHalf: Range<Int> { 256..<512 }
+
+    /// Gives every kernel-half top-level slot a table, once, so that user
+    /// roots can copy the kernel half and stay current (amd64, rv64; on
+    /// arm64 the kernel half is TTBR1's and nothing is copied).
+    mutating func populateKernelHalf() throws(VmError) {
+        #if arch(x86_64) || arch(riscv64)
+        let slots = unsafe entries(rootHigh)
+        for i in Self.kernelHalf where unsafe slots[i] == 0 {
+            unsafe slots[i] = Format.table(try allocateTable())
+        }
+        #endif
+        pinsTopLevel = true
+    }
+
+    /// A new user address space's tables: an empty user half, sharing the
+    /// kernel half of `kernel` (amd64/rv64: a root of its own whose kernel
+    /// slots copy the kernel's; arm64: a TTBR0 root).
+    static func makeUser(sharing kernel: borrowing ArchAspace) throws(VmError) -> ArchAspace {
+        guard let root = pmm.allocatePage(.mmu) else { throw .outOfMemory }
+        let slots = unsafe UnsafeMutablePointer<UInt64>(bitPattern: UInt(KernelLayout.physmap(root)))!
+        unsafe UnsafeMutableRawPointer(slots).initializeMemory(as: UInt8.self, repeating: 0, count: Int(KernelLayout.pageSize))
+        #if arch(x86_64) || arch(riscv64)
+        let kernelSlots = unsafe UnsafePointer<UInt64>(bitPattern: UInt(KernelLayout.physmap(kernel.rootHigh)))!
+        for i in kernelHalf { unsafe slots[i] = kernelSlots[i] }
+        return ArchAspace(rootLow: root, rootHigh: root)
+        #else
+        return ArchAspace(rootLow: root, rootHigh: kernel.rootHigh)
+        #endif
+    }
+
+    /// Frees a user address space's tables: everything below the user half
+    /// of the root, then the root (the pages they map are their owners').
+    /// Nothing may be using it.
+    func destroyUser() {
+        let slots = unsafe entries(rootLow)
+        for i in 0..<Self.kernelHalf.lowerBound where Format.isTable(unsafe slots[i], level: 0) {
+            freeTables(Format.address(unsafe slots[i]), level: 1)
+        }
+        pmm.free(rootLow)
+    }
+
+    private func freeTables(_ table: UInt64, level: Int) {
+        let slots = unsafe entries(table)
+        for i in 0..<Self.entriesPerTable where Format.isTable(unsafe slots[i], level: level) {
+            freeTables(Format.address(unsafe slots[i]), level: level + 1)
+        }
+        pmm.free(table)
     }
 
     // MARK: Helpers

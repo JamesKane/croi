@@ -17,6 +17,8 @@ struct CpuScheduler {
     var ready = false
     /// The running thread's slice or budget timer, 0 when none is armed.
     var sliceTimer: UInt32 = 0
+    /// The user address space whose tables are loaded here, if any.
+    var activeAspace: UserAspacePointer?
     /// Wakes the CPU when the first throttled thread's period starts.
     var eligibilityTimer: UInt32 = 0
     var eligibilityAt: UInt64 = 0
@@ -222,6 +224,8 @@ enum Scheduler {
         guard !thread.pointee.isIdle else { panic("sched: the idle thread exited") }
         guard thread.pointee.ownedQueues == nil else { panic("sched: a thread exited holding a mutex") }
         detachContext(thread)
+        thread.pointee.aspace?.pointee.threads -= 1
+        thread.pointee.aspace = nil  // the switch away loads whatever runs next
         thread.pointee.exitCode = code
         thread.pointee.state = .dead
         switchAway()
@@ -1006,6 +1010,12 @@ enum Scheduler {
         cpus[me].switches += 1
         cpus[me].previous = current
         cpus[me].current = next
+        // Kernel threads run on the kernel's tables alone, so a user
+        // address space is loaded only where its threads run.
+        if next.pointee.aspace != cpus[me].activeAspace {
+            UserAspaces.activate(next.pointee.aspace, replacing: cpus[me].activeAspace)
+            cpus[me].activeAspace = next.pointee.aspace
+        }
         unsafe arch_context_switch(UnsafeMutablePointer<UInt64>(bitPattern: UInt(current.address))!,
                                    next.pointee.savedSp)
         finishSwitch()
@@ -1323,6 +1333,21 @@ enum Scheduler {
         out.write(decimal: Clock.now())
         out.write("\n")
         if lock.isHeldByCurrentCpu { lock.unlockMasked() }
+    }
+
+    /// Runs the calling thread in `aspace` from now on (nil: kernel only).
+    static func setAspace(_ aspace: UserAspacePointer?) {
+        locked {
+            let me = Int(Cpu.current)
+            let thread = cpus[me].current!
+            thread.pointee.aspace?.pointee.threads -= 1
+            thread.pointee.aspace = aspace
+            aspace?.pointee.threads += 1
+            if aspace != cpus[me].activeAspace {
+                UserAspaces.activate(aspace, replacing: cpus[me].activeAspace)
+                cpus[me].activeAspace = aspace
+            }
+        }
     }
 
     /// CPUs that have an idle thread and take threads.

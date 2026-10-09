@@ -13,6 +13,8 @@ enum PageState: UInt8 {
     case mmu
     /// Kernel heap (see Heap.swift for the heap* fields).
     case heap
+    /// Owned by a VMO (Vm/Vmo.swift).
+    case vmo
 }
 
 /// Per-page metadata, one for every 4 KiB page in every arena (Zircon's

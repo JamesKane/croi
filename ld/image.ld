@@ -26,6 +26,9 @@ SECTIONS {
   . = ALIGN(0x1000);
   __rodata_start = .;
   .rodata : { *(.rodata .rodata.* .srodata .srodata.*) } :rodata
+  /* Kernel user-access fixups (instruction, recovery) as 32-bit offsets
+     from the entry itself, so they need no relocations. */
+  .croi_fixups : { __fixups_start = .; KEEP(*(.croi_fixups)) __fixups_end = .; } :rodata
   /* Swift module hash, used by debuggers to match modules (debug info). */
   .swift_modhash : { KEEP(*(.swift_modhash)) } :rodata
   .dynsym : { *(.dynsym) } :rodata

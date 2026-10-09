@@ -168,6 +168,14 @@ late, and missed). Model: NeoVectra ADR-0049 (kernel trace) and ADR-0050
   so a call and its reply share a flow) and `futex` waits.
 
 ### K4: VMM phase A (requirement 7)
+Progress: **K4a done**: user address spaces (kernel half shared, ASIDs,
+switched with threads), VMOs (anonymous, physical, contiguous), mappings
+in the root region, demand-paging faults with fixup-based recovery, the
+`vm` trace category, trace rings in VMOs. Next: K4b (reservations with
+map-view/unmap-view, commit/decommit, sub-regions, partial unmap,
+contiguous with an address limit and the boot pool, cache ops, the RAM
+deny list, device-local accounting, a sparse page list), then K4c (choose
+the per-thread W^X mechanism).
 - **VMOs:** anonymous, physical, contiguous, and **device-local**
   (BAR/VRAM/pinned). Device-local VMOs are accounted to the owning process
   for the combined CPU+GPU budget, never paged or evicted, and the budget

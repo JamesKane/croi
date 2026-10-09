@@ -1,4 +1,5 @@
 import CKernel
+import PageTables
 import Synchronization
 
 /// The kernel trace (roadmap "Trace", the core of requirement 18): one
@@ -15,12 +16,13 @@ import Synchronization
 /// sequentially consistent accesses, so a writer either sees the mask
 /// clear or is waited for.
 ///
-/// Today the rings are kernel memory read by the kernel (self-tests,
-/// debugging). K4 makes them a VMO and K5 hands it out through a
-/// capability; the layout doesn't change.
+/// Each CPU's ring is a contiguous VMO, mapped into the kernel to write;
+/// K5 hands the VMOs out through a capability, and user space maps them
+/// read-only (the layout is the ABI).
 enum Trace {
     nonisolated(unsafe) private static var session: UInt64 = 0
     nonisolated(unsafe) private static var pagesPerCpu = 0
+    nonisolated(unsafe) private static var ringVmos = InlineArray<64, UInt64>(repeating: 0)
 
     /// Records an event if `category` is on.
     @inline(__always)
@@ -78,7 +80,11 @@ enum Trace {
         if pages != pagesPerCpu {
             release()
             for cpu in 0..<Smp.count {
-                let ring = try kernelAspace.allocate(pages: 1 + pages)
+                let size = UInt64(1 + pages) * KernelLayout.pageSize
+                let vmo = try Vmo(contiguous: size)
+                guard case .contiguous(let base) = vmo.record.pointee.kind else { panic("trace: ring VMO") }
+                let ring = try kernelAspace.mapPhysical(base, size: size, MapAttributes(writable: true, global: true))
+                ringVmos[cpu] = vmo.keep().address
                 unsafe percpu(cpu).pointee.traceRing = ring
             }
             pagesPerCpu = pages
@@ -115,6 +121,8 @@ enum Trace {
             } catch {
                 panic("trace: freeing an unknown ring")
             }
+            VmoPointer(address: ringVmos[cpu]).release()
+            ringVmos[cpu] = 0
         }
         pagesPerCpu = 0
     }

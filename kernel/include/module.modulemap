@@ -7,5 +7,7 @@ module CKernel {
   header "thread.h"
   header "trace.h"
   header "xstate.h"
+  header "aspace.h"
+  header "usercopy.h"
   export *
 }

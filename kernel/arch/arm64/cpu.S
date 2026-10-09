@@ -288,3 +288,45 @@ arch_sme_vector_length:
     isb
     ret
 .size arch_sme_vector_length, . - arch_sme_vector_length
+
+// --- User address spaces (aspace.h) --------------------------------------
+
+.globl arch_switch_user_tables
+.type arch_switch_user_tables, %function
+arch_switch_user_tables:
+    orr     x0, x0, x1, lsl #48         // TTBR0_EL1.ASID (TCR_EL1.A1 = 0)
+    msr     ttbr0_el1, x0
+    isb
+    ret
+.size arch_switch_user_tables, . - arch_switch_user_tables
+
+.globl arch_tlb_invalidate_asid
+.type arch_tlb_invalidate_asid, %function
+arch_tlb_invalidate_asid:
+    lsl     x0, x0, #48
+    dsb     ishst
+    tlbi    aside1is, x0
+    dsb     ish
+    isb
+    ret
+.size arch_tlb_invalidate_asid, . - arch_tlb_invalidate_asid
+
+.globl arch_user_access_begin
+.type arch_user_access_begin, %function
+arch_user_access_begin:
+    ret
+.size arch_user_access_begin, . - arch_user_access_begin
+
+.globl arch_user_access_end
+.type arch_user_access_end, %function
+arch_user_access_end:
+    ret
+.size arch_user_access_end, . - arch_user_access_end
+
+// 8 (TCR_EL1.AS = 0, set by the loader).
+.globl arch_asid_bits
+.type arch_asid_bits, %function
+arch_asid_bits:
+    mov     x0, #8
+    ret
+.size arch_asid_bits, . - arch_asid_bits

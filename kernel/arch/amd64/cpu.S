@@ -213,3 +213,38 @@ arch_cpu_core_type:
 .balign 16
 no_percpu:
     .zero 16
+
+// --- User address spaces (aspace.h) --------------------------------------
+.section .text.arch_aspace, "ax", @progbits
+
+.globl arch_switch_user_tables
+.type arch_switch_user_tables, @function
+arch_switch_user_tables:
+    mov     %rdi, %cr3
+    ret
+.size arch_switch_user_tables, . - arch_switch_user_tables
+
+.globl arch_tlb_invalidate_asid
+.type arch_tlb_invalidate_asid, @function
+arch_tlb_invalidate_asid:
+    ret
+.size arch_tlb_invalidate_asid, . - arch_tlb_invalidate_asid
+
+.globl arch_user_access_begin
+.type arch_user_access_begin, @function
+arch_user_access_begin:
+    ret
+.size arch_user_access_begin, . - arch_user_access_begin
+
+.globl arch_user_access_end
+.type arch_user_access_end, @function
+arch_user_access_end:
+    ret
+.size arch_user_access_end, . - arch_user_access_end
+
+.globl arch_asid_bits
+.type arch_asid_bits, @function
+arch_asid_bits:
+    xor     %eax, %eax
+    ret
+.size arch_asid_bits, . - arch_asid_bits

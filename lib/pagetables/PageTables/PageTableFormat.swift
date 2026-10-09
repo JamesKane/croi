@@ -28,13 +28,18 @@ public struct MapAttributes: Sendable, Equatable {
     public var cache = CachePolicy.cached
     /// Kernel mappings are global (not tagged with an address space).
     public var global = false
+    /// Accessible from user mode (EL0, U-mode, CPL 3). User mappings are
+    /// never global and never executable by the kernel.
+    public var user = false
 
     @inlinable
-    public init(writable: Bool = false, executable: Bool = false, cache: CachePolicy = .cached, global: Bool = false) {
+    public init(writable: Bool = false, executable: Bool = false, cache: CachePolicy = .cached, global: Bool = false,
+                user: Bool = false) {
         self.writable = writable
         self.executable = executable
         self.cache = cache
         self.global = global
+        self.user = user
     }
 }
 
@@ -48,6 +53,7 @@ public enum PageTableFormat {
     @inlinable public static var identityLimit: UInt64 { 1 << 47 }
     @inlinable static var present: UInt64 { 1 << 0 }
     @inlinable static var writable: UInt64 { 1 << 1 }
+    @inlinable static var userBit: UInt64 { 1 << 2 }
     @inlinable static var writeThrough: UInt64 { 1 << 3 }
     @inlinable static var cacheDisable: UInt64 { 1 << 4 }
     @inlinable static var accessed: UInt64 { 1 << 5 }
@@ -58,10 +64,13 @@ public enum PageTableFormat {
     @inlinable static var addressMask: UInt64 { 0x000F_FFFF_FFFF_F000 }
 
     @inlinable public static func leafAllowed(level: Int) -> Bool { level >= 2 }
-    @inlinable public static func table(_ phys: UInt64) -> UInt64 { phys | present | writable }
+    // Tables are always user-accessible; the leaf decides (U/S must be set
+    // at every level for user access).
+    @inlinable public static func table(_ phys: UInt64) -> UInt64 { phys | present | writable | userBit }
     @inlinable public static func leaf(_ phys: UInt64, level: Int, _ a: MapAttributes) -> UInt64 {
         var e = phys | present | accessed | dirty
         if a.writable { e |= writable }
+        if a.user { e |= userBit }
         switch a.cache {
         case .cached: break
         case .writeCombining: e |= writeThrough                // PAT index 1
@@ -84,7 +93,7 @@ public enum PageTableFormat {
         default: .device
         }
         return MapAttributes(writable: e & writable != 0, executable: e & noExecute == 0,
-                             cache: cache, global: e & globalBit != 0)
+                             cache: cache, global: e & globalBit != 0, user: e & userBit != 0)
     }
 
     #elseif arch(arm64)
@@ -97,6 +106,7 @@ public enum PageTableFormat {
     @inlinable static var tableOrPage: UInt64 { 1 << 1 }
     @inlinable static func attrIndex(_ index: UInt64) -> UInt64 { index << 2 }
     @inlinable static var attrIndexMask: UInt64 { 7 << 2 }
+    @inlinable static var userAccess: UInt64 { 1 << 6 }  // AP[1]: EL0 may access
     @inlinable static var readOnly: UInt64 { 2 << 6 }
     @inlinable static var innerShareable: UInt64 { 3 << 8 }
     @inlinable static var accessFlag: UInt64 { 1 << 10 }
@@ -108,7 +118,7 @@ public enum PageTableFormat {
     @inlinable public static func leafAllowed(level: Int) -> Bool { level >= 1 }
     @inlinable public static func table(_ phys: UInt64) -> UInt64 { phys | valid | tableOrPage }
     @inlinable public static func leaf(_ phys: UInt64, level: Int, _ a: MapAttributes) -> UInt64 {
-        var e = phys | valid | accessFlag | unprivilegedNoExecute
+        var e = phys | valid | accessFlag
         if level == levels - 1 { e |= tableOrPage }
         switch a.cache {
         case .cached: e |= attrIndex(0) | innerShareable
@@ -116,8 +126,15 @@ public enum PageTableFormat {
         case .device: e |= attrIndex(1)
         }
         if !a.writable { e |= readOnly }
-        if !a.executable || a.cache == .device { e |= privilegedNoExecute }
-        if !a.global { e |= notGlobal }
+        if a.user {
+            // EL0's; the kernel never executes it.
+            e |= userAccess | privilegedNoExecute | notGlobal
+            if !a.executable || a.cache == .device { e |= unprivilegedNoExecute }
+        } else {
+            e |= unprivilegedNoExecute
+            if !a.executable || a.cache == .device { e |= privilegedNoExecute }
+            if !a.global { e |= notGlobal }
+        }
         return e
     }
     @inlinable public static func isPresent(_ e: UInt64) -> Bool { e & valid != 0 }
@@ -131,8 +148,10 @@ public enum PageTableFormat {
         case attrIndex(2): .writeCombining
         default: .device
         }
-        return MapAttributes(writable: e & readOnly == 0, executable: e & privilegedNoExecute == 0,
-                             cache: cache, global: e & notGlobal == 0)
+        let user = e & userAccess != 0
+        return MapAttributes(writable: e & readOnly == 0,
+                             executable: e & (user ? unprivilegedNoExecute : privilegedNoExecute) == 0,
+                             cache: cache, global: e & notGlobal == 0, user: user)
     }
 
     #elseif arch(riscv64)
@@ -151,6 +170,7 @@ public enum PageTableFormat {
     @inlinable static var read: UInt64 { 1 << 1 }
     @inlinable static var write: UInt64 { 1 << 2 }
     @inlinable static var execute: UInt64 { 1 << 3 }
+    @inlinable static var userBit: UInt64 { 1 << 4 }
     @inlinable static var globalBit: UInt64 { 1 << 5 }
     @inlinable static var accessed: UInt64 { 1 << 6 }
     @inlinable static var dirty: UInt64 { 1 << 7 }
@@ -162,6 +182,7 @@ public enum PageTableFormat {
         if a.writable { e |= write }
         if a.executable && a.cache != .device { e |= execute }
         if a.global { e |= globalBit }
+        if a.user { e |= userBit }  // S-mode reaches it only with sstatus.SUM
         if svpbmt {
             switch a.cache {
             case .cached: break
@@ -183,7 +204,7 @@ public enum PageTableFormat {
         default: .cached
         }
         return MapAttributes(writable: e & write != 0, executable: e & execute != 0,
-                             cache: cache, global: e & globalBit != 0)
+                             cache: cache, global: e & globalBit != 0, user: e & userBit != 0)
     }
     #endif
 

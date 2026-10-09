@@ -42,11 +42,16 @@ enum TraceSelfTest {
         for i in 0..<n { Trace.event(CROI_TRACE_MARK, UInt16(CROI_TK_MARK), i) }
         let disabled = (Clock.now() - began) * 1000 / n
 
+        // The fastest of 16 batches: the probe's own cost, without the
+        // interrupts or host scheduling that land in some batches.
         start(CROI_TRACE_MARK, pages: 64, mode: CROI_TRACE_CIRCULAR)
-        let events: UInt64 = 20_000
-        began = Clock.now()
-        for i in 0..<events { Trace.event(CROI_TRACE_MARK, UInt16(CROI_TK_MARK), i, i) }
-        let enabled = (Clock.now() - began) / events
+        let events: UInt64 = 1000
+        var enabled = UInt64.max
+        for _ in 0..<16 {
+            began = Clock.now()
+            for i in 0..<events { Trace.event(CROI_TRACE_MARK, UInt16(CROI_TK_MARK), i, i) }
+            enabled = min(enabled, (Clock.now() - began) / events)
+        }
         Trace.stop()
         if enforcesCost, enabled >= 30 {
             console.write("  trace:  enabled probe costs ")
