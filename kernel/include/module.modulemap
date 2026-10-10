@@ -9,6 +9,7 @@ module CKernel {
   header "xstate.h"
   header "pmu.h"
   header "task.h"
+  header "ipc.h"
   header "aspace.h"
   header "usercopy.h"
   header "cache.h"

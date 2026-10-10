@@ -47,6 +47,17 @@ enum : uint64_t {
   CROI_SYS_VMAR_UNMAP = 72,        // (vmar, addr, len)
   CROI_SYS_VMAR_PROTECT = 73,      // (vmar | options << 32, addr, len)
   CROI_SYS_VMAR_DESTROY = 74,      // (vmar)
+  // Channels, eventpairs (K7b): Zircon's, except channel_read packs its
+  // capacities (bytes | handles << 32) and writes both actuals (two
+  // uint32_t) through one pointer.
+  CROI_SYS_CHANNEL_CREATE = 80,    // (options, out0, out1)
+  CROI_SYS_CHANNEL_WRITE = 81,     // (channel, options, bytes, num_bytes, handles, num_handles)
+  CROI_SYS_CHANNEL_READ = 82,      // (channel, options, bytes, handles, capacities, actuals)
+  CROI_SYS_CHANNEL_CALL = 83,      // (channel, options, deadline, croi_channel_call_args_t *, actual_bytes, actual_handles)
+  CROI_SYS_EVENTPAIR_CREATE = 84,  // (options, out0, out1)
+  CROI_SYS_OBJECT_SIGNAL_PEER = 85,  // (handle, clear, set)
+  CROI_SYS_OBJECT_GET_INFO = 86,   // (handle, topic, buffer, buffer_size)
+  CROI_SYS_TEST_PROFILE = 6,       // (op) boot self-test only
 };
 
 // A new process's first thread starts with arg1 (a handle in the process)
@@ -54,6 +65,7 @@ enum : uint64_t {
 // in the third.
 
 #include "task.h"  // vmar options, task return codes, signals, croi_process_info_t
+#include "ipc.h"   // channel signals and limits, call args, handle info, flow ids
 
 enum : uint64_t {  // CROI_SYS_TRACE_CONFIGURE ops
   CROI_TRACE_OP_START = 0,   // a: categories, b: pages per CPU, c: mode;

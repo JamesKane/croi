@@ -256,8 +256,12 @@ Progress: **K7a done**: job, process, thread and VMAR objects and their
 syscalls (create, start, exit, kill, info, vmar allocate/map/unmap/
 protect/destroy), per-process handle tables and address spaces with the
 vDSO, last-thread teardown (handle cycles broken), interruptible waits for
-kill. Next: K7b (channels, eventpairs, `ipc` trace flows, deadline
-donation), K7c (futex with owner, timers), K7d (exceptions, job policy).
+kill. **K7b done**: channels (handle transfer,
+calls with kernel txids, peer closed), eventpairs, object_get_info, the
+`ipc` trace category with flow ids shared by call and reply
+(`croi_flow_id` in ipc.h), and IPC deadline donation (ext 2) through
+owned call queues. Next: K7c (futex with owner, timers), K7d (exceptions,
+job policy).
 
 - Channel, event, eventpair, port, timer (absolute deadline plus slack), and
   futex with an owner for PI.

@@ -13,6 +13,10 @@
 #define ERR_TIMED_OUT (-21)
 #define ERR_ACCESS_DENIED (-30)
 #define ERR_BAD_STATE (-20)
+#define ERR_NOT_SUPPORTED (-2)
+#define ERR_BUFFER_TOO_SMALL (-15)
+#define ERR_SHOULD_WAIT (-22)
+#define ERR_PEER_CLOSED (-24)
 #define RIGHT_SAME (1u << 31)
 #define SIGNALED (1u << 3)
 #define USER_SIGNAL_0 (1u << 24)
@@ -426,6 +430,172 @@ static int64_t processes(const startup_t *s) {
   return 0x600D;
 }
 
+// Mode 7: channels, eventpairs and calls (K7b), as a process. A server
+// thread answers calls; the client binds itself to a deadline context the
+// kernel provides (test_profile) and checks the server ran on it while
+// serving (ext 2). The last call's flow id goes to the kernel, which finds
+// it in the ipc trace records.
+static int64_t chan_read(uint32_t channel, void *bytes, uint32_t *handles, uint32_t num_bytes, uint32_t num_handles,
+                         uint32_t actual[2]) {
+  return sys6(CROI_SYS_CHANNEL_READ, channel, 0, (uint64_t)bytes, (uint64_t)handles,
+              num_bytes | (uint64_t)num_handles << 32, (uint64_t)actual);
+}
+
+static int64_t chan_write(uint32_t channel, const void *bytes, uint32_t num_bytes, const uint32_t *handles,
+                          uint32_t num_handles) {
+  return sys6(CROI_SYS_CHANNEL_WRITE, channel, 0, (uint64_t)bytes, num_bytes, (uint64_t)handles, num_handles);
+}
+
+static uint32_t wait_for(uint32_t handle, uint32_t signals, uint64_t ns) {
+  uint32_t observed = 0;
+  sys(CROI_SYS_OBJECT_WAIT_ONE, handle, signals, now_ns() + ns, (uint64_t)&observed, 0);
+  return observed;
+}
+
+// Answers calls: reply = txid, request + 1, whether it is running on a
+// deadline profile now. "quit" ends it.
+static void server(uint64_t channel) {
+  uint32_t buffer[16];
+  uint32_t actual[2];
+  for (;;) {
+    uint32_t observed = wait_for((uint32_t)channel, CROI_SIGNAL_READABLE | CROI_SIGNAL_PEER_CLOSED, 10000000000ull);
+    if (chan_read((uint32_t)channel, buffer, 0, sizeof buffer, 0, actual) != 0) {
+      if (observed & CROI_SIGNAL_PEER_CLOSED) break;
+      continue;
+    }
+    if (actual[0] == 8 && buffer[1] == 0x74697571) break;  // "quit"
+    // Work for 1 ms, then look: the caller lends its profile once it has
+    // blocked on the call, which can be just after we read it.
+    uint64_t until = now_ns() + 1000000;
+    while (now_ns() < until) {
+    }
+    uint32_t reply[3] = {buffer[0], buffer[1] + 1, (uint32_t)sys(CROI_SYS_TEST_PROFILE, 0, 0, 0, 0, 0)};
+    chan_write((uint32_t)channel, reply, sizeof reply, 0, 0);
+  }
+  sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
+}
+
+// Calls on a channel nobody answers; its result goes to *(int64_t *)slot.
+static void lonely_caller(uint64_t slot) {
+  uint64_t *out = (uint64_t *)slot;
+  uint32_t request[2] = {0, 1}, reply[4];
+  croi_channel_call_args_t args = {(uint64_t)request, 0, (uint64_t)reply, 0, sizeof request, 0, sizeof reply, 0};
+  uint32_t bytes = 0, handles = 0;
+  out[1] = (uint64_t)sys6(CROI_SYS_CHANNEL_CALL, (uint32_t)out[0], 0, now_ns() + 5000000000ull, (uint64_t)&args,
+                          (uint64_t)&bytes, (uint64_t)&handles);
+  sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
+}
+
+static uint32_t start_thread(const startup_t *s, void (*entry)(uint64_t), uint64_t arg) {
+  uint32_t thread = 0, stack = 0;
+  uint64_t at = 0;
+  CHECK(140, sys(CROI_SYS_VMO_CREATE, STACK_SIZE, 0, (uint64_t)&stack, 0, 0) == 0);
+  CHECK(141, sys(CROI_SYS_VMO_MAP, stack, 0, STACK_SIZE, 3, (uint64_t)&at) == 0);
+  sys(CROI_SYS_HANDLE_CLOSE, stack, 0, 0, 0, 0);
+  CHECK(142, sys6(CROI_SYS_THREAD_CREATE, s->process, (uint64_t)"t", 1, 0, (uint64_t)&thread, 0) == 0);
+  CHECK(143, sys(CROI_SYS_THREAD_START, thread, (uint64_t)entry, ENTRY_SP(at + STACK_SIZE), arg, 0) == 0);
+  return thread;
+}
+
+static int64_t ipc(const startup_t *s) {
+  uint32_t a = 0, b = 0;
+  CHECK(110, sys(CROI_SYS_CHANNEL_CREATE, 0, (uint64_t)&a, (uint64_t)&b, 0, 0) == 0);
+  croi_info_handle_basic_t ia = {}, ib = {};
+  CHECK(111, sys(CROI_SYS_OBJECT_GET_INFO, a, CROI_INFO_HANDLE_BASIC, (uint64_t)&ia, sizeof ia, 0) == 0 &&
+                 sys(CROI_SYS_OBJECT_GET_INFO, b, CROI_INFO_HANDLE_BASIC, (uint64_t)&ib, sizeof ib, 0) == 0 &&
+                 ia.related_koid == ib.koid && ib.related_koid == ia.koid && ia.type == 4);
+  uint32_t actual[2] = {0, 0}, handles[4];
+  char buffer[64];
+  CHECK(112, chan_read(b, buffer, handles, sizeof buffer, 4, actual) == ERR_SHOULD_WAIT);
+
+  // A message with a handle: the handle leaves our table and works there.
+  uint32_t event = 0, dup = 0;
+  CHECK(113, sys(CROI_SYS_EVENT_CREATE, 0, (uint64_t)&event, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_HANDLE_DUPLICATE, event, RIGHT_SAME, (uint64_t)&dup, 0, 0) == 0);
+  CHECK(114, chan_write(a, "hello", 5, &dup, 1) == 0);
+  CHECK(115, sys(CROI_SYS_HANDLE_CLOSE, dup, 0, 0, 0, 0) == ERR_BAD_HANDLE);
+  CHECK(116, wait_for(b, CROI_SIGNAL_READABLE, 1000000000) & CROI_SIGNAL_READABLE);
+  CHECK(117, chan_read(b, buffer, handles, 2, 1, actual) == ERR_BUFFER_TOO_SMALL && actual[0] == 5 && actual[1] == 1);
+  CHECK(118, chan_read(b, buffer, handles, sizeof buffer, 4, actual) == 0 && actual[0] == 5 && actual[1] == 1 &&
+                 buffer[0] == 'h' && buffer[4] == 'o');
+  CHECK(119, sys(CROI_SYS_OBJECT_SIGNAL, handles[0], 0, SIGNALED, 0, 0) == 0 &&
+                 (wait_for(event, SIGNALED, 1000000000) & SIGNALED));
+  CHECK(120, !(wait_for(b, CROI_SIGNAL_READABLE, 0) & CROI_SIGNAL_READABLE));
+  // Refusals: the channel itself; a handle without TRANSFER (it stays).
+  CHECK(121, chan_write(a, "x", 1, &a, 1) == ERR_NOT_SUPPORTED);
+  uint32_t no_transfer = 0;
+  CHECK(122, sys(CROI_SYS_HANDLE_DUPLICATE, event, RIGHT_WAIT, (uint64_t)&no_transfer, 0, 0) == 0 &&
+                 chan_write(a, "x", 1, &no_transfer, 1) == ERR_ACCESS_DENIED &&
+                 sys(CROI_SYS_HANDLE_CLOSE, no_transfer, 0, 0, 0, 0) == 0);
+  // Peer closed: signal, writes refused, reads drain then refuse.
+  CHECK(123, chan_write(a, "bye", 3, 0, 0) == 0 && sys(CROI_SYS_HANDLE_CLOSE, a, 0, 0, 0, 0) == 0);
+  CHECK(124, wait_for(b, CROI_SIGNAL_PEER_CLOSED, 1000000000) & CROI_SIGNAL_PEER_CLOSED);
+  CHECK(125, chan_write(b, "x", 1, 0, 0) == ERR_PEER_CLOSED);
+  CHECK(126, chan_read(b, buffer, handles, sizeof buffer, 4, actual) == 0 && actual[0] == 3);
+  CHECK(127, chan_read(b, buffer, handles, sizeof buffer, 4, actual) == ERR_PEER_CLOSED);
+  sys(CROI_SYS_HANDLE_CLOSE, b, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, handles[0], 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, event, 0, 0, 0, 0);
+
+  // Eventpairs.
+  uint32_t p = 0, q = 0;
+  CHECK(128, sys(CROI_SYS_EVENTPAIR_CREATE, 0, (uint64_t)&p, (uint64_t)&q, 0, 0) == 0);
+  CHECK(129, sys(CROI_SYS_OBJECT_SIGNAL_PEER, p, 0, SIGNALED, 0, 0) == 0 && (wait_for(q, SIGNALED, 1000000000) & SIGNALED));
+  CHECK(130, sys(CROI_SYS_HANDLE_CLOSE, p, 0, 0, 0, 0) == 0 &&
+                 (wait_for(q, CROI_SIGNAL_PEER_CLOSED, 1000000000) & CROI_SIGNAL_PEER_CLOSED));
+  sys(CROI_SYS_HANDLE_CLOSE, q, 0, 0, 0, 0);
+
+  // Calls to a server thread; the client on a deadline profile lends it.
+  uint32_t client = 0, served = 0;
+  CHECK(131, sys(CROI_SYS_CHANNEL_CREATE, 0, (uint64_t)&client, (uint64_t)&served, 0, 0) == 0);
+  uint32_t server_thread = start_thread(s, server, served);
+  int donating = sys(CROI_SYS_TEST_PROFILE, 1, 0, 0, 0, 0) == 0;
+  CHECK(132, donating && sys(CROI_SYS_TEST_PROFILE, 0, 0, 0, 0, 0) == 1);
+  uint32_t request[2] = {0, 41}, reply[4] = {0, 0, 0, 0};
+  croi_channel_call_args_t args = {(uint64_t)request, 0, (uint64_t)reply, 0, sizeof request, 0, sizeof reply, 0};
+  uint32_t got_bytes = 0, got_handles = 0;
+  for (int i = 0; i < 3; i++) {
+    request[1] = 41 + (uint32_t)i;
+    CHECK(133, sys6(CROI_SYS_CHANNEL_CALL, client, 0, now_ns() + 2000000000ull, (uint64_t)&args, (uint64_t)&got_bytes,
+                    (uint64_t)&got_handles) == 0 && got_bytes == 12 && reply[1] == 42 + (uint32_t)i &&
+                   (reply[0] & 0x80000000u));
+    CHECK(134, reply[2] == 1);  // the server ran on our deadline
+  }
+  uint32_t last_txid = reply[0];
+  CHECK(135, sys(CROI_SYS_TEST_PROFILE, 2, 0, 0, 0, 0) == 0);
+  CHECK(136, sys6(CROI_SYS_CHANNEL_CALL, client, 0, now_ns() + 2000000000ull, (uint64_t)&args, (uint64_t)&got_bytes,
+                  (uint64_t)&got_handles) == 0 && reply[2] == 0);  // fair caller: nothing lent
+  // A call that times out; its reply then arrives as an ordinary message.
+  CHECK(137, sys6(CROI_SYS_CHANNEL_CALL, client, 0, now_ns(), (uint64_t)&args, (uint64_t)&got_bytes,
+                  (uint64_t)&got_handles) == ERR_TIMED_OUT);
+  CHECK(138, (wait_for(client, CROI_SIGNAL_READABLE, 1000000000) & CROI_SIGNAL_READABLE) &&
+                 chan_read(client, buffer, handles, sizeof buffer, 4, actual) == 0 && actual[0] == 12);
+  uint32_t quit[2] = {0, 0x74697571};
+  CHECK(139, chan_write(client, quit, sizeof quit, 0, 0) == 0);
+  CHECK(144, wait_for(server_thread, CROI_SIGNAL_TASK_TERMINATED, 2000000000) & CROI_SIGNAL_TASK_TERMINATED);
+  croi_info_handle_basic_t ic = {};
+  sys(CROI_SYS_OBJECT_GET_INFO, client, CROI_INFO_HANDLE_BASIC, (uint64_t)&ic, sizeof ic, 0);
+  uint64_t channel_id = ic.koid < ic.related_koid ? ic.koid : ic.related_koid;
+  sys(CROI_SYS_HANDLE_CLOSE, client, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, served, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, server_thread, 0, 0, 0, 0);
+
+  // A call whose peer closes while it waits.
+  uint32_t x = 0, y = 0;
+  CHECK(145, sys(CROI_SYS_CHANNEL_CREATE, 0, (uint64_t)&x, (uint64_t)&y, 0, 0) == 0);
+  uint64_t slot[2] = {x, 1};
+  uint32_t caller = start_thread(s, lonely_caller, (uint64_t)slot);
+  sys(CROI_SYS_NANOSLEEP, now_ns() + 3000000, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, y, 0, 0, 0, 0);
+  CHECK(146, (wait_for(caller, CROI_SIGNAL_TASK_TERMINATED, 2000000000) & CROI_SIGNAL_TASK_TERMINATED) &&
+                 (int64_t)slot[1] == ERR_PEER_CLOSED);
+  sys(CROI_SYS_HANDLE_CLOSE, caller, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, x, 0, 0, 0, 0);
+
+  sys(CROI_SYS_TEST_REPORT, croi_flow_id(channel_id, last_txid), 0, 0, 0, 0);
+  return 0x600D;
+}
+
 // Mode 4: something to sample. Three frames deep, spin for `ns`, with a
 // clock syscall every 64 iterations (so some samples land in the kernel
 // and must continue into these frames).
@@ -461,6 +631,7 @@ __attribute__((section(".text.start"))) [[noreturn]] void _start(uint64_t mode, 
             : mode == 4 ? (spin1(handle) > 2 ? 0x600D : 1)
             : mode == 5 ? pmu()
             : mode == 6 ? processes((const startup_t *)handle)
+            : mode == 7 ? ipc((const startup_t *)handle)
             : mode >= 0x400 ? child((uint32_t)mode, handle, vdso_base)
                         : objects());
 }

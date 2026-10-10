@@ -72,9 +72,11 @@ enum ObjectType: UInt32 {
     case process = 1
     case thread = 2
     case vmo = 3
+    case channel = 4
     case event = 5
     case port = 6
     case resource = 15
+    case eventpair = 16
     case job = 17
     case vmar = 18
 }

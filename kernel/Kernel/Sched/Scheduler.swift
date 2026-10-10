@@ -164,7 +164,14 @@ enum Scheduler {
     private static func idleLoop() -> Never {
         let me = Int(Cpu.current)
         while true {
+            // Freeing a dead thread's stack unmaps kernel memory, which
+            // waits for TLB shootdowns while holding vmLock: reap with
+            // interrupts on, or two reaping CPUs deadlock (one holds the
+            // lock waiting for the other's acknowledgement, the other
+            // spins on the lock with interrupts masked).
+            arch_interrupts_enable()
             reapZombies()
+            _ = arch_interrupts_save()
             lock.lockMasked()
             refreshEligibility(me, Clock.now())
             // Loop: coming back here, `finishSwitch` may have just made a
@@ -575,6 +582,51 @@ enum Scheduler {
 
     static func effectiveProfile(of thread: ThreadPointer) -> Profile {
         locked { thread.pointee.effective }
+    }
+
+    // MARK: Donation (ext 2)
+
+    /// Makes `owner` (nil: nobody) the owner of `queue`, whose waiters then
+    /// lend it their profiles, as a mutex holder's do: a channel call's
+    /// caller waits on such a queue, owned by the server that received
+    /// the call until it replies. Refused (false) if it would close a
+    /// cycle. Lock held.
+    @discardableResult
+    static func setOwner(_ queue: QueuePointer, _ owner: ThreadPointer?) -> Bool {
+        if let owner {
+            var cursor: ThreadPointer? = owner
+            for _ in 0..<1024 {
+                guard let thread = cursor else { break }
+                var waiter = queue.pointee.head
+                while let w = waiter {
+                    if w == thread { return false }
+                    waiter = w.pointee.next
+                }
+                guard thread.pointee.state == .blocked, let next = thread.pointee.waitQueue else { break }
+                cursor = next.pointee.owner
+            }
+        }
+        if let old = queue.pointee.owner {
+            removeOwned(queue, from: old)
+            updateEffectiveProfile(old)
+        }
+        if let owner {
+            addOwned(queue, to: owner)
+            updateEffectiveProfile(owner)
+        }
+        return true
+    }
+
+    /// Gives up every queue the running thread owns (a user thread exiting
+    /// mid-call: its callers keep waiting, without lending to it).
+    static func dropOwnership() {
+        locked {
+            let me = cpus[Int(Cpu.current)].current!
+            while let queue = me.pointee.ownedQueues {
+                removeOwned(queue, from: me)
+            }
+            updateEffectiveProfile(me)
+        }
     }
 
     // MARK: Mutex

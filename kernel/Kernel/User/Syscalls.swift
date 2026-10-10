@@ -129,6 +129,7 @@ enum Syscalls {
         case 1: return write(a[0], a[1])
         case 2: Processes.exitThread(Int(Int64(bitPattern: a[0])))
         case 63: Processes.exitProcess(Int64(bitPattern: a[0]))  // process_exit: no handles needed
+        case 6: return TestHooks.profile(a[0])
         case 3: return Int64(bitPattern: Clock.now())
         case 4:
             Scheduler.sleepInterruptible(until: a[0])
@@ -230,6 +231,8 @@ enum Syscalls {
             try pmuConfigure(table, handle, a)
         case 60...79:
             try taskCall(number, a, table)
+        case 80...89:
+            try ipcCall(number, a, table)
         default:
             throw .notSupported
         }
@@ -372,5 +375,28 @@ enum UserCopy {
     @unsafe static func to(_ destination: UInt64, _ source: UnsafeRawPointer, _ length: UInt64) -> Int32 {
         guard length == 0 || UserLayout.contains(destination, length) else { return -1 }
         return unsafe arch_copy_to_user(destination, source, length)
+    }
+}
+
+/// Test-only syscall 6 (`test_profile`), until profiles are objects:
+/// op 0 reports whether the calling thread's effective profile is a
+/// deadline one (1) or fair (0); op 1 binds the caller to the deadline
+/// context a kernel self-test provided; op 2 unbinds it.
+enum TestHooks {
+    nonisolated(unsafe) static var deadlineContext: SchedContextPointer? = nil
+
+    static func profile(_ op: UInt64) -> Int64 {
+        let me = Scheduler.current
+        switch op {
+        case 0: return Scheduler.effectiveProfile(of: me).discipline == .deadline ? 1 : 0
+        case 1:
+            guard let context = deadlineContext else { return Int64(Status.badState.rawValue) }
+            Scheduler.bind(me, context)
+            return 0
+        case 2:
+            Scheduler.bind(me, nil)
+            return 0
+        default: return Int64(Status.invalidArgs.rawValue)
+        }
     }
 }

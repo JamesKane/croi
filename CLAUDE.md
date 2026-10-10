@@ -349,6 +349,32 @@ Processes (K7a, Kernel/Object/Process.swift, include/task.h, syscalls
   (`VmError.dead`). User code has `croi_syscall6`.
 - Lock order: job -> process -> thread object -> scheduler.
 
+Channels (K7b, Kernel/Object/Channel.swift, include/ipc.h, syscalls 80-86
+in User/IpcSyscalls.swift):
+- Channel (4) and eventpair (16) endpoints share a `PeerShared` (lock,
+  channel id = smaller koid); peers link without references and reach
+  each other with `ObjectPointer.tryRetain`. Messages (bytes up to 64
+  KiB, up to 64 handles) are one heap block owning a reference per
+  handle; writes move handles out of the table only after every check
+  (TRANSFER, not the channel itself, no repeats). Closing an endpoint
+  raises PEER_CLOSED on the peer, ends calls waiting on it, and frees
+  unread messages outside the lock. READABLE/WRITABLE/PEER_CLOSED are
+  object signals, so waits and ports see them.
+- `channel_call`: the kernel writes a txid (high bit set) into the first
+  four bytes; a write whose txid matches a pending call on the peer goes
+  straight to that caller. Ext 2 donation: the thread that reads a call
+  becomes the owner of the caller's call-record queue
+  (`Scheduler.setOwner`, refused if it would close a cycle), so K3b
+  inheritance lends it the caller's profile until the reply; an exiting
+  thread drops what it owns (`dropOwnership`). `channel_read` packs its
+  capacities (bytes | handles << 32) and actuals.
+- `ipc` trace: CHANNEL_WRITE/READ and DONATE records carry
+  `croi_flow_id(channel id, txid)` (ipc.h, splitmix64 finalizer), which
+  user space computes from `object_get_info(HANDLE_BASIC)` koids and the
+  txid, so a call and its reply share one flow.
+- Test-only syscall 6 (`TestHooks.profile`): bind to / report a deadline
+  context a self-test provides, until profiles are objects.
+
 ACPI (`Kernel/Acpi/`, after Zircon's acpi_lite): `AcpiTables` validates
 RSDP/XSDT and finds tables by signature; `withPhysicalBytes` reads through
 the physmap or a temporary mapping. `Madt.forEachCpu` yields local APIC /
@@ -415,6 +441,14 @@ the deadline (a second read past it wrapped the delta and fired a due
 timer 68.7 s late; the time self-test arms 200 already-due timers).
 `Scheduler.dump` shows each CPU's pending timers, what the hardware is
 armed for, interrupt counts, and on amd64 the dumping CPU's ISR/IRR/LVTT.
+For lockups, `qemu.sh --registers-on 'ipi mailbox|PANIC'` prints every
+CPU's PC and frame-pointer backtrace when the deadman dump (or a panic)
+appears (`qemu-monitor.py backtrace`; symbolize with llvm-symbolizer).
+Anything that frees or unmaps kernel memory may wait for TLB-shootdown
+acknowledgements while holding vmLock, so it must run with interrupts on:
+the idle loop reaps dead threads (freeing their stacks) with interrupts
+enabled. Reaping masked deadlocked two reaping CPUs (the sched self-test
+stresses it: 6 of 6 KVM boots hung before the fix).
 `lib/rt/int128.c` supplies `__udivti3`/`__umodti3`, which
 `dividingFullWidth` needs (there is no compiler-rt).
 

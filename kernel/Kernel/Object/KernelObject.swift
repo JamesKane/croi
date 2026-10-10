@@ -37,6 +37,19 @@ struct ObjectHeader: ~Copyable {
     }
 
     /// Drops a reference; the last destroys the object (by type).
+    /// Takes a reference unless the object is already on its way out
+    /// (count 0): for references found through a non-owning link.
+    func tryRetain() -> Bool {
+        var current = header.references.load(ordering: .relaxed)
+        while current > 0 {
+            let (exchanged, original) = header.references.compareExchange(
+                expected: current, desired: current + 1, ordering: .acquiring)
+            if exchanged { return true }
+            current = original
+        }
+        return false
+    }
+
     func release() {
         guard header.references.subtract(1, ordering: .acquiringAndReleasing).newValue == 0 else { return }
         guard header.observers == nil else { panic("object: destroyed with waits registered") }
@@ -97,6 +110,8 @@ enum Objects {
         case .process: Processes.destroyProcess(object)
         case .thread: Processes.destroyThread(object)
         case .vmar: Processes.destroyVmar(object)
+        case .channel: Channels.destroy(object)
+        case .eventpair: Channels.destroyEventPair(object)
         case .none: panic("object: destroying an untyped object")
         }
         live.subtract(1, ordering: .relaxed)

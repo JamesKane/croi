@@ -399,6 +399,7 @@ enum Processes {
             thread.pointee.thread = 0
         }
         object.updateSignals(clear: Signals.threadRunning, set: Signals.taskTerminated)
+        Scheduler.dropOwnership()  // calls it received and never answered
         let process = thread.pointee.process
         if exitBookkeeping(process: process) {
             Scheduler.setAspace(nil)  // off its tables before they go

@@ -1,22 +1,27 @@
 #!/usr/bin/env bash
 # Boot a croi EFI system partition under QEMU with edk2 firmware.
 #
-#   qemu.sh [--test <text>] [--screendump <file.ppm>] <amd64|arm64|rv64> <esp-dir> <work-dir> <edk2-dir> [qemu args...]
+#   qemu.sh [--test <text>] [--screendump <file.ppm>] [--registers-on <text>] <amd64|arm64|rv64> <esp-dir> <work-dir> <edk2-dir> [qemu args...]
 #
 # The ESP directory is served as a virtual FAT drive. Writable firmware
 # variable stores are copied into <work-dir> on first use. With --test the
 # run is headless and console output is copied to stdout; it succeeds as
 # soon as a line containing <text> appears and fails after a timeout. With
 # --screendump (test mode only) the display is saved as a PPM at that point.
+# With --registers-on (test mode only), the first line containing that text
+# prints every CPU's PC and frame-pointer backtrace (qemu-monitor.py): where
+# each CPU is when a lockup is reported. Alternatives are separated by '|'.
 
 set -euo pipefail
 
 expect=
 screendump=
+registers_on=
 while [[ ${1:-} == --* ]]; do
   case $1 in
     --test) expect=${2:?--test needs the text to wait for}; shift 2 ;;
     --screendump) screendump=${2:?--screendump needs a file}; shift 2 ;;
+    --registers-on) registers_on=${2:?--registers-on needs the text to wait for}; shift 2 ;;
     *) echo "qemu.sh: unknown option $1" >&2; exit 2 ;;
   esac
 done
@@ -74,7 +79,7 @@ qemu+=(-m 512M -smp 4 -net none "${disk[@]}")
 
 if [[ -n $expect ]]; then
   monitor=(-monitor none)
-  if [[ -n $screendump ]]; then
+  if [[ -n $screendump || -n $registers_on ]]; then
     socket=$work/monitor.sock
     rm -f "$socket"
     monitor=(-monitor "unix:$socket,server=on,wait=off")
@@ -83,6 +88,16 @@ if [[ -n $expect ]]; then
   status=1
   while IFS= read -r line <&"${vm[0]}"; do
     printf '%s\n' "$line"
+    if [[ -n $registers_on ]]; then
+      IFS='|' read -ra triggers <<< "$registers_on"
+      for trigger in "${triggers[@]}"; do
+        if [[ $line == *"$trigger"* ]]; then
+          python3 -I "$(dirname "$0")/qemu-monitor.py" "$socket" backtrace || true
+          registers_on=
+          break
+        fi
+      done
+    fi
     if [[ $line == *"$expect"* ]]; then
       status=0
       if [[ -n $screendump ]]; then
