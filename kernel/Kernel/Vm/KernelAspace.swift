@@ -99,9 +99,11 @@ struct KernelAspace: ~Copyable {
     /// Maps `size` bytes of physical memory at `phys` (both page aligned)
     /// into the dynamic range. Returns the virtual base.
     /// Device registers mapped here are the kernel's: no resource may
-    /// grant them (`RootFilter`).
-    mutating func mapPhysical(_ phys: UInt64, size: UInt64, _ attributes: MapAttributes) throws(VmError) -> UInt64 {
-        if attributes.cache == .device { RootFilter.recordKernelMmio(phys, size) }
+    /// grant them (`RootFilter`), unless `shared` (registers a driver owns
+    /// that the kernel also touches, such as an MSI-X table).
+    mutating func mapPhysical(_ phys: UInt64, size: UInt64, _ attributes: MapAttributes,
+                              shared: Bool = false) throws(VmError) -> UInt64 {
+        if attributes.cache == .device, !shared { RootFilter.recordKernelMmio(phys, size) }
         return try vmLock.withLock { () throws(VmError) -> UInt64 in
             let (base, index) = try findGap(size: size, alignment: KernelLayout.pageSize)
             do throws(VmError) {

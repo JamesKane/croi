@@ -70,15 +70,34 @@ extension Syscalls {
             }
         case 131, 132:  // ioports_request / ioports_release(resource, io_addr, len): amd64
             try IoPorts.change(table, resource: handle, base: a[1], count: a[2], allow: number == 131)
-        case 140...146:
+        case 140...148:
             try interruptCall(number, a, table)
         default:
             throw .notSupported
         }
     }
 
-    /// Interrupt objects (K9c; values in interrupt.h): Zircon's calls and
-    /// rights, plus interrupt_set_affinity.
+    /// A new object's handle written to `address` (the object released if
+    /// it can't be added, the handle closed if it can't be written).
+    private static func addAndPut(_ object: ObjectPointer, rights: Rights, _ address: UInt64,
+                                  _ table: borrowing HandleTable) throws(Status) {
+        let value: UInt32
+        do throws(Status) {
+            value = try table.add(object, rights: rights)
+        } catch {
+            object.release()
+            throw error
+        }
+        do throws(Status) {
+            try put(value, address)
+        } catch {
+            try? table.close(value)
+            throw error
+        }
+    }
+
+    /// Interrupt objects (K9c) and MSI (K9d; values in interrupt.h):
+    /// Zircon's calls and rights, plus interrupt_set_affinity.
     private static func interruptCall(_ number: UInt64, _ a: InlineArray<6, UInt64>,
                                       _ table: borrowing HandleTable) throws(Status) {
         let handle = UInt32(truncatingIfNeeded: a[0])
@@ -94,19 +113,7 @@ extension Syscalls {
                 try Resources.validate(table, handle, kind: UInt32(CROI_RSRC_KIND_IRQ), base: a[1], size: 1)
                 object = try InterruptObjects.create(number: UInt32(a[1]), options: options)
             }
-            let value: UInt32
-            do throws(Status) {
-                value = try table.add(object, rights: InterruptObject.defaultRights)
-            } catch {
-                object.release()
-                throw error
-            }
-            do throws(Status) {
-                try put(value, a[3])
-            } catch {
-                try? table.close(value)
-                throw error
-            }
+            try addAndPut(object, rights: InterruptObject.defaultRights, a[3], table)
         case 141:  // interrupt_bind(interrupt, port, key, options)
             guard a[3] == UInt64(CROI_INTERRUPT_BIND) || a[3] == UInt64(CROI_INTERRUPT_UNBIND) else {
                 throw .invalidArgs
@@ -133,6 +140,20 @@ extension Syscalls {
             try InterruptObjects.trigger(try table.get(handle, type: .interrupt, rights: .signal).object, timestamp: a[2])
         case 146:  // interrupt_set_affinity(interrupt, cpu mask)
             try InterruptObjects.setAffinity(try table.get(handle, type: .interrupt, rights: .write).object, mask: a[1])
+        case 147:  // msi_allocate(MSI resource, count, out)
+            try check(a[2], MemoryLayout<UInt32>.size)
+            try Resources.check(table, handle, system: UInt64(CROI_RSRC_SYSTEM_MSI_BASE))
+            guard a[1] <= UInt64(UInt32.max) else { throw .invalidArgs }
+            try addAndPut(try Msis.allocate(count: UInt32(a[1])), rights: MsiObject.defaultRights, a[2], table)
+        case 148:  // msi_create(allocation, options, id, vmo, vmo_offset, out)
+            try check(a[5], MemoryLayout<UInt32>.size)
+            let allocation = try table.get(handle, type: .msi)
+            let vmo = try table.get(UInt32(truncatingIfNeeded: a[3]), type: .vmo, rights: .map)
+            guard a[2] <= UInt64(UInt32.max) else { throw .invalidArgs }
+            let object = try MsiInterrupts.create(allocation.object, options: UInt32(truncatingIfNeeded: a[1]),
+                                                  id: UInt32(a[2]), vmo: VmoPointer(address: UnsafeVmoObject(vmo.object).vmo),
+                                                  offset: a[4])
+            try addAndPut(object, rights: InterruptObject.defaultRights, a[5], table)
         default:
             throw .notSupported
         }

@@ -34,6 +34,13 @@ enum DeviceIrqs {
         unsafe raw.initializeMemory(as: UInt8.self, repeating: 0, count: count * 9)
         unsafe handlers = raw.bindMemory(to: UInt64.self, capacity: count)
         unsafe lastCpus = (raw + count * 8).bindMemory(to: UInt8.self, capacity: count)
+        #if arch(x86_64)
+        let msiBytes = maxCpus * 8 + maxCpus * Int(msiVectorCount) * 8
+        guard let msi = unsafe heap.allocate(size: msiBytes) else { panic("irq: no memory for the MSI tables") }
+        unsafe msi.initializeMemory(as: UInt8.self, repeating: 0, count: msiBytes)
+        unsafe msiInUse = msi.bindMemory(to: UInt64.self, capacity: maxCpus)
+        unsafe msiHandlers = (msi + maxCpus * 8).bindMemory(to: UInt64.self, capacity: maxCpus * Int(msiVectorCount))
+        #endif
     }
 
     /// A number a driver may have: the controller has it and the kernel
@@ -135,6 +142,71 @@ enum DeviceIrqs {
             }
         }
     }
+
+    // MARK: MSI (K9d)
+
+    #if arch(x86_64)
+    /// Each CPU's MSI vectors: 0xB0..<0xF0 (the fixed ones are 0xF0 up).
+    static var msiFirstVector: UInt32 { 0xB0 }
+    static var msiVectorCount: UInt32 { 64 }
+    private static var maxCpus: Int { 64 }
+    /// Per CPU: a bit per vector in use; handlers by cpu * 64 + vector.
+    nonisolated(unsafe) private static var msiInUse: UnsafeMutablePointer<UInt64>? = nil
+    nonisolated(unsafe) private static var msiHandlers: UnsafeMutablePointer<UInt64>? = nil
+
+    /// `count` (a power of two) contiguous vectors on `cpu`, aligned to
+    /// `count` as multi-message MSI needs; the first, or nil.
+    static func allocateMsi(cpu: Int, count: UInt32) -> UInt32? {
+        tableLock.withLock { () -> UInt32? in
+            guard let inUse = unsafe msiInUse, cpu < maxCpus else { return nil }
+            let mask: UInt64 = count >= 64 ? ~0 : (1 << UInt64(count)) - 1
+            var first: UInt32 = 0
+            while first + count <= msiVectorCount {
+                if unsafe inUse[cpu] & (mask << UInt64(first)) == 0 {
+                    unsafe inUse[cpu] |= mask << UInt64(first)
+                    return msiFirstVector + first
+                }
+                first += count
+            }
+            return nil
+        }
+    }
+
+    static func freeMsi(cpu: Int, vector: UInt32, count: UInt32) {
+        tableLock.withLock {
+            guard let inUse = unsafe msiInUse else { return }
+            let mask: UInt64 = count >= 64 ? ~0 : (1 << UInt64(count)) - 1
+            unsafe inUse[cpu] &= ~(mask << UInt64(vector - msiFirstVector))
+        }
+    }
+
+    /// What a device writes to deliver `vector` to `cpu`: the local APIC
+    /// message address (physical destination) and data (fixed, edge).
+    /// Nil for an APIC ID MSI can't name without interrupt remapping.
+    static func msiMessage(cpu: Int, vector: UInt32) -> (address: UInt64, data: UInt32)? {
+        let apicId = unsafe UnsafePointer<PerCpu>(bitPattern: UInt(Smp.records[cpu]))!.pointee.hardwareId
+        guard apicId <= 0xFF else { return nil }
+        return (0xFEE0_0000 | apicId << 12, vector)
+    }
+
+    /// Installs `object` for `vector` on `cpu` (0 removes it). Once it
+    /// returns, no run of the previous handler is still going on.
+    static func setMsiHandler(cpu: Int, vector: UInt32, _ object: UInt64) {
+        tableLock.withLock {
+            guard let handlers = unsafe msiHandlers else { return }
+            unsafe handlers[cpu * Int(msiVectorCount) + Int(vector - msiFirstVector)] = object
+        }
+    }
+
+    /// An MSI arrived on this CPU (interrupt context, before EOI).
+    static func dispatchMsi(_ vector: UInt32) {
+        tableLock.withLock {
+            guard let handlers = unsafe msiHandlers else { return }
+            let object = unsafe handlers[Int(Cpu.current) * Int(msiVectorCount) + Int(vector - msiFirstVector)]
+            if object != 0 { InterruptObjects.fire(ObjectPointer(address: object)) }
+        }
+    }
+    #endif
 
     /// The CPU that last took `number` (boot test).
     static func lastCpu(_ number: UInt32) -> Int {

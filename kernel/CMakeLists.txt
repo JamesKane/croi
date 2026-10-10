@@ -49,6 +49,7 @@ add_library(kernel-swift OBJECT
   Kernel/Object/ProfileObject.swift
   Kernel/Object/Resource.swift
   Kernel/Object/InterruptObject.swift
+  Kernel/Object/MsiObject.swift
   Kernel/Object/ProcessSelfTest.swift
   Kernel/Object/VmoObject.swift
   Kernel/Object/ObjectSelfTest.swift

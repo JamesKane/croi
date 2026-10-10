@@ -101,6 +101,8 @@ enum : uint64_t {
   CROI_SYS_INTERRUPT_DESTROY = 144,  // (interrupt)
   CROI_SYS_INTERRUPT_TRIGGER = 145,  // (interrupt, options 0, timestamp): virtual only
   CROI_SYS_INTERRUPT_SET_AFFINITY = 146,  // (interrupt, uint64_t cpu mask): croi's
+  CROI_SYS_MSI_ALLOCATE = 147,       // (MSI resource, count, uint32_t *out)
+  CROI_SYS_MSI_CREATE = 148,         // (allocation, options, id, vmo, vmo_offset, uint32_t *out)
 };
 
 enum : uint32_t {  // timer_create options (Zircon's ZX_TIMER_SLACK_*)

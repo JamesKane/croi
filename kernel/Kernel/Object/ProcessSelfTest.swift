@@ -192,6 +192,12 @@ enum ProcessSelfTest {
         console.write(" by port and by wait, on CPU 1), wait wake ")
         console.write(decimal: Syscalls.reported.load(ordering: .relaxed) / 1000)
         console.write(" us median\n")
+        #if arch(x86_64)
+        console.write("  msi:    edu's MSI by port and by wait; virtio-blk MSI-X entries programmed, masked, ")
+        console.write("moved to CPU 1, cleared\n")
+        #else
+        console.write("  msi:    not supported yet (ITS / IMSIC)\n")
+        #endif
     }
 
     /// Live processes, address spaces and objects, to check nothing leaked.

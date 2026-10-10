@@ -30,6 +30,8 @@ struct InterruptObject: ~Copyable {
     /// Installed as its number's handler (a create that lost the race to
     /// another object isn't, and must not unregister it).
     var registered = false
+    /// An MSI's state (`MsiState` on the heap), or 0.
+    var msi: UInt64 = 0
     /// The bound port (holding a reference), or 0.
     var port: UInt64 = 0
     /// The packet it queues to that port (never allocated when firing).
@@ -112,6 +114,13 @@ enum InterruptObjects {
         return object
     }
 
+    /// An interrupt object for an MSI (MsiInterrupts.create attaches it).
+    /// MSIs are masked while delivered, as level interrupts are (Zircon's
+    /// UNMASK_PREWAIT | MASK_POSTWAIT).
+    static func makeForMsi() throws(Status) -> ObjectPointer {
+        try make(virtual: false, level: true, activeLow: false, number: 0)
+    }
+
     private static func make(virtual: Bool, level: Bool, activeLow: Bool,
                              number: UInt32) throws(Status) -> ObjectPointer {
         let packet = try QueuedPacketPointer.allocate(PortPacket(type: PortPacket.interrupt), source: Ports.interruptOwned)
@@ -137,6 +146,7 @@ enum InterruptObjects {
 
     private static func free(_ object: ObjectPointer) {
         let interrupt = InterruptPointer(object: object)
+        if interrupt.pointee.msi != 0 { MsiInterrupts.free(MsiStatePointer(address: interrupt.pointee.msi)) }
         interrupt.pointee.packet.free()
         interrupt.pointee.waiters.deallocate()
         Objects.free(object, as: InterruptObject.self)
@@ -153,7 +163,9 @@ enum InterruptObjects {
             return old
         }
         guard old != .destroyed else { return nil }
-        if interrupt.pointee.registered {
+        if interrupt.pointee.msi != 0 {
+            MsiInterrupts.detach(MsiStatePointer(address: interrupt.pointee.msi))
+        } else if interrupt.pointee.registered {
             DeviceIrqs.mask(interrupt.pointee.number)
             DeviceIrqs.unregister(interrupt.pointee.number)  // no handler running once it returns
         }
@@ -203,7 +215,7 @@ enum InterruptObjects {
             sendPacket(interrupt)
             interrupt.pointee.state = .needAck
         } else {
-            if interrupt.pointee.level { DeviceIrqs.mask(interrupt.pointee.number) }
+            if interrupt.pointee.level { maskSource(interrupt) }
             signal(interrupt)
             if interrupt.pointee.state != .needAck { interrupt.pointee.state = .triggered }
         }
@@ -214,7 +226,7 @@ enum InterruptObjects {
     private static func sendPacket(_ interrupt: InterruptPointer) -> Bool {
         let sent = Ports.queueInterrupt(PortPointer(object: ObjectPointer(address: interrupt.pointee.port)),
                                         interrupt.pointee.packet, timestamp: interrupt.pointee.timestamp)
-        if interrupt.pointee.level { DeviceIrqs.mask(interrupt.pointee.number) }
+        if interrupt.pointee.level { maskSource(interrupt) }
         interrupt.pointee.timestamp = 0
         return sent
     }
@@ -225,6 +237,24 @@ enum InterruptObjects {
         Scheduler.locked {
             interrupt.pointee.signaled = true
             Scheduler.wakeAll(interrupt.pointee.waiters)
+        }
+    }
+
+    /// Masks / unmasks where it comes from: its controller pin, or its
+    /// MSI-X entry or MSI mask bit. Object lock held.
+    private static func maskSource(_ interrupt: InterruptPointer) {
+        if interrupt.pointee.msi != 0 {
+            MsiInterrupts.setMasked(MsiStatePointer(address: interrupt.pointee.msi), true)
+        } else {
+            DeviceIrqs.mask(interrupt.pointee.number)
+        }
+    }
+
+    private static func unmaskSource(_ interrupt: InterruptPointer) {
+        if interrupt.pointee.msi != 0 {
+            MsiInterrupts.setMasked(MsiStatePointer(address: interrupt.pointee.msi), false)
+        } else {
+            DeviceIrqs.unmask(interrupt.pointee.number)
         }
     }
 
@@ -284,7 +314,7 @@ enum InterruptObjects {
             guard interrupt.pointee.state != .destroyed else { throw .canceled }
             var retriggered = false
             if interrupt.pointee.state == .needAck {
-                if interrupt.pointee.level { DeviceIrqs.unmask(interrupt.pointee.number) }
+                if interrupt.pointee.level { unmaskSource(interrupt) }
                 if interrupt.pointee.timestamp != 0 {
                     guard sendPacket(interrupt) else { throw .badState }  // the last one is still queued
                     retriggered = true
@@ -319,7 +349,7 @@ enum InterruptObjects {
                     return take(interrupt)
                 case .needAck:
                     if interrupt.pointee.timestamp != 0 { return take(interrupt) }
-                    if interrupt.pointee.level { DeviceIrqs.unmask(interrupt.pointee.number) }
+                    if interrupt.pointee.level { unmaskSource(interrupt) }
                 case .idle:
                     ()
                 case .waiting:
@@ -388,13 +418,18 @@ enum InterruptObjects {
         guard cpu >= 0 else { throw .invalidArgs }
         try object.header.lock.withLock { () throws(Status) in
             guard interrupt.pointee.state != .destroyed else { throw .canceled }
-            let number = interrupt.pointee.number
-            try DeviceIrqs.configure(number, level: interrupt.pointee.level, activeLow: interrupt.pointee.activeLow,
-                                     cpu: cpu)
-            // Masked by configure; open again unless it waits for an ack.
+            // Open again after the move unless it waits for an ack.
             let parked = interrupt.pointee.level && (interrupt.pointee.state == .needAck
                 || interrupt.pointee.state == .triggered)
-            if !parked { DeviceIrqs.unmask(number) }
+            if interrupt.pointee.msi != 0 {
+                try MsiInterrupts.retarget(MsiStatePointer(address: interrupt.pointee.msi), object, cpu: cpu,
+                                           masked: parked)
+            } else {
+                let number = interrupt.pointee.number
+                try DeviceIrqs.configure(number, level: interrupt.pointee.level,
+                                         activeLow: interrupt.pointee.activeLow, cpu: cpu)
+                if !parked { DeviceIrqs.unmask(number) }  // configure masked it
+            }
             interrupt.pointee.affinity = mask
             interrupt.pointee.cpu = cpu
         }

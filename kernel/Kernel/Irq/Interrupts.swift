@@ -82,6 +82,8 @@ enum Interrupts {
             unsafe Pmu.handleOverflow(frame)
         case UInt64(IoApic.firstVector)..<UInt64(IoApic.firstVector + IoApic.gsiLimit):
             DeviceIrqs.dispatch(UInt32(vector) - IoApic.firstVector)
+        case UInt64(DeviceIrqs.msiFirstVector)..<UInt64(DeviceIrqs.msiFirstVector + DeviceIrqs.msiVectorCount):
+            DeviceIrqs.dispatchMsi(UInt32(vector))
         default:
             unexpected(vector)
         }

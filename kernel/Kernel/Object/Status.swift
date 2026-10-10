@@ -86,4 +86,5 @@ enum ObjectType: UInt32 {
     case timer = 22
     case profile = 25
     case exception = 29
+    case msi = 32
 }

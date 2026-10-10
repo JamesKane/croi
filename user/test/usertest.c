@@ -1499,6 +1499,164 @@ static int64_t virtual_interrupts(const startup_t *s, uint32_t port) {
   return 0x600D;
 }
 
+// K9d: MSI. amd64: edu (00:10.0) delivers a real MSI (port and wait);
+// virtio-blk's MSI-X table (not enabled, so it never fires) shows the
+// kernel programming, masking and moving its entries. Elsewhere
+// msi_allocate is NOT_SUPPORTED until the ITS / IMSIC.
+#if defined(__x86_64__)
+#define ECAM 0xE0000000ull
+// A physical VMO over [base, base + size) under the root resource, and a
+// read/write uncached mapping of it.
+static uint32_t physical_vmo(const startup_t *s, uint64_t base, uint64_t size, volatile uint8_t **at) {
+  uint32_t vmo = 0;
+  uint64_t address = 0;
+  CHECK(280, sys(CROI_SYS_VMO_CREATE_PHYSICAL, s->resource, base, size, (uint64_t)&vmo, 0) == 0 &&
+                 sys6(CROI_SYS_VMAR_MAP, s->vmar | (uint64_t)(CROI_VM_PERM_READ | CROI_VM_PERM_WRITE) << 32, 0, vmo,
+                      0, size, (uint64_t)&address) == 0);
+  *at = (volatile uint8_t *)address;
+  return vmo;
+}
+
+static uint32_t cfg32(volatile uint8_t *cfg, uint32_t offset) { return *(volatile uint32_t *)(cfg + offset); }
+static void cfg32_write(volatile uint8_t *cfg, uint32_t offset, uint32_t value) {
+  *(volatile uint32_t *)(cfg + offset) = value;
+}
+
+// The offset of capability `id` in a function's config space, or 0.
+static uint32_t capability(volatile uint8_t *cfg, uint8_t id) {
+  if (!(cfg[6] & 0x10)) return 0;
+  for (uint32_t at = cfg[0x34] & 0xFC, n = 0; at != 0 && n < 48; at = cfg[at + 1] & 0xFC, n++) {
+    if (cfg[at] == id) return at;
+  }
+  return 0;
+}
+
+// A memory BAR's address (32 or 64-bit).
+static uint64_t bar(volatile uint8_t *cfg, uint32_t index) {
+  uint32_t low = cfg32(cfg, 0x10 + 4 * index);
+  uint64_t address = low & ~0xFull;
+  if (((low >> 1) & 3) == 2) address |= (uint64_t)cfg32(cfg, 0x14 + 4 * index) << 32;
+  return address;
+}
+
+static int64_t msi_test(const startup_t *s, uint32_t port) {
+  volatile uint8_t *bus = 0;
+  uint32_t bus_vmo = physical_vmo(s, ECAM, 32 * 0x8000, &bus);  // bus 0, devices 0-31, function 0
+  volatile uint8_t *edu = bus + (0x10 << 15);
+  CHECK(281, cfg32(edu, 0) == 0x11e81234);
+  cfg32_write(edu, 4, cfg32(edu, 4) | 1u << 1 | 1u << 2 | 1u << 10);  // memory, bus master, no INTx
+  uint32_t cap = capability(edu, 0x05);
+  CHECK(282, cap != 0);
+
+  // Allocations: the MSI resource; a power of two up to 32.
+  uint32_t msi = 0, tracing = 0, intr = 0, other = 0, anon = 0;
+  CHECK(283, resource_create(s->resource, CROI_RSRC_KIND_SYSTEM, CROI_RSRC_SYSTEM_TRACING_BASE, 1, &tracing) == 0 &&
+                 sys(CROI_SYS_MSI_ALLOCATE, tracing, 1, (uint64_t)&msi, 0, 0) == ERR_OUT_OF_RANGE &&
+                 sys(CROI_SYS_MSI_ALLOCATE, s->resource, 3, (uint64_t)&msi, 0, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_MSI_ALLOCATE, s->resource, 64, (uint64_t)&msi, 0, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_MSI_ALLOCATE, s->resource, 1, (uint64_t)&msi, 0, 0) == 0);
+  sys(CROI_SYS_HANDLE_CLOSE, tracing, 0, 0, 0, 0);
+  croi_info_msi_t info = {};
+  CHECK(284, sys(CROI_SYS_OBJECT_GET_INFO, msi, CROI_INFO_MSI, (uint64_t)&info, sizeof info, 0) == 0 &&
+                 (info.target_addr & ~0xFF000ull) == 0xFEE00000 && info.target_data == info.base_irq_id &&
+                 info.base_irq_id >= 0xB0 && info.base_irq_id < 0xF0 && info.num_irq == 1 &&
+                 info.interrupt_count == 0);
+  // Interrupt objects: the capability must be MSI's; ids once each.
+  CHECK(285, sys(CROI_SYS_VMO_CREATE, PAGE, 0, (uint64_t)&anon, 0, 0) == 0 &&
+                 sys6(CROI_SYS_MSI_CREATE, msi, 0, 0, anon, 0, (uint64_t)&intr) == ERR_INVALID_ARGS &&
+                 sys6(CROI_SYS_MSI_CREATE, msi, 0, 0, bus_vmo, 0x10 << 15, (uint64_t)&intr) == ERR_INVALID_ARGS &&
+                 sys6(CROI_SYS_MSI_CREATE, msi, 0, 1, bus_vmo, (0x10 << 15) + cap, (uint64_t)&intr) ==
+                     ERR_INVALID_ARGS &&
+                 sys6(CROI_SYS_MSI_CREATE, msi, 2, 0, bus_vmo, (0x10 << 15) + cap, (uint64_t)&intr) ==
+                     ERR_INVALID_ARGS &&
+                 sys6(CROI_SYS_MSI_CREATE, msi, 0, 0, bus_vmo, (0x10 << 15) + cap, (uint64_t)&intr) == 0 &&
+                 sys6(CROI_SYS_MSI_CREATE, msi, 0, 0, bus_vmo, (0x10 << 15) + cap, (uint64_t)&other) ==
+                     ERR_ALREADY_BOUND &&
+                 sys(CROI_SYS_OBJECT_GET_INFO, msi, CROI_INFO_MSI, (uint64_t)&info, sizeof info, 0) == 0 &&
+                 info.interrupt_count == 1 &&
+                 sys(CROI_SYS_INTERRUPT_SET_AFFINITY, intr, 2, 0, 0, 0) == ERR_NOT_SUPPORTED);
+  sys(CROI_SYS_HANDLE_CLOSE, anon, 0, 0, 0, 0);
+  // The driver programs the capability from the info and enables MSI.
+  uint16_t control = *(volatile uint16_t *)(edu + cap + 2);
+  cfg32_write(edu, cap + 4, (uint32_t)info.target_addr);
+  if (control & (1u << 7)) {
+    cfg32_write(edu, cap + 8, (uint32_t)(info.target_addr >> 32));
+    *(volatile uint16_t *)(edu + cap + 0xC) = (uint16_t)info.target_data;
+  } else {
+    *(volatile uint16_t *)(edu + cap + 8) = (uint16_t)info.target_data;
+  }
+  *(volatile uint16_t *)(edu + cap + 2) = (uint16_t)((control & ~(7u << 4)) | 1);  // one message, enabled
+
+  // edu raises an interrupt when 0x60 is written; it reaches the port...
+  volatile uint8_t *regs = 0;
+  uint32_t regs_vmo = physical_vmo(s, bar(edu, 0), PAGE, &regs);
+  volatile uint32_t *edu_regs = (volatile uint32_t *)regs;
+  edu_regs[1] = 0x12345678;  // liveness: reads back inverted
+  CHECK(286, edu_regs[1] == ~0x12345678u);
+  croi_port_packet_t p;
+  uint64_t before = now_ns();
+  CHECK(287, sys(CROI_SYS_INTERRUPT_BIND, intr, port, 77, CROI_INTERRUPT_BIND, 0) == 0);
+  edu_regs[0x60 / 4] = 1;
+  CHECK(288, port_next(port, 1000000000, &p) == 0 && p.type == CROI_PKT_TYPE_INTERRUPT && p.key == 77 &&
+                 p.payload[0] >= before && edu_regs[0x24 / 4] == 1);
+  edu_regs[0x64 / 4] = 1;
+  // ...and, unbound, a waiting thread.
+  uint64_t time = 0;
+  CHECK(289, sys(CROI_SYS_INTERRUPT_ACK, intr, 0, 0, 0, 0) == 0 && port_next(port, 20000000, &p) == ERR_TIMED_OUT &&
+                 sys(CROI_SYS_INTERRUPT_BIND, intr, port, 0, CROI_INTERRUPT_UNBIND, 0) == 0);
+  before = now_ns();
+  edu_regs[0x60 / 4] = 2;
+  CHECK(290, sys(CROI_SYS_INTERRUPT_WAIT, intr, (uint64_t)&time, 0, 0, 0) == 0 && time >= before);
+  edu_regs[0x64 / 4] = 2;
+  *(volatile uint16_t *)(edu + cap + 2) = control & ~1u;  // MSI off again
+  CHECK(291, sys(CROI_SYS_INTERRUPT_DESTROY, intr, 0, 0, 0, 0) == 0 && sys(CROI_SYS_HANDLE_CLOSE, intr, 0, 0, 0, 0) == 0);
+  sys(CROI_SYS_HANDLE_CLOSE, regs_vmo, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, msi, 0, 0, 0, 0);
+
+  // MSI-X: virtio-blk's table. Entries programmed from the allocation,
+  // unmasked; entry 1 moved to CPU 1 (QEMU's APIC IDs are CPU numbers);
+  // cleared and masked when the objects go.
+  volatile uint8_t *virtio = 0;
+  uint32_t msix = 0;
+  for (uint32_t device = 0; device < 32 && !virtio; device++) {
+    volatile uint8_t *cfg = bus + (device << 15);
+    if ((cfg32(cfg, 0) & 0xFFFF) == 0x1af4 && (msix = capability(cfg, 0x11)) != 0) virtio = cfg;
+  }
+  CHECK(292, virtio != 0 && (*(volatile uint16_t *)(virtio + msix + 2) & 0x7FF) >= 1);
+  cfg32_write(virtio, 4, cfg32(virtio, 4) | 1u << 1);
+  uint32_t table = cfg32(virtio, msix + 4);
+  uint64_t table_base = bar(virtio, table & 7) + (table & ~7u);
+  volatile uint8_t *entries = 0;
+  uint32_t table_vmo = physical_vmo(s, table_base & ~(PAGE - 1), PAGE, &entries);
+  volatile uint32_t *e = (volatile uint32_t *)(entries + (table_base & (PAGE - 1)));
+  uint32_t x0 = 0, x1 = 0;
+  CHECK(293, sys(CROI_SYS_MSI_ALLOCATE, s->resource, 2, (uint64_t)&msi, 0, 0) == 0 &&
+                 sys(CROI_SYS_OBJECT_GET_INFO, msi, CROI_INFO_MSI, (uint64_t)&info, sizeof info, 0) == 0 &&
+                 info.base_irq_id % 2 == 0 &&
+                 sys6(CROI_SYS_MSI_CREATE, msi, CROI_MSI_MODE_MSI_X, 0, table_vmo, table_base & (PAGE - 1),
+                      (uint64_t)&x0) == 0 &&
+                 sys6(CROI_SYS_MSI_CREATE, msi, CROI_MSI_MODE_MSI_X, 1, table_vmo, table_base & (PAGE - 1),
+                      (uint64_t)&x1) == 0);
+  CHECK(294, e[0] == (uint32_t)info.target_addr && e[1] == 0 && e[2] == info.target_data && (e[3] & 1) == 0 &&
+                 e[4] == (uint32_t)info.target_addr && e[6] == info.target_data + 1 && (e[7] & 1) == 0);
+  CHECK(295, sys(CROI_SYS_INTERRUPT_SET_AFFINITY, x1, 1u << 1, 0, 0, 0) == 0 && ((e[4] >> 12) & 0xFF) == 1 &&
+                 e[6] >= 0xB0 && e[6] < 0xF0 && (e[7] & 1) == 0 && e[0] == (uint32_t)info.target_addr);
+  CHECK(296, sys(CROI_SYS_HANDLE_CLOSE, x1, 0, 0, 0, 0) == 0 && e[4] == 0 && e[6] == 0 && (e[7] & 1) == 1 &&
+                 sys(CROI_SYS_HANDLE_CLOSE, x0, 0, 0, 0, 0) == 0 && e[0] == 0 && (e[3] & 1) == 1);
+  sys(CROI_SYS_HANDLE_CLOSE, table_vmo, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, msi, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, bus_vmo, 0, 0, 0, 0);
+  return 0x600D;
+}
+#else
+static int64_t msi_test(const startup_t *s, uint32_t port) {
+  (void)port;
+  uint32_t msi = 0;
+  CHECK(281, sys(CROI_SYS_MSI_ALLOCATE, s->resource, 1, (uint64_t)&msi, 0, 0) == ERR_NOT_SUPPORTED);
+  return 0x600D;
+}
+#endif
+
 static int64_t interrupts(const startup_t *s) {
   uint32_t port = 0, irq = 0, intr = 0, other = 0;
   croi_port_packet_t p;
@@ -1584,8 +1742,9 @@ static int64_t interrupts(const startup_t *s) {
                  sys(CROI_SYS_INTERRUPT_CREATE, irq, IRQ_NUMBER, 0, (uint64_t)&intr, 0) == 0 &&
                  sys(CROI_SYS_HANDLE_CLOSE, intr, 0, 0, 0, 0) == 0);
   sys(CROI_SYS_HANDLE_CLOSE, irq, 0, 0, 0, 0);
+  result = msi_test(s, port);
   sys(CROI_SYS_HANDLE_CLOSE, port, 0, 0, 0, 0);
-  return 0x600D;
+  return result;
 }
 
 // Mode 4: something to sample. Three frames deep, spin for `ns`, with a

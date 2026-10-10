@@ -632,6 +632,34 @@ User/DriverSyscalls.swift; Todhchai item 13):
   a thread elsewhere. QEMU's PLIC pends only on a rising line, so rv64
   skips the "acked while still asserted fires again" check.
 
+MSI, K9d (Kernel/Object/MsiObject.swift, DeviceIrqs MSI part,
+include/interrupt.h; syscalls 147 msi_allocate, 148 msi_create):
+- Zircon's model: an allocation object (type 32, rights BASIC) of `count`
+  (power of two, up to 32) contiguous vectors aligned to `count` on the
+  boot CPU, from the MSI system resource (base 11); ZX_INFO_MSI (28)
+  gives target address/data. `msi_create` makes interrupt object `id`:
+  MSI-X (option 1) programs the table entry in the VMO (physical,
+  uncached) and masks through its vector control; plain MSI checks the
+  capability (ID 5) and masks through per-vector mask bits if present;
+  the driver programs the capability itself. MSIs behave as level
+  interrupts (masked while delivered). Destroying an MSI-X object clears
+  and masks its entry.
+- amd64: vectors 0xB0..<0xF0 per CPU (`DeviceIrqs.allocateMsi`), handler
+  table by (CPU, vector), message 0xFEE00000 | APIC ID << 12 (IDs above
+  255 NOT_SUPPORTED until interrupt remapping). set_affinity moves an
+  MSI-X vector: a vector on the new CPU, the entry rewritten under its
+  mask, the old vector dropped; plain MSI is NOT_SUPPORTED (the driver
+  owns the capability). arm64 (ITS) and rv64 (IMSIC): NOT_SUPPORTED.
+- The kernel's mappings of MSI-X tables and capabilities are `shared`
+  (`mapPhysical(shared:)`): they don't enter the root filter's list of
+  kernel MMIO, so the driver keeps its resource over them.
+- Boot test (mode 11, amd64; QEMU gets `-device edu,addr=0x10`): edu's
+  MSI by port and by wait, with the driver programming the capability
+  from the info; virtio-blk's MSI-X table (MSI-X not enabled, so it never
+  fires) read back after create, a move to CPU 1, and close. KVM timing
+  note: channel_call in m2 reads 1.4-2.8 us when the host is busy
+  building; compare builds interleaved, not one after the other.
+
 ACPI (`Kernel/Acpi/`, after Zircon's acpi_lite): `AcpiTables` validates
 RSDP/XSDT and finds tables by signature; `withPhysicalBytes` reads through
 the physmap or a temporary mapping. `Madt.forEachCpu` yields local APIC /

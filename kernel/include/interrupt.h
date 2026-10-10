@@ -10,8 +10,21 @@
 // interrupt_set_affinity(interrupt, cpu mask) routes it to one CPU of the
 // mask (the lowest-numbered one taking interrupts); until it is called,
 // to the boot CPU. Statuses: INVALID_ARGS (no CPU of the mask takes
-// interrupts), NOT_SUPPORTED (virtual, or a CPU the controller can't
-// target), CANCELED (destroyed), ACCESS_DENIED (no WRITE right).
+// interrupts), NOT_SUPPORTED (virtual, plain MSI, or a CPU the controller
+// can't target), CANCELED (destroyed), ACCESS_DENIED (no WRITE right).
+//
+// MSI (K9d, Zircon's calls): msi_allocate(MSI system resource, count: a
+// power of two up to 32) gives an allocation (object type 32) of
+// contiguous vectors on the boot CPU; object_get_info(CROI_INFO_MSI) says
+// what the device must write. msi_create(allocation, options, id, vmo,
+// offset) makes interrupt object `id` of it: with CROI_MSI_MODE_MSI_X,
+// `vmo` holds the MSI-X table at `offset` and the kernel programs and
+// masks entry `id` (and moves it to another CPU on set_affinity);
+// without, `vmo` is the function's config space with the MSI capability
+// at `offset`, which the driver programs from the info (the kernel only
+// masks through per-vector masking if the capability has it). The VMO
+// must be physical and uncached. amd64 only so far (arm64 needs the ITS,
+// rv64 the IMSIC): NOT_SUPPORTED elsewhere.
 #pragma once
 #include <stdint.h>
 
@@ -41,4 +54,21 @@ enum : uint32_t {
 
   // A virtual interrupt's signal while neither triggered nor awaiting ack.
   CROI_VIRTUAL_INTERRUPT_UNTRIGGERED = 1u << 4,
+
+  // msi_create options.
+  CROI_MSI_MODE_MSI_X = 1,
+
+  // object_get_info topic on an MSI allocation.
+  CROI_INFO_MSI = 28,
 };
+
+// zx_info_msi_t.
+typedef struct {
+  uint64_t target_addr;      // the address the device writes
+  uint32_t target_data;      // the data for id 0; id n writes target_data + n
+  uint32_t base_irq_id;      // the first vector
+  uint32_t num_irq;
+  uint32_t interrupt_count;  // ids with an interrupt object
+} croi_info_msi_t;
+
+static_assert(sizeof(croi_info_msi_t) == 24);

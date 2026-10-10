@@ -110,6 +110,13 @@ extension Syscalls {
                 try put(croi_info_vmar_t(base: v.base, len: v.size), a[2])
                 return
             }
+            if a[1] == UInt64(CROI_INFO_MSI) {
+                guard a[3] >= UInt64(MemoryLayout<croi_info_msi_t>.size) else { throw .bufferTooSmall }
+                try check(a[2], MemoryLayout<croi_info_msi_t>.size)
+                let msi = try table.get(handle, type: .msi, rights: .inspect)
+                try put(Msis.info(msi.object), a[2])
+                return
+            }
             if a[1] == UInt64(CROI_INFO_RESOURCE) {
                 guard a[3] >= UInt64(MemoryLayout<croi_info_resource_t>.size) else { throw .bufferTooSmall }
                 try check(a[2], MemoryLayout<croi_info_resource_t>.size)

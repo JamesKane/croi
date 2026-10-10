@@ -38,7 +38,7 @@ real-time wake error p99 < 100 µs.
 | 11 | Job, process, thread, exceptions, job policy | **Done** (K7a, K7d) |
 | 12 | userboot + bootfs | **Done** (K8b) |
 | 18 (core) | ktrace rings, categories, user marks, tick and PMU sampling, per-thread PMU counters | **Done** (K3–K6, see "Trace" below) |
-| 13 | Resources, interrupt objects, MSI | **Partial**: resources and physical VMOs (K9a), interrupt objects (K9c). MSI is K9d |
+| 13 | Resources, interrupt objects, MSI | **Partial**: resources and physical VMOs (K9a), interrupt objects (K9c), MSI/MSI-X on amd64 (K9d). The GICv3 ITS and the IMSIC are left |
 | 14 | BTI/PMT and IOMMUs | Todo: a BTI without an IOMMU in K9e, IOMMUs after M3 |
 | 15–19 | FIFO/counter/stream/socket/clock/debuglog, pager, rings, debug syscalls | After M3, except debuglog (K8a) and exception channels (K7d). Item 17 needs nothing from croi |
 | 20 | Firmware data for user space (ACPI tables and op regions, GOP framebuffer) behind resources | **Done** (K9b) |
@@ -431,7 +431,11 @@ pinned DMA without a driver stack. The boot tests add it.
   APLIC/PLIC (QEMU virt with ACPI). Budget: IRQ to the driver thread
   running < 5 µs (Todhchai, on hardware; measured in QEMU from the irq
   and sched trace).
-- **K9d: MSI and MSI-X (item 13).** Zircon's `msi_allocate(resource
+- **K9d: MSI and MSI-X (item 13).** **Done on amd64** (2026-10-10):
+  as below, syscalls 147/148. Plain MSI's affinity is NOT_SUPPORTED (its
+  driver programs the capability; MSI-X moves per vector). The test uses
+  edu's MSI and virtio-blk's MSI-X table. ITS and IMSIC remain. Details
+  in CLAUDE.md. Zircon's `msi_allocate(resource
   MSI_BASE 11, count)` and `msi_create(msi, options, id, vmo, offset)`
   (the MSI-X table in a BAR VMO, programmed by the kernel; masking
   through the table), each vector an interrupt object with its own
