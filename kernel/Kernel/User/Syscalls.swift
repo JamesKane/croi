@@ -265,6 +265,8 @@ enum Syscalls {
             try pmuConfigure(table, handle, a)
         case 60...79:
             try taskCall(number, a, table)
+        case 110...119:
+            return try DebugLogs.call(number, a, table)
         case 100...109:
             try exceptionCall(number, a, table)
         case 80...89:

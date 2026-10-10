@@ -2,6 +2,7 @@ import _Volatile
 import CHandoff
 import CKernel
 import Fmt
+import Synchronization
 
 /// Polled early-console UART, as described by the loader (from ACPI SPCR).
 /// Assumes firmware already configured line settings. Writes `\n` as `\r\n`.
@@ -15,11 +16,38 @@ import Fmt
     }
 
     func write(utf8: Span<UInt8>) {
-        for i in utf8.indices {
-            if utf8[i] == UInt8(ascii: "\n") {
-                put(UInt8(ascii: "\r"))
+        ConsoleLock.withLock {
+            for i in utf8.indices {
+                if utf8[i] == UInt8(ascii: "\n") {
+                    put(UInt8(ascii: "\r"))
+                }
+                put(utf8[i])
             }
-            put(utf8[i])
+            if !utf8.isEmpty { ConsoleLock.lineOpen = utf8[utf8.count - 1] != UInt8(ascii: "\n") }
+        }
+    }
+
+    /// Writes whole lines (the debuglog dumper's) only at the start of a
+    /// line: while another CPU is part way through one of its own (written
+    /// as several calls), waits up to `patience` ns for it to finish.
+    func writeLines(utf8: Span<UInt8>, patience: UInt64) {
+        let giveUp = Clock.now() + patience
+        while true {
+            let done = ConsoleLock.withLock { () -> Bool in
+                guard !ConsoleLock.lineOpen || ConsoleLock.lastWriter == Cpu.current || Clock.now() >= giveUp else {
+                    return false
+                }
+                for i in utf8.indices {
+                    if utf8[i] == UInt8(ascii: "\n") {
+                        put(UInt8(ascii: "\r"))
+                    }
+                    put(utf8[i])
+                }
+                ConsoleLock.lineOpen = false
+                return true
+            }
+            if done { return }
+            Scheduler.sleep(until: Clock.now() + 1_000_000)
         }
     }
 
@@ -78,5 +106,37 @@ extension croi_uart_t {
             uart.base = KernelLayout.physmap(base)
         }
         return uart
+    }
+}
+
+/// Serializes console writes between CPUs a call at a time, so the
+/// debuglog dumper and the boot code don't interleave characters. Masks
+/// interrupts while held. Never deadlocks a panic: a CPU already holding it
+/// (a fault while writing) goes straight through, and a waiter gives up
+/// after 10^8 spins and writes anyway (the holder may be halted).
+enum ConsoleLock {
+    private static let holder = Atomic<UInt32>(0)
+    /// The last write didn't end its line (lock held).
+    nonisolated(unsafe) static var lineOpen = false
+    nonisolated(unsafe) static var lastWriter: UInt32 = 0
+
+    static func withLock<R>(_ body: () -> R) -> R {
+        let saved = arch_interrupts_save()
+        let me = Cpu.current + 1
+        var owned = false
+        if holder.load(ordering: .relaxed) != me {
+            for _ in 0..<100_000_000 {
+                if holder.compareExchange(expected: 0, desired: me, ordering: .acquiring).exchanged {
+                    owned = true
+                    break
+                }
+                arch_spin_pause()
+            }
+        }
+        let result = body()
+        lastWriter = me - 1
+        if owned { holder.store(0, ordering: .releasing) }
+        arch_interrupts_restore(saved)
+        return result
     }
 }

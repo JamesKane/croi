@@ -256,6 +256,7 @@ func kernel_main_continue() -> Never {
         // From here on the boot code is the "bootstrap" thread.
         unsafe Scheduler.initializeBootCpu(stack: UnsafePointer<PerCpu>(bitPattern: UInt(Smp.records[0]))!.pointee.stack)
         Processes.initialize()
+        DebugLog.initialize()
         SharedPages.initialize()
         Vdso.initialize()
         SelfTestDeadman.arm()
@@ -283,6 +284,7 @@ func kernel_main_continue() -> Never {
         ProcessSelfTest.runIpc(console)
         ProcessSelfTest.runSync(console)
         ProcessSelfTest.runExceptions(console)
+        ProgramSelfTest.run(console)
         SelfTestDeadman.done.store(true, ordering: .relaxed)
     } else {
         console.write("  cpus:   no ACPI tables; boot cpu only\n")

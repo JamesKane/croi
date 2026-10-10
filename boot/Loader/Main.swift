@@ -1,6 +1,7 @@
 import CEFI
 import CHandoff
 import CLoader
+import Elf
 import Fmt
 import PageTables
 
@@ -51,11 +52,21 @@ func croi_loader_main(
         throw .kernel("\\croi\\kernel.elf not found")
     }
     let (elf, kernelPhys) = try unsafe withPhysical(UInt64(UInt(bitPattern: file.buffer)), size: file.size) {
-        (bytes: RawSpan) throws(LoaderError) -> (KernelElf, UInt64) in
-        let elf = try KernelElf(parsing: bytes)
+        (bytes: RawSpan) throws(LoaderError) -> (ElfImage, UInt64) in
+        let elf: ElfImage
+        do throws(ElfImage.Error) {
+            elf = try ElfImage(parsing: bytes)
+        } catch {
+            throw .kernel(error.reason)
+        }
+        guard elf.kind == .pie else { throw .kernel("not a static PIE (ET_DYN)") }
         let phys = try boot.allocatePages(elf.size / pageSize, type: CroiMemoryType.kernel)
         try unsafe withPhysicalMutable(phys, size: Int(elf.size)) { (dest: inout MutableRawSpan) throws(LoaderError) in
-            try elf.load(from: bytes, into: &dest, runningAt: elf.base)
+            do throws(ElfImage.Error) {
+                try elf.load(from: bytes, into: &dest, runningAt: elf.base)
+            } catch {
+                throw .kernel(error.reason)
+            }
         }
         return (elf, phys)
     }

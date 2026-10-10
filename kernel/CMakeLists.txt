@@ -24,6 +24,8 @@ add_library(kernel-swift OBJECT
   Kernel/User/SyncSyscalls.swift
   Kernel/User/ExceptionSyscalls.swift
   Kernel/User/Vdso.swift
+  Kernel/User/ProgramLoader.swift
+  Kernel/User/ProgramSelfTest.swift
   Kernel/User/VdsoSelfTest.swift
   Kernel/User/FpSelfTest.swift
   Kernel/User/UserSelfTest.swift
@@ -38,6 +40,7 @@ add_library(kernel-swift OBJECT
   Kernel/Object/Futex.swift
   Kernel/Object/TimerObject.swift
   Kernel/Object/Exception.swift
+  Kernel/Object/DebugLog.swift
   Kernel/Object/ProcessSelfTest.swift
   Kernel/Object/VmoObject.swift
   Kernel/Object/ObjectSelfTest.swift
@@ -78,7 +81,7 @@ add_library(kernel-swift OBJECT
   Kernel/Vm/JitSelfTest.swift)
 set_target_properties(kernel-swift PROPERTIES Swift_MODULE_NAME Kernel)
 target_include_directories(kernel-swift PRIVATE include)
-target_link_libraries(kernel-swift PRIVATE croi-fmt croi-handoff croi-pagetables)
+target_link_libraries(kernel-swift PRIVATE croi-fmt croi-handoff croi-pagetables croi-elf)
 
 add_executable(kernel
   arch/${CROI_ARCH}/start.S
@@ -116,6 +119,9 @@ croi_user_binary(${_vdso_bin} PIC
   SOURCES ${_user_dir}/vdso/header.S ${_user_dir}/vdso/vdso.c
   LINKER_SCRIPT ${_user_dir}/vdso/vdso.ld
   INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/include)
+croi_user_runtime()
+set(_swift_test ${CMAKE_CURRENT_BINARY_DIR}/swifttest.elf)
+croi_user_program(${_swift_test} SWIFT ${_user_dir}/test/swift/Main.swift)
 set_source_files_properties(userprogram.S PROPERTIES
-  OBJECT_DEPENDS "${_user_bin};${_vdso_bin}"
-  COMPILE_DEFINITIONS "CROI_USER_PROGRAM=\"${_user_bin}\";CROI_VDSO=\"${_vdso_bin}\"")
+  OBJECT_DEPENDS "${_user_bin};${_vdso_bin};${_swift_test}"
+  COMPILE_DEFINITIONS "CROI_USER_PROGRAM=\"${_user_bin}\";CROI_VDSO=\"${_vdso_bin}\";CROI_SWIFT_TEST=\"${_swift_test}\"")

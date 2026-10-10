@@ -27,6 +27,7 @@ add_subdirectory(lib/rt)
 add_subdirectory(lib/handoff)
 add_subdirectory(lib/fmt)
 add_subdirectory(lib/pagetables)
+add_subdirectory(lib/elf)
 add_subdirectory(kernel)
 add_subdirectory(boot)
 

@@ -42,6 +42,14 @@ extern const uint8_t croi_vdso_end[];
 static inline uint64_t croi_vdso_address(void) { return (uint64_t)croi_vdso_start; }
 static inline uint64_t croi_vdso_size(void) { return (uint64_t)(croi_vdso_end - croi_vdso_start); }
 
+// The K8a self-test's Embedded Swift program (user/test/swift), an ELF.
+extern const uint8_t croi_swift_test_start[];
+extern const uint8_t croi_swift_test_end[];
+static inline uint64_t croi_swift_test_address(void) { return (uint64_t)croi_swift_test_start; }
+static inline uint64_t croi_swift_test_size(void) {
+  return (uint64_t)(croi_swift_test_end - croi_swift_test_start);
+}
+
 #if defined(__x86_64__)
 // SYSCALL setup on this CPU: EFER.SCE, STAR, LSTAR, FMASK.
 void arch_syscall_init(void);

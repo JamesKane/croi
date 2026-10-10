@@ -18,3 +18,12 @@ croi_vdso_start:
     .incbin CROI_VDSO
 .globl croi_vdso_end
 croi_vdso_end:
+
+// The K8a self-test's Embedded Swift program (user/test/swift), an ELF.
+.section .rodata.swift_test, "a"
+.balign 16
+.globl croi_swift_test_start
+croi_swift_test_start:
+    .incbin CROI_SWIFT_TEST
+.globl croi_swift_test_end
+croi_swift_test_end:

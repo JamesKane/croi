@@ -265,13 +265,45 @@ owners with inheritance, wake_single_owner, get_owner) and timer objects
 with slack (zero for deadline profiles). **K7d done**: exception channels (thread,
 process, job chain; HANDLED with rewritten registers, TRY_NEXT,
 THREAD_EXIT) and job policy (deny, kill, exceptions, inheritance).
-**K7 is complete.** Next: K8 (userboot and bootfs).
+**K7 is complete.**
+**K8a done**: debuglog (objects, ring, dumper thread, syscalls 110-112),
+`lib/elf` shared by the loader and kernel, `ProgramLoader` (ELF into a
+process with a processargs bootstrap message), the C user runtime and
+Embedded Swift user programs (`croi_user_program`); the boot test runs a
+Swift program end to end. Next: K8b (bootfs and userboot).
 
 - Channel, event, eventpair, port, timer (absolute deadline plus slack), and
   futex with an owner for PI.
 - Job, process and thread objects, exceptions and job policy.
 
 ### K8: userboot + bootfs (requirement 12): the M2 exit test
+Todhchai's M2 exit: userboot starts a tier 0 Embedded Swift process from
+bootfs, which creates a channel pair, passes a VMO across, waits on a port
+with a deadline timer and prints over debuglog, on all three arches in
+QEMU; the kernel and IPC budgets (Todhchai performance.md §2) are measured
+from croi's trace and met under KVM. Zircon's userboot (Rust at the pinned
+revision) is the model; croi's is Embedded Swift like the rest.
+- **K8a: debuglog and user Swift.** Log object (type 12) with
+  `debuglog_create/write/read` over a kernel record ring that the console
+  drains. A user build of Embedded Swift (`croi_user_swift`: its own
+  swiftc command with the user flags, as `croi_user_binary` is for C) and
+  a minimal user runtime in `user/lib` (mem*, stack guard, `putchar` over
+  debuglog, `posix_memalign`/`free` over a VMAR). Programs are ELF
+  executables from here on. Test: a Swift program printing over debuglog.
+- **K8b: bootfs and userboot.** Zircon's bootfs format (directory of
+  name, offset, length; page-aligned data) built by `tools/mkbootfs.py`
+  into `esp/croi/bootfs.img`. The kernel makes a VMO that adopts the
+  CROI_MEM_BOOTFS pages and starts userboot (an ELF in the kernel image)
+  with K8a's `ProgramLoader`: handles (root job, root resource, bootfs
+  VMO, vDSO VMO, debuglog) and the command line as its environment. userboot finds `userboot.next=` in bootfs, loads its
+  ELF (text mapped from the bootfs VMO, data copied, bss zeroed), and
+  starts it in a new process under the root job with a processargs
+  message of its own.
+- **K8c: the exit test and the budgets.** The M2 program (Embedded Swift)
+  does the exit test above. A bench program in bootfs measures from the
+  trace: `channel_call` round trip with donation (< 1 µs), port wake from
+  another core (< 2 µs) and real-time wake error (p99 < 100 µs), next to
+  K6's null syscall (< 100 ns); `boot-smoke-kvm` enforces them.
 
 ### After M2 (requirements 13–19 and the remaining extensions)
 - Resources (MMIO, IRQ, IO port, root) and interrupt objects (port-bound,

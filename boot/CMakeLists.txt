@@ -6,14 +6,13 @@ add_library(loader-swift OBJECT
   Loader/BootVolume.swift
   Loader/Console.swift
   Loader/Firmware.swift
-  Loader/KernelElf.swift
   Loader/LoaderError.swift
   Loader/Main.swift
   Loader/MemoryMap.swift
   Loader/Physical.swift)
 set_target_properties(loader-swift PROPERTIES Swift_MODULE_NAME Loader)
 target_include_directories(loader-swift PRIVATE include)
-target_link_libraries(loader-swift PRIVATE croi-fmt croi-handoff croi-pagetables)
+target_link_libraries(loader-swift PRIVATE croi-fmt croi-handoff croi-pagetables croi-elf)
 
 add_executable(loader entry.c arch/${CROI_ARCH}/enter.S)
 target_include_directories(loader PRIVATE include)

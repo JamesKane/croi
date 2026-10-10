@@ -45,6 +45,9 @@ override); `build/<arch>/esp/` is served to it as a FAT drive.
 - `lib/fmt/`  `TextOutput`: allocation-free text formatting for both images.
 - `lib/pagetables/` Page-table formats + generic builder (loader and kernel).
 - `lib/rt/`   Freestanding C runtime the compilers call (mem*, stack guard).
+- `lib/elf/`  `ElfImage`: ELF parsing and loading (loader, kernel, userboot).
+- `user/`     User space: the runtime (`user/lib/runtime`), headers
+              (`user/include`, module `CroiRuntime`), vDSO, test programs.
 
 ## Boot flow
 
@@ -421,6 +424,38 @@ syscalls 100-107 in User/ExceptionSyscalls.swift):
   SError delivery to the faulting process, user TLS registers in the
   thread state.
 
+Debuglog and user programs (K8a, Kernel/Object/DebugLog.swift,
+Kernel/User/ProgramLoader.swift, include/log.h, include/processargs.h,
+syscalls 110-112):
+- `DebugLog`: one ring of 512 fixed 256-byte croi_log_record_t slots
+  (oldest overwritten), Zircon's record layout. Log objects (type 12):
+  write-only ones need no resource, READABLE ones the debuglog system
+  resource (base 12) or root; each reader has its own position (starts at
+  the oldest record) and READABLE while behind. A `dlog-dumper` thread
+  prints every record as `[sssss.mmm] pid:tid> text`. Lock order:
+  debuglog -> object -> scheduler.
+- Console: `ConsoleLock` serializes `Uart.write` calls between CPUs
+  (recursive holders pass, waiters give up after 10^8 spins so a panic
+  can't hang); the dumper's `writeLines` waits up to 50 ms for another
+  CPU to finish a line it is writing in pieces.
+- `ProgramLoader.start`: an ET_EXEC from kernel memory into a new process
+  (each PT_LOAD copied into its own VMO, stack of PT_GNU_STACK's size or
+  256 KiB) and a bootstrap channel whose first message is Zircon's
+  processargs: PROC_SELF, THREAD_SELF, VMAR_ROOT, then the caller's
+  handles (PA_FD 1 = stdout debuglog, PA_RESOURCE, ...), argv[0], the
+  environment. Not yet: PT_GNU_RELRO stays writable; PIEs/ASLR.
+- User programs (`croi_user_program` in cmake/CroiUser.cmake): C and/or
+  Embedded Swift, linked at 0x1000000 with separate page-aligned
+  segments, against the user runtime (user/lib/runtime, C: `_start` reads
+  the bootstrap message, `croi_take_startup_handle`, stdout line-buffered
+  into debuglog records, a size-class heap over 64 KiB VMO chunks in the
+  root VMAR, plus lib/rt). Swift user code imports `CroiRuntime`
+  (user/include/module.modulemap); the ABI headers it reaches are module
+  `CroiAbi` in kernel/include (which CKernel re-exports through abi.h), so
+  user code never builds the kernel's private headers. User Swift isn't
+  bound by the kernel's no-ARC rule (low-half addresses). The boot test
+  runs user/test/swift: stdout, heap, environment, debuglog round trip.
+
 ACPI (`Kernel/Acpi/`, after Zircon's acpi_lite): `AcpiTables` validates
 RSDP/XSDT and finds tables by signature; `withPhysicalBytes` reads through
 the physmap or a temporary mapping. `Madt.forEachCpu` yields local APIC /
@@ -653,7 +688,8 @@ kernel must not use PAC until it does.
 ## Conventions
 
 - When C or asm is used, say why in the file's header comment. Today: UEFI
-  calling-convention shims, entry/start code, compiler runtime.
+  calling-convention shims, entry/start code, compiler runtime, and the
+  user runtime (the C symbols the Embedded Swift runtime calls).
 - C boundary: declare in a header, implement in Swift with
   `@c @implementation`. The Swift function must keep the C name
   (`kernel_main`); `@c(name)` and `swift_name` don't work with it in 6.4.0.

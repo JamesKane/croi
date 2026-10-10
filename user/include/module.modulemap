@@ -1,0 +1,5 @@
+// The C side of the croi user runtime and syscall ABI, for Swift user code.
+module CroiRuntime {
+  header "croi/runtime.h"
+  export *
+}

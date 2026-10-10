@@ -1,20 +1,30 @@
+// The ABI headers shared with user space (user/include/croi/syscall.h
+// includes them), a module of their own so user Swift code can import
+// them without the kernel's private ones.
+module CroiAbi {
+  header "task.h"
+  header "ipc.h"
+  header "log.h"
+  header "processargs.h"
+  header "trace.h"
+  header "pmu.h"
+  header "shared.h"
+  header "time.h"
+  export *
+}
+
 module CKernel {
   header "kernel.h"
   header "stack.h"
   header "smp.h"
   header "irq.h"
-  header "time.h"
   header "thread.h"
-  header "trace.h"
   header "xstate.h"
-  header "pmu.h"
-  header "task.h"
-  header "ipc.h"
   header "aspace.h"
   header "usercopy.h"
   header "cache.h"
   header "jit.h"
   header "user.h"
-  header "shared.h"
+  header "abi.h"
   export *
 }

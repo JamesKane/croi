@@ -76,6 +76,10 @@ enum : uint64_t {
   CROI_SYS_THREAD_READ_STATE = 105,      // (thread, kind, buffer, size): while in an exception
   CROI_SYS_THREAD_WRITE_STATE = 106,     // (thread, kind, buffer, size)
   CROI_SYS_JOB_SET_POLICY = 107,         // (job, options, topic 0, croi_policy_basic_t *, count)
+
+  CROI_SYS_DEBUGLOG_CREATE = 110,  // (resource or 0, options: CROI_LOG_FLAG_READABLE, out)
+  CROI_SYS_DEBUGLOG_WRITE = 111,   // (log, options: CROI_LOG_LOCAL, text, length <= 216)
+  CROI_SYS_DEBUGLOG_READ = 112,    // (log, options 0, croi_log_record_t *buffer, length) -> record size
 };
 
 enum : uint32_t {  // timer_create options (Zircon's ZX_TIMER_SLACK_*)
@@ -90,6 +94,7 @@ enum : uint32_t {  // timer_create options (Zircon's ZX_TIMER_SLACK_*)
 
 #include "task.h"  // vmar options, task return codes, signals, croi_process_info_t
 #include "ipc.h"   // channel signals and limits, call args, handle info, flow ids
+#include "log.h"   // debuglog records, flags, severities
 
 enum : uint64_t {  // CROI_SYS_TRACE_CONFIGURE ops
   CROI_TRACE_OP_START = 0,   // a: categories, b: pages per CPU, c: mode;
