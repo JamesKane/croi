@@ -5,7 +5,7 @@ are in `../todhchai/docs/croi-requirements.md` (items 1–19 and extensions
 ext 1–10), and its milestone M2 ("croi reaches user space") was croi's
 first big target, reached on 2026-10-10 (K8c). Its M3 (native tier 0)
 closed the same day on croi's K9; M4 (native desktop v0) is next: K10
-(a draft until Todhchai confirms its order). This file orders croi's work so those needs are designed in
+(agreed with Todhchai). This file orders croi's work so those needs are designed in
 early, not bolted on later. Reviewed against the requirements on
 2026-10-09 and re-synced on 2026-10-10.
 
@@ -41,8 +41,12 @@ busy host (load 6.5-7.5), so patterns, not measurements. Medians:
 | `port.wake_median` (2 µs) | 1.86 µs | 6.16 µs | 5.94 µs | 5.77 µs |
 | `timer.wake_error_p99` (100 µs) | 26 µs | 35 µs | 1.84 ms | 2.02 ms |
 
-Decisions (2026-10-10; the budgets are Todhchai's, so these are croi's
-position, to confirm with Todhchai):
+Decisions (2026-10-10, agreed with Todhchai):
+Accepted by Todhchai (2026-10-10): port wake is recorded as a
+QEMU-with-polling figure until measured on hardware, and IRQ-wait wake is
+judged on hardware only (Todhchai's edu driver reports ~12.7 µs under KVM
+as information).
+
 - **`channel_call`, 1 µs: neither kernel meets it.** croi is 0.6-0.8 µs
   faster than Zircon, so Zircon is no evidence the target is attainable
   under KVM. The target stays as a hardware target; under KVM the
@@ -526,7 +530,7 @@ pinned DMA without a driver stack. The boot tests add it.
 Todhchai's other M3 budgets (ring submit, futex wake with no sleeper,
 cached reads, live queries, resident memory) are user-space work.
 
-### K10: Todhchai M4, native desktop v0 (draft, 2026-10-10, to confirm with Todhchai)
+### K10: Todhchai M4, native desktop v0 (agreed with Todhchai, 2026-10-10)
 
 Todhchai's M3 closed with every budget met on a quiet machine. M4 is the
 native desktop: a compositor on the framebuffer with CPU composition,
@@ -537,7 +541,10 @@ K10 is what M4 needs from croi and no more (decided: M5's groundwork,
 hardware bring-up, IOMMUs, the ITS/IMSIC and croi's own carry-overs come
 after). Everything stays in QEMU; as in K9, each step lands as a commit
 Todhchai can consume, with its self-test on all three arches and its
-budget lines (CLAUDE.md "Timing discipline").
+budget lines (CLAUDE.md "Timing discipline"). Order a to f, agreed:
+M4 brings the compositor up before audio, and K10c must land before the
+synth program can meet its zero-underrun exit; K10e may move to the end
+if K10 splits (nothing else in M4 depends on it).
 
 - **K10a: counters (item 15, ext).** Zircon's counter object (type 34:
   `counter_create`, `add`, `read`, `write`; POSITIVE / NON_POSITIVE
@@ -557,7 +564,13 @@ budget lines (CLAUDE.md "Timing discipline").
   count, a synthesized flag) that clients read without a syscall. On the
   bare GOP framebuffer (no vblank interrupt) the kernel advances it from
   a timer at the mode's rate, marked synthesized, so M4 runs on it in
-  QEMU. Budget: vblank (or synthetic tick) to the waiting thread running.
+  QEMU (agreed: the kernel ticks it, not the driver, whose timer would add
+  a wakeup and its jitter to every frame). The GOP display driver sets
+  the refresh period and gets the synthesized flag; a real vblank driver
+  later advances the same object from its interrupt. The synthetic tick
+  runs only while something waits on the timeline or a frame-intent
+  thread is aligned to it, so a static screen makes no wakeups (K10f).
+  Budget: vblank (or synthetic tick) to the waiting thread running.
 - **K10c: wakeups that carry a deadline (ext 5, ext 10).** An interrupt
   object, a timeline wait and a counter wait can name a scheduling
   context: the thread they wake runs on it at once, with its deadline,
@@ -570,7 +583,9 @@ budget lines (CLAUDE.md "Timing discipline").
   port (ext 3) for a deadline thread's own profile; CPU reservation for a
   job (ext 8, gated by a system resource); a thread's trace id through
   `object_get_info` (Todhchai's ask: joining its user trace with croi's
-  sched and ipc records).
+  sched and ipc records); and debuglog flow control, or a readable
+  position of the last record the dumper printed, so Todhchai's trace
+  export through the debuglog stops pacing itself by a guess (its M3f).
 - **K10e: power control (M4's shutdown < 500 ms).** Zircon's
   `system_powerctl` under the power system resource: shutdown and reboot.
   amd64 takes the S5 sleep-type values from user space's AML (Zircon's
