@@ -270,7 +270,10 @@ THREAD_EXIT) and job policy (deny, kill, exceptions, inheritance).
 `lib/elf` shared by the loader and kernel, `ProgramLoader` (ELF into a
 process with a processargs bootstrap message), the C user runtime and
 Embedded Swift user programs (`croi_user_program`); the boot test runs a
-Swift program end to end. Next: K8b (bootfs and userboot).
+Swift program end to end. **K8b done**: bootfs (`tools/mkbootfs.py`,
+pages adopted into a VMO), userboot in Embedded Swift starting
+`userboot.next` from bootfs with processargs; boot tests wait for its
+report. Next: K8c (the M2 program and the budgets).
 
 - Channel, event, eventpair, port, timer (absolute deadline plus slack), and
   futex with an owner for PI.

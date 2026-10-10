@@ -299,6 +299,7 @@ func kernel_main_continue() -> Never {
     console.write(decimal: UInt64(Interrupts.unexpectedCount))
     console.write(" unexpected interrupts\n")
     console.write("croi kernel: boot complete, idling\n")
+    if Scheduler.readyCpuCount > 0 { Userboot.start(console) }
     if Scheduler.readyCpuCount > 0 {
         Scheduler.exit(0)  // CPU 0 goes on with its idle thread
     }

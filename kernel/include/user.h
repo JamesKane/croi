@@ -50,6 +50,12 @@ static inline uint64_t croi_swift_test_size(void) {
   return (uint64_t)(croi_swift_test_end - croi_swift_test_start);
 }
 
+// userboot (user/userboot), an ELF: the first user process (K8b).
+extern const uint8_t croi_userboot_start[];
+extern const uint8_t croi_userboot_end[];
+static inline uint64_t croi_userboot_address(void) { return (uint64_t)croi_userboot_start; }
+static inline uint64_t croi_userboot_size(void) { return (uint64_t)(croi_userboot_end - croi_userboot_start); }
+
 #if defined(__x86_64__)
 // SYSCALL setup on this CPU: EFER.SCE, STAR, LSTAR, FMASK.
 void arch_syscall_init(void);

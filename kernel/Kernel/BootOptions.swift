@@ -65,6 +65,26 @@ enum BootOptions {
         return nil
     }
 
+    /// The command line's words as NUL-terminated strings, one after
+    /// another (userboot's environment, K8b).
+    static func withEnvironment<R, E: Error>(_ body: (Span<UInt8>) throws(E) -> R) throws(E) -> R {
+        var words = InlineArray<1025, UInt8>(repeating: 0)
+        var count = 0
+        var inWord = false
+        for i in 0..<length {
+            if storage[i] == UInt8(ascii: " ") {
+                if inWord { count += 1 }  // the NUL already there
+                inWord = false
+            } else {
+                words[count] = storage[i]
+                count += 1
+                inWord = true
+            }
+        }
+        if inWord { count += 1 }
+        return try body(words.span.extracting(0..<count))
+    }
+
     static func write(to out: some TextOutput) {
         out.write(utf8: storage.span.extracting(0..<length))
     }

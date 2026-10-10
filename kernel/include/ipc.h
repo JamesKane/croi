@@ -12,7 +12,14 @@ enum : uint32_t {
   CROI_SIGNAL_PEER_CLOSED = 1u << 2,
   // object_get_info topics.
   CROI_INFO_HANDLE_BASIC = 2,
+  CROI_INFO_VMAR = 7,  // croi_info_vmar_t (needs INSPECT)
 };
+
+// zx_info_vmar_t.
+typedef struct {
+  uint64_t base;
+  uint64_t len;
+} croi_info_vmar_t;
 
 // zx_channel_call_args_t.
 typedef struct {

@@ -12,6 +12,7 @@ find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
 
 set(CROI_EDK2_DIR /usr/share/edk2 CACHE PATH "edk2 firmware images for QEMU")
 set(CROI_CMDLINE "croi.test=1" CACHE STRING "Kernel command line written to the ESP (\\croi\\cmdline)")
+set(CROI_USERBOOT_NEXT "bin/hello" CACHE STRING "The bootfs program userboot starts (userboot.next=)")
 set(CROI_ELF2EFI ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/elf2efi.py)
 set(CROI_QEMU ${CMAKE_SOURCE_DIR}/tools/qemu.sh)
 
@@ -32,10 +33,9 @@ add_subdirectory(kernel)
 add_subdirectory(boot)
 
 # EFI system partition layout, served to QEMU as a virtual FAT drive.
-# bootfs.img is a placeholder until the bootfs format exists (roadmap K8).
 set(CROI_ESP_DIR ${CMAKE_BINARY_DIR}/esp)
-file(CONFIGURE OUTPUT ${CMAKE_BINARY_DIR}/cmdline CONTENT "${CROI_CMDLINE}\n")
-file(WRITE ${CMAKE_BINARY_DIR}/bootfs.img "croi bootfs placeholder\n")
+file(CONFIGURE OUTPUT ${CMAKE_BINARY_DIR}/cmdline
+     CONTENT "${CROI_CMDLINE} userboot.next=${CROI_USERBOOT_NEXT}\n")
 add_custom_target(esp ALL
   COMMAND ${CMAKE_COMMAND} -E make_directory ${CROI_ESP_DIR}/EFI/BOOT ${CROI_ESP_DIR}/croi
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -44,7 +44,7 @@ add_custom_target(esp ALL
           $<TARGET_FILE:kernel> ${CROI_ESP_DIR}/croi/kernel.elf
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
           ${CMAKE_BINARY_DIR}/cmdline ${CMAKE_BINARY_DIR}/bootfs.img ${CROI_ESP_DIR}/croi/
-  DEPENDS loader-efi kernel
+  DEPENDS loader-efi kernel bootfs
   COMMENT "Assembling EFI system partition")
 
 add_custom_target(run
@@ -52,11 +52,15 @@ add_custom_target(run
   DEPENDS esp USES_TERMINAL)
 
 enable_testing()
+# Boot tests wait for userboot to report that the program it started from
+# bootfs exited cleanly (userboot starts after the kernel's self-tests and
+# "boot complete").
+set(CROI_BOOT_DONE "userboot: ${CROI_USERBOOT_NEXT} exited with 0")
 # Boots through the loader into the kernel, which reports and idles; then
 # checks the pattern the kernel drew on the framebuffer.
 set(_fb_dump ${CMAKE_BINARY_DIR}/qemu/framebuffer.ppm)
 add_test(NAME boot-smoke
-  COMMAND ${CROI_QEMU} --test "croi kernel: boot complete" --screendump ${_fb_dump}
+  COMMAND ${CROI_QEMU} --test "${CROI_BOOT_DONE}" --screendump ${_fb_dump}
           ${CROI_ARCH} ${CROI_ESP_DIR} ${CMAKE_BINARY_DIR}/qemu ${CROI_EDK2_DIR})
 set_tests_properties(boot-smoke PROPERTIES TIMEOUT 120 FIXTURES_SETUP framebuffer)
 add_test(NAME framebuffer-pixels
@@ -67,7 +71,7 @@ set_tests_properties(framebuffer-pixels PROPERTIES FIXTURES_REQUIRED framebuffer
 if(CROI_ARCH STREQUAL amd64)
   # No TSC-deadline mode: timers fall back to local APIC one-shot mode.
   add_test(NAME boot-smoke-apic-oneshot
-    COMMAND ${CROI_QEMU} --test "croi kernel: boot complete"
+    COMMAND ${CROI_QEMU} --test "${CROI_BOOT_DONE}"
             ${CROI_ARCH} ${CROI_ESP_DIR} ${CMAKE_BINARY_DIR}/qemu ${CROI_EDK2_DIR}
             -cpu max,-tsc-deadline)
   set_tests_properties(boot-smoke-apic-oneshot PROPERTIES TIMEOUT 120)
@@ -76,7 +80,7 @@ endif()
 if(CROI_ARCH STREQUAL rv64)
   # A hart without Svpbmt: memory types fall back to the platform's PMAs.
   add_test(NAME boot-smoke-no-svpbmt
-    COMMAND ${CROI_QEMU} --test "croi kernel: boot complete"
+    COMMAND ${CROI_QEMU} --test "${CROI_BOOT_DONE}"
             ${CROI_ARCH} ${CROI_ESP_DIR} ${CMAKE_BINARY_DIR}/qemu ${CROI_EDK2_DIR}
             -cpu rv64)
   set_tests_properties(boot-smoke-no-svpbmt PROPERTIES TIMEOUT 120)
@@ -86,7 +90,7 @@ if(CROI_ARCH STREQUAL amd64 AND EXISTS /dev/kvm)
   # Under KVM timing is real: the trace self-test enforces its probe-cost
   # budget, as Todhchai's M2 budgets will be measured.
   add_test(NAME boot-smoke-kvm
-    COMMAND ${CROI_QEMU} --test "croi kernel: boot complete"
+    COMMAND ${CROI_QEMU} --test "${CROI_BOOT_DONE}"
             ${CROI_ARCH} ${CROI_ESP_DIR} ${CMAKE_BINARY_DIR}/qemu ${CROI_EDK2_DIR}
             -accel kvm -cpu host)
   set_tests_properties(boot-smoke-kvm PROPERTIES TIMEOUT 120)
@@ -107,7 +111,7 @@ if(CROI_ARCH STREQUAL arm64)
 
   # Firmware at EL2 with a GICv3: the loader must drop to EL1.
   add_test(NAME boot-smoke-el2
-    COMMAND ${CROI_QEMU} --test "croi kernel: boot complete"
+    COMMAND ${CROI_QEMU} --test "${CROI_BOOT_DONE}"
             ${CROI_ARCH} ${CROI_ESP_DIR} ${CMAKE_BINARY_DIR}/qemu-el2 ${CROI_EDK2_DIR}
             -machine virtualization=on,gic-version=3)
   set_tests_properties(boot-smoke-el2 PROPERTIES TIMEOUT 120)

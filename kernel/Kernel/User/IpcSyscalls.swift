@@ -88,6 +88,14 @@ extension Syscalls {
             try Channels.signalPeer(object.object, clear: UInt32(truncatingIfNeeded: a[1]),
                                     set: UInt32(truncatingIfNeeded: a[2]))
         case 86:  // object_get_info(handle, topic, buffer, buffer_size)
+            if a[1] == UInt64(CROI_INFO_VMAR) {
+                guard a[3] >= UInt64(MemoryLayout<croi_info_vmar_t>.size) else { throw .bufferTooSmall }
+                try check(a[2], MemoryLayout<croi_info_vmar_t>.size)
+                let vmar = try table.get(handle, type: .vmar, rights: .inspect)
+                let v = VmarPointer(object: vmar.object).info
+                try put(croi_info_vmar_t(base: v.base, len: v.size), a[2])
+                return
+            }
             guard a[1] == UInt64(CROI_INFO_HANDLE_BASIC) else { throw .notSupported }
             guard a[3] >= UInt64(MemoryLayout<croi_info_handle_basic_t>.size) else { throw .bufferTooSmall }
             try check(a[2], MemoryLayout<croi_info_handle_basic_t>.size)

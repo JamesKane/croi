@@ -30,6 +30,7 @@ enum : uint64_t {
   CROI_SYS_VMO_READ = 41,          // (vmo, void *buffer, offset, length)
   CROI_SYS_VMO_WRITE = 42,         // (vmo, const void *buffer, offset, length)
   CROI_SYS_VMO_MAP = 43,           // (vmo, offset, length, rights bits, uint64_t *address); until VMARs (K7)
+  CROI_SYS_VMO_GET_SIZE = 44,      // (vmo, uint64_t *size)
   CROI_SYS_TRACE_CONFIGURE = 50,   // (resource, op, a, b, c, sample_hz)
   CROI_SYS_PMU_CONFIGURE = 51,     // (resource, op, a, b)
   // Jobs, processes, threads (K7a). Zircon's calls; vmar_* pack the VMAR

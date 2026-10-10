@@ -227,6 +227,22 @@ let pmmLock = SpinLock()
         unsafe pushFree(page)
     }
 
+    /// Hands `count` wired pages at `phys` (memory the loader filled, e.g.
+    /// bootfs) to a VMO: false, changing nothing, unless every one is a
+    /// wired page in an arena. The VMO frees them like its own.
+    mutating func adopt(_ phys: UInt64, count: UInt64) -> Bool {
+        pmmLock.withLock { () -> Bool in
+            for i in 0..<count {
+                guard let page = unsafe page(for: phys + i * KernelLayout.pageSize),
+                      unsafe page.pointee.state == .wired else { return false }
+            }
+            for i in 0..<count {
+                unsafe page(for: phys + i * KernelLayout.pageSize)!.pointee.state = .vmo
+            }
+            return true
+        }
+    }
+
     /// Frees the loader's handoff memory (its range table and boot page
     /// tables), like Zircon's pmm_end_handoff. Reads the range table while
     /// freeing it, which is fine: freeing only touches Page records. After

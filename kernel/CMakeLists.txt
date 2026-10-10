@@ -26,6 +26,7 @@ add_library(kernel-swift OBJECT
   Kernel/User/Vdso.swift
   Kernel/User/ProgramLoader.swift
   Kernel/User/ProgramSelfTest.swift
+  Kernel/User/Userboot.swift
   Kernel/User/VdsoSelfTest.swift
   Kernel/User/FpSelfTest.swift
   Kernel/User/UserSelfTest.swift
@@ -122,6 +123,24 @@ croi_user_binary(${_vdso_bin} PIC
 croi_user_runtime()
 set(_swift_test ${CMAKE_CURRENT_BINARY_DIR}/swifttest.elf)
 croi_user_program(${_swift_test} SWIFT ${_user_dir}/test/swift/Main.swift)
+# userboot (K8b), carried in the kernel image like Zircon's; it shares
+# lib/elf's sources with the kernel and loader.
+set(_userboot ${CMAKE_CURRENT_BINARY_DIR}/userboot.elf)
+croi_user_program(${_userboot}
+  SWIFT ${_user_dir}/userboot/Main.swift ${_user_dir}/userboot/Bootfs.swift
+        ${PROJECT_SOURCE_DIR}/lib/elf/Elf/ElfImage.swift)
 set_source_files_properties(userprogram.S PROPERTIES
-  OBJECT_DEPENDS "${_user_bin};${_vdso_bin};${_swift_test}"
-  COMPILE_DEFINITIONS "CROI_USER_PROGRAM=\"${_user_bin}\";CROI_VDSO=\"${_vdso_bin}\";CROI_SWIFT_TEST=\"${_swift_test}\"")
+  OBJECT_DEPENDS "${_user_bin};${_vdso_bin};${_swift_test};${_userboot}"
+  COMPILE_DEFINITIONS "CROI_USER_PROGRAM=\"${_user_bin}\";CROI_VDSO=\"${_vdso_bin}\";CROI_SWIFT_TEST=\"${_swift_test}\";CROI_USERBOOT=\"${_userboot}\"")
+
+# bootfs (K8b): the programs userboot can start, in Zircon's bootfs format
+# (tools/mkbootfs.py), served on the ESP as \croi\bootfs.img.
+set(_hello ${CMAKE_CURRENT_BINARY_DIR}/hello.elf)
+croi_user_program(${_hello} SWIFT ${_user_dir}/test/hello/Main.swift)
+set(CROI_BOOTFS_IMAGE ${CMAKE_BINARY_DIR}/bootfs.img PARENT_SCOPE)
+add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/bootfs.img
+  COMMAND ${Python3_EXECUTABLE} -I ${PROJECT_SOURCE_DIR}/tools/mkbootfs.py ${CMAKE_BINARY_DIR}/bootfs.img
+          bin/hello=${_hello}
+  DEPENDS ${_hello} ${PROJECT_SOURCE_DIR}/tools/mkbootfs.py
+  COMMENT "Building bootfs")
+add_custom_target(bootfs DEPENDS ${CMAKE_BINARY_DIR}/bootfs.img)

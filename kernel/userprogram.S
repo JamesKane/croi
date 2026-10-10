@@ -27,3 +27,12 @@ croi_swift_test_start:
     .incbin CROI_SWIFT_TEST
 .globl croi_swift_test_end
 croi_swift_test_end:
+
+// userboot (user/userboot), an ELF: the first user process (K8b).
+.section .rodata.userboot, "a"
+.balign 16
+.globl croi_userboot_start
+croi_userboot_start:
+    .incbin CROI_USERBOOT
+.globl croi_userboot_end
+croi_userboot_end:

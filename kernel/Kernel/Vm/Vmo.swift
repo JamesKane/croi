@@ -154,6 +154,29 @@ struct Vmo: ~Copyable {
         record = made
     }
 
+    /// An anonymous VMO over `size` bytes of wired RAM at `base` the loader
+    /// filled (bootfs, K8b): it takes the pages over, committed, and frees
+    /// them when it goes, like Zircon's VMO over the ZBI's pages.
+    init(adopting base: UInt64, size: UInt64) throws(VmError) {
+        guard base % KernelLayout.pageSize == 0 else { throw .unaligned(base) }
+        let made = try Self.make(.anonymous, size: size, cache: .cached)
+        let count = size / KernelLayout.pageSize
+        guard pmm.adopt(base, count: count) else {
+            made.release()
+            throw .denied(base)
+        }
+        for i in 0..<Int(count) {
+            guard made.pointee.pages.set(i, base + UInt64(i) * KernelLayout.pageSize) else {
+                // Out of memory for the page list: the VMO frees what it holds.
+                for j in i..<Int(count) { pmm.free(base + UInt64(j) * KernelLayout.pageSize) }
+                made.release()
+                throw .outOfMemory
+            }
+            made.pointee.committedPages += 1
+        }
+        record = made
+    }
+
     /// Ext 6: device-local memory (VRAM, a BAR window): a physical range
     /// that is never paged or evicted and is charged to `account` in full.
     init(deviceLocal base: UInt64, size: UInt64, cache: CachePolicy, account: MemoryAccountPointer) throws(VmError) {

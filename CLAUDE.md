@@ -456,6 +456,29 @@ syscalls 110-112):
   bound by the kernel's no-ARC rule (low-half addresses). The boot test
   runs user/test/swift: stdout, heap, environment, debuglog round trip.
 
+bootfs and userboot (K8b, Kernel/User/Userboot.swift, user/userboot,
+tools/mkbootfs.py):
+- bootfs.img is Zircon's bootfs format (no ZBI around it), built by
+  `tools/mkbootfs.py` from the `bootfs` target (today `bin/hello`). The
+  kernel adopts the loader's CROI_MEM_BOOTFS pages into an anonymous VMO
+  (`Vmo(adopting:)`, `Pmm.adopt`: wired -> vmo; freed when the VMO goes).
+- After "boot complete" the kernel starts userboot (an ELF in the kernel
+  image, Embedded Swift, compiling lib/elf's source in) with
+  `ProgramLoader`: root job, root resource, bootfs VMO (with EXECUTE),
+  a stdout debuglog, and the command line's words as its environment
+  (`BootOptions.withEnvironment`).
+- userboot maps bootfs, finds `userboot.next=` (default bin/launcher;
+  the build appends `userboot.next=${CROI_USERBOOT_NEXT}`, default
+  bin/hello, to the ESP cmdline), loads its ELF into a new process
+  (segments that are all file mapped straight from the bootfs VMO, others
+  copied; stack from PT_GNU_STACK), passes on every handle it got plus a
+  new stdout in a processargs message, starts it, waits, and prints
+  `userboot: <name> exited with <code>`. Boot tests wait for that line
+  with code 0 (`CROI_BOOT_DONE`).
+- Syscalls added for it: `vmo_get_size` (44) and object_get_info
+  CROI_INFO_VMAR (base, length). Embedded Swift `String ==` needs the
+  Unicode tables (not linked): compare bytes.
+
 ACPI (`Kernel/Acpi/`, after Zircon's acpi_lite): `AcpiTables` validates
 RSDP/XSDT and finds tables by signature; `withPhysicalBytes` reads through
 the physmap or a temporary mapping. `Madt.forEachCpu` yields local APIC /
