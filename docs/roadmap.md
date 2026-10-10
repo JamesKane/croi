@@ -329,8 +329,8 @@ revision) is the model; croi's is Embedded Swift like the rest.
 ### K9: Todhchai M3, native tier 0 (requirements 7's syscalls, 13, 14 without an IOMMU, 20)
 Todhchai's M3 (`../todhchai/docs/milestones/M3.md`) moves its services
 onto croi, then adds devmgr, ACPI, PCI, virtio and a framebuffer console.
-M3a–M3d are done on croi as it stands, and M3e (N0's boot on a ramdisk)
-needs nothing new from the kernel. M3f onwards need K9:
+M3a–M3e are done on croi as it stands (M3e, N0's boot on a ramdisk,
+runs on croi's head in Todhchai's `td ci`). M3f onwards need K9:
 
 | Todhchai step | Needs from croi |
 |---|---|
@@ -340,10 +340,10 @@ needs nothing new from the kernel. M3f onwards need K9:
 | M3i other virtio devices | as M3g |
 | M3j exit and budgets | K9f |
 
-Todhchai asked for item 13, then the BTI, the VMO syscalls and cache
-ops, then item 20. The order below moves item 20 up to second: it is
-small, needs only K9a's resources, and on its own unblocks M3h's console
-and the ACPI half of M3f. To confirm with Todhchai.
+Order (agreed with Todhchai, 2026-10-10): resources first, then item
+20, which is small, needs only K9a's resources, and on its own unblocks
+M3h's console and the ACPI half of M3f; the BTI and VMO-for-DMA work
+matters only once virtio-blk lands.
 
 Decided by Todhchai for M3: amd64 boots under KVM in `td ci`; arm64 and
 rv64 build. croi still runs every K9 self-test on all three arches in
@@ -382,8 +382,11 @@ pinned DMA without a driver stack. The boot tests add it.
   - userboot gets one more startup handle: a read-only VMO of ZBI-format
     items (`ZBI_TYPE_ACPI_RSDP`, `ZBI_TYPE_SMBIOS`, `ZBI_TYPE_FRAMEBUFFER`,
     `ZBI_TYPE_MEM_CONFIG` for the firmware ranges), built from the
-    handoff. Item formats are Zircon's, so Todhchai's parsing is ported
-    code. To settle with Todhchai: ZBI items, or a croi struct.
+    handoff (agreed with Todhchai). Todhchai writes its own reader from
+    the format (its principle: no third-party code), so a croi header
+    (`include/zbi.h`, like processargs.h) gives every layout exactly:
+    the item header and its alignment, and the RSDP, SMBIOS, FRAMEBUFFER
+    (base, size, stride, format) and MEM_CONFIG payloads.
   - Physical VMOs over firmware ranges (ACPI reclaim and NVS, runtime
     services, reserved MMIO) are allowed with an MMIO resource that
     covers them; RAM the PMM owns stays refused. ACPI reclaim stays wired
@@ -404,9 +407,9 @@ pinned DMA without a driver stack. The boot tests add it.
   scheduling-context handoff on wakeup is the extension, the hook
   exists), `interrupt_trigger` (virtual), `interrupt_destroy`. Every
   interrupt object gets a CPU affinity from policy (item 2), which Zircon
-  lacks: an extension call (`interrupt_set_affinity`, or a property: to
-  settle with Todhchai), with nothing routed until it is set or a
-  default (the boot CPU) is chosen. Controllers: amd64 IOAPIC pins (GSI
+  lacks: an extension call, `interrupt_set_affinity(interrupt, cpu
+  mask)` with a typed status (agreed with Todhchai; devmgr sets it per
+  driver host from policy). Until it is set, the boot CPU. Controllers: amd64 IOAPIC pins (GSI
   numbering; MADT overrides for ISA IRQs; PCI INTx modes come from `_PRT`,
   i.e. user space), arm64 GICv3 SPIs (IROUTER for affinity), rv64
   APLIC/PLIC (QEMU virt with ACPI). Budget: IRQ to the driver thread
