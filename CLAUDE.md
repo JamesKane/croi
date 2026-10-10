@@ -68,6 +68,14 @@ machine's history:
   (`--compare`): sequential runs on this machine mostly measure the
   machine (K9d: channel_call read 1.4-2.2 us for unchanged code, even
   at low load average).
+- A missed budget is first checked against Zircon:
+  `tools/zircon-bench/compare.py` boots m2's bench ported to Zircon (at
+  the reference pin, from a jiri tree in ../fuchsia-jiri) interleaved
+  with croi, lean and without idle polling. Zircon meets it: attainable,
+  diff the paths; neither does: a roadmap decision; croi only in one
+  configuration: record the dependency (docs/roadmap.md, "Budgets
+  against Zircon"). A new m2 budget that croi misses is mirrored in
+  `parity_bench.cc` and compare.py's BUDGETS, both sides together.
 
 ## Layout
 

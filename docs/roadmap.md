@@ -21,6 +21,50 @@ proposed targets (todhchai docs/performance.md): null syscall < 100 ns,
 same-core `channel_call` with donation < 1 µs, cross-core port wake < 2 µs,
 real-time wake error p99 < 100 µs.
 
+## Budgets against Zircon (tools/zircon-bench)
+
+When croi misses a budget, the question is whether the target is
+attainable with Zircon's design at all. tools/zircon-bench runs m2's
+bench, ported to Zircon at croi's reference pin, under the same VM on the
+same machine, interleaved with croi's boots (README there: setup,
+`compare.py`, and the rule for reading a missed budget). Every m2 budget
+croi misses is mirrored there; one croi meets needs no mirror.
+
+Figures at 6e93cf0, KVM, AMD Ryzen 7 9700X, six interleaved rounds on a
+busy host (load 6.5-7.5), so patterns, not measurements. Medians:
+
+| Budget (target) | croi | croi, no idle poll | Zircon | Zircon, no mitigations |
+|---|---|---|---|---|
+| `syscall.null` (100 ns) | 33 ns | 34 ns | 39 ns | 33 ns |
+| `ipc.channel_call` (1 µs) | 1.45 µs | 1.39 µs | 2.24 µs | 2.04 µs |
+| `port.wake_median` (2 µs) | 1.86 µs | 6.16 µs | 5.94 µs | 5.77 µs |
+| `timer.wake_error_p99` (100 µs) | 26 µs | 35 µs | 1.84 ms | 2.02 ms |
+
+Decisions (2026-10-10; the budgets are Todhchai's, so these are croi's
+position, to confirm with Todhchai):
+- **`channel_call`, 1 µs: neither kernel meets it.** croi is 0.6-0.8 µs
+  faster than Zircon, so Zircon is no evidence the target is attainable
+  under KVM. The target stays as a hardware target; under KVM the
+  1.6 µs ceiling (m2's limit) guards against regressions. Before any IPC
+  rework, measure on hardware and trace the round trip (the candidates
+  in K8c's notes above), rather than tuning blind.
+- **`port.wake_median`, 2 µs: croi meets it only through idle polling**
+  (`croi.idle_poll_us`, 200 µs by default under a hypervisor, 0 on
+  hardware). Without polling croi and Zircon are level at ~6 µs: an IPI
+  and a HLT exit under KVM. The budget depends on that mechanism; on
+  hardware (no polling) it is unmeasured. Any change to the polling
+  default is a change to this budget.
+- **`timer.wake_error_p99`, 100 µs: croi meets it; Zircon misses it by
+  ~20x** (errors spread over 0-2 ms, unexplained: not slack, pinning, the
+  sleeper's profile or the TSC-deadline timer). croi without polling had
+  one 1.5 ms boot too, so late wakes of a halted vCPU under host load are
+  the suspect. Polling helps here as well.
+- **`syscall.null`**: met by both; Zircon's mitigations cost ~6 ns.
+- **`process.spawn_to_main`, 200 µs: croi meets it (~50 µs)**, so it is
+  not mirrored. **`irq.wait_wake_median`, 5 µs** is a hardware target
+  (KVM: ~12 µs, the wakeup IPI exiting); it needs hardware, not a KVM
+  comparison.
+
 ## Status against the requirements
 
 | # | Item | Status |
