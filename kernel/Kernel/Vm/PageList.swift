@@ -67,6 +67,11 @@ struct PageList: ~Copyable {
         Self.walk(root, level: 0, levels: levels, base: 0, body)
     }
 
+    /// How many pages in [first, end) are committed (skips empty subtrees).
+    func count(from first: Int, to end: Int) -> Int {
+        Self.count(root, level: 0, levels: levels, base: 0, first, end)
+    }
+
     deinit {
         Self.freeNodes(root, level: 0, levels: levels)
     }
@@ -81,6 +86,20 @@ struct PageList: ~Copyable {
             guard entry != 0 else { continue }
             if level == levels - 1 { body(base + i, entry) } else { walk(entry, level: level + 1, levels: levels, base: base + i * span, body) }
         }
+    }
+
+    private static func count(_ node: UInt64, level: Int, levels: Int, base: Int, _ first: Int, _ end: Int) -> Int {
+        guard node != 0 else { return 0 }
+        let span = power(levels - 1 - level)
+        var total = 0
+        for i in 0..<fanout {
+            let start = base + i * span
+            guard start < end, start + span > first else { continue }
+            let entry = slotAt(node, i).pointee
+            guard entry != 0 else { continue }
+            total += level == levels - 1 ? 1 : count(entry, level: level + 1, levels: levels, base: start, first, end)
+        }
+        return total
     }
 
     private static func freeNodes(_ node: UInt64, level: Int, levels: Int) {

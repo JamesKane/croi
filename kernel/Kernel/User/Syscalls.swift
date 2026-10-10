@@ -376,6 +376,16 @@ enum Syscalls {
         guard result == 0 else { throw .invalidArgs }
     }
 
+    /// The first `count` bytes of `value` (an older, shorter version of an
+    /// info struct).
+    static func putPrefix<T: BitwiseCopyable>(_ value: T, _ count: Int, _ address: UInt64) throws(Status) {
+        var copy = value
+        let result = withUnsafeBytes(of: &copy) {
+            unsafe UserCopy.to(address, $0.baseAddress!, UInt64(min(count, $0.count)))
+        }
+        guard result == 0 else { throw .invalidArgs }
+    }
+
     /// Checks an out-pointer is writable before doing anything (so a bad
     /// pointer doesn't leave a handle created that nobody can close).
     /// Checks an out-pointer is writable user memory before acting, so a

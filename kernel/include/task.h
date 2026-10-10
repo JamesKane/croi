@@ -110,3 +110,26 @@ typedef struct {
   uint32_t condition;
   uint32_t policy;
 } croi_policy_basic_t;
+
+// object_get_info(process, CROI_INFO_TASK_STATS): Zircon's
+// zx_info_task_stats_t (needs INSPECT; BAD_STATE once the process is
+// gone). Mapped bytes per mapping; committed bytes are private when the
+// VMO is mapped by this process only, else shared, and scaled-shared
+// divides each shared range by the number of processes mapping it (croi
+// has no copy-on-write clones). Physical VMOs count no committed bytes.
+// The topic is versioned as Zircon's (topic | version << 28); _V1 is the
+// first four fields.
+enum : uint32_t {
+  CROI_INFO_TASK_STATS = 12u | (1u << 28),
+  CROI_INFO_TASK_STATS_V1 = 12u,
+};
+
+typedef struct {
+  uint64_t mem_mapped_bytes;
+  uint64_t mem_private_bytes;
+  uint64_t mem_shared_bytes;
+  uint64_t mem_scaled_shared_bytes;
+  uint64_t mem_fractional_scaled_shared_bytes;  // 63-bit fixed point; 1 << 63 is a byte
+} croi_info_task_stats_t;
+
+static_assert(sizeof(croi_info_task_stats_t) == 40);

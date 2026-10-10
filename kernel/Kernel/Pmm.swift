@@ -207,6 +207,21 @@ let pmmLock = SpinLock()
         return nil
     }
 
+    /// Pages in each PageState (indexed by raw value), by a scan of every
+    /// arena (ZX_INFO_KMEM_STATS; not a hot path).
+    func pageCounts() -> InlineArray<6, UInt64> {
+        pmmLock.withLock { () -> InlineArray<6, UInt64> in
+            var counts = InlineArray<6, UInt64>(repeating: 0)
+            for a in 0..<arenaCount {
+                for i in 0..<arenas[a].pageCount {
+                    let state = Int(unsafe page(arenas[a], i).pointee.state.rawValue)
+                    if state < 6 { counts[state] += 1 }
+                }
+            }
+            return counts
+        }
+    }
+
     /// Returns a page to the free list. Freeing a page that isn't allocated
     /// (double free, or not RAM the PMM manages) panics.
     mutating func free(_ phys: UInt64) {

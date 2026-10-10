@@ -729,6 +729,21 @@ syscalls 150-156; Todhchai item 14 without an IOMMU):
   depend on where pages land. Not covered: quarantine through process
   death, and a BTI dying with PMTs quarantined.
 
+Memory statistics (Todhchai's M3 resident-memory budget; task.h,
+resource.h, UserAspace.taskStats, Kernel/Object/KernelMemory.swift):
+- object_get_info(process, CROI_INFO_TASK_STATS = 12 | 1 << 28, or _V1 =
+  12 for the first 32 bytes), Zircon's zx_info_task_stats_t, INSPECT:
+  per mapping, mapped bytes, and committed bytes (anonymous: the page
+  list's count in range; contiguous: all; physical: none) as private if
+  only this address space maps the VMO, else shared and scaled by the
+  number of address spaces, with the fraction in 63-bit fixed point.
+  Every process maps the vDSO, so its code is shared once there are two.
+- object_get_info(INFO system resource or root, CROI_INFO_KMEM_STATS =
+  17 | 1 << 28, or _V1 = 17): total, free, wired, heap (slab + large
+  pages, free = less bytes in use), vmo, mmu, other (allocated), from a
+  scan of the PMM's page records (`Pmm.pageCounts`). The rest are 0.
+- Boot test mode 13 (`ProcessSelfTest.runMemoryStats`).
+
 Boot budgets, K9f (Kernel/Trace/Budgets.swift, BootOptions.swift's
 `SelfTests`, tools/bench.py):
 - `croi.selftest=off` skips the self-test suite (early PMM/heap/VM/SMP

@@ -1932,6 +1932,98 @@ static int64_t dma(const startup_t *s) {
   return 0x600D;
 }
 
+// Mode 13: memory statistics (Todhchai's M3 resident-memory budget):
+// ZX_INFO_TASK_STATS on processes, ZX_INFO_KMEM_STATS on the root
+// resource. Private and shared move with one VMO mapped here and then in
+// two children; this thread's stack may grow meanwhile, so private is
+// checked within a few pages.
+static int64_t info(uint32_t handle, uint32_t topic, void *buffer, uint64_t size) {
+  return sys(CROI_SYS_OBJECT_GET_INFO, handle, topic, (uint64_t)buffer, size, 0);
+}
+
+// Scaled shared bytes with their fraction, as one 63-bit fixed-point number.
+static unsigned __int128 scaled(const croi_info_task_stats_t *t) {
+  return ((unsigned __int128)t->mem_scaled_shared_bytes << 63) + t->mem_fractional_scaled_shared_bytes;
+}
+
+static int64_t memory_stats(const startup_t *s) {
+  // The children first: every process maps the vDSO, so its pages turn
+  // shared as processes appear. Baselines are taken once they all exist.
+  uint32_t child = 0, child_vmar = 0, other = 0, other_vmar = 0;
+  CHECK(320, sys6(CROI_SYS_PROCESS_CREATE, s->job, (uint64_t)"stats", 5, 0, (uint64_t)&child, (uint64_t)&child_vmar) ==
+                     0 &&
+                 sys6(CROI_SYS_PROCESS_CREATE, s->job, (uint64_t)"stats", 5, 0, (uint64_t)&other, (uint64_t)&other_vmar) ==
+                     0);
+  croi_info_task_stats_t a, b, c, mine, theirs, theirs0, other0;
+  CHECK(321, info(s->process, CROI_INFO_TASK_STATS, &a, sizeof a) == 0 && a.mem_mapped_bytes > 0 &&
+                 a.mem_private_bytes > 0 && info(child, CROI_INFO_TASK_STATS, &theirs0, sizeof theirs0) == 0 &&
+                 info(other, CROI_INFO_TASK_STATS, &other0, sizeof other0) == 0);
+  // A VMO of 4 pages mapped here, 2 committed: private.
+  uint32_t vmo = 0;
+  uint64_t at = 0, there = 0;
+  CHECK(322, sys(CROI_SYS_VMO_CREATE, 4 * PAGE, 0, (uint64_t)&vmo, 0, 0) == 0 &&
+                 sys6(CROI_SYS_VMAR_MAP, s->vmar | (uint64_t)(CROI_VM_PERM_READ | CROI_VM_PERM_WRITE) << 32, 0, vmo,
+                      0, 4 * PAGE, (uint64_t)&at) == 0);
+  *(volatile uint64_t *)at = 1;
+  *(volatile uint64_t *)(at + 2 * PAGE) = 1;
+  CHECK(323, info(s->process, CROI_INFO_TASK_STATS, &b, sizeof b) == 0 &&
+                 b.mem_mapped_bytes == a.mem_mapped_bytes + 4 * PAGE &&
+                 b.mem_private_bytes >= a.mem_private_bytes + 2 * PAGE &&
+                 b.mem_private_bytes <= a.mem_private_bytes + 6 * PAGE && b.mem_shared_bytes == a.mem_shared_bytes);
+  // Mapped into a child too: shared, half of it each.
+  CHECK(324, sys6(CROI_SYS_VMAR_MAP, child_vmar | (uint64_t)CROI_VM_PERM_READ << 32, 0, vmo, 0, 4 * PAGE,
+                  (uint64_t)&there) == 0 &&
+                 info(s->process, CROI_INFO_TASK_STATS, &mine, sizeof mine) == 0 &&
+                 info(child, CROI_INFO_TASK_STATS, &theirs, sizeof theirs) == 0);
+  CHECK(325, mine.mem_shared_bytes == a.mem_shared_bytes + 2 * PAGE &&
+                 scaled(&mine) == scaled(&a) + ((unsigned __int128)PAGE << 63) &&
+                 mine.mem_private_bytes + 2 * PAGE <= b.mem_private_bytes + 4 * PAGE);
+  CHECK(326, theirs.mem_shared_bytes == theirs0.mem_shared_bytes + 2 * PAGE &&
+                 scaled(&theirs) == scaled(&theirs0) + ((unsigned __int128)PAGE << 63) &&
+                 theirs.mem_mapped_bytes == theirs0.mem_mapped_bytes + 4 * PAGE);
+  // A third: 8192 / 3 = 2730 and two thirds of a byte, carried as a fraction.
+  CHECK(327, sys6(CROI_SYS_VMAR_MAP, other_vmar | (uint64_t)CROI_VM_PERM_READ << 32, 0, vmo, 0, 4 * PAGE,
+                  (uint64_t)&there) == 0 &&
+                 info(other, CROI_INFO_TASK_STATS, &c, sizeof c) == 0 &&
+                 c.mem_shared_bytes == other0.mem_shared_bytes + 2 * PAGE &&
+                 scaled(&c) == scaled(&other0) + ((unsigned __int128)2730 << 63) + 0x5555555555555555ull);
+  // Zircon's rules: INSPECT, a process, a big enough buffer; v1 is shorter.
+  uint32_t weak = 0, thread = 0;
+  croi_info_task_stats_t v1;
+  v1.mem_fractional_scaled_shared_bytes = 77;
+  CHECK(328, sys(CROI_SYS_HANDLE_DUPLICATE, child, 1u << 1, (uint64_t)&weak, 0, 0) == 0 &&
+                 info(weak, CROI_INFO_TASK_STATS, &c, sizeof c) == ERR_ACCESS_DENIED_ &&
+                 info(child, CROI_INFO_TASK_STATS, &c, 32) == ERR_BUFFER_TOO_SMALL &&
+                 info(child, CROI_INFO_TASK_STATS_V1, &v1, 32) == 0 && v1.mem_shared_bytes == theirs.mem_shared_bytes &&
+                 v1.mem_fractional_scaled_shared_bytes == 77 &&
+                 sys6(CROI_SYS_THREAD_CREATE, child, (uint64_t)"t", 1, 0, (uint64_t)&thread, 0) == 0 &&
+                 info(thread, CROI_INFO_TASK_STATS, &c, sizeof c) == ERR_WRONG_TYPE);
+  sys(CROI_SYS_HANDLE_CLOSE, weak, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, thread, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, child, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, child_vmar, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, other, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, other_vmar, 0, 0, 0, 0);
+  sys(CROI_SYS_VMAR_UNMAP, s->vmar, at, 4 * PAGE, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, vmo, 0, 0, 0, 0);
+
+  // Kernel memory: needs the INFO resource; the parts add up.
+  croi_info_kmem_stats_t k;
+  croi_info_kmem_stats_v1_t k1;
+  uint32_t tracing = 0;
+  CHECK(329, info(s->resource, CROI_INFO_KMEM_STATS, &k, sizeof k) == 0 && k.total_bytes > 0 && k.free_bytes > 0 &&
+                 k.vmo_bytes > 0 && k.total_heap_bytes > 0 && k.mmu_overhead_bytes > 0 &&
+                 k.free_bytes + k.wired_bytes + k.total_heap_bytes + k.vmo_bytes + k.mmu_overhead_bytes +
+                         k.other_bytes <= k.total_bytes &&
+                 info(s->resource, CROI_INFO_KMEM_STATS_V1, &k1, sizeof k1) == 0 && k1.total_bytes == k.total_bytes &&
+                 info(s->resource, CROI_INFO_KMEM_STATS, &k, sizeof k1) == ERR_BUFFER_TOO_SMALL &&
+                 resource_create(s->resource, CROI_RSRC_KIND_SYSTEM, CROI_RSRC_SYSTEM_TRACING_BASE, 1, &tracing) == 0 &&
+                 info(tracing, CROI_INFO_KMEM_STATS, &k, sizeof k) != 0 &&
+                 info(s->process, CROI_INFO_KMEM_STATS, &k, sizeof k) == ERR_WRONG_TYPE);
+  sys(CROI_SYS_HANDLE_CLOSE, tracing, 0, 0, 0, 0);
+  return 0x600D;
+}
+
 // Mode 4: something to sample. Three frames deep, spin for `ns`, with a
 // clock syscall every 64 iterations (so some samples land in the kernel
 // and must continue into these frames).
@@ -1973,6 +2065,7 @@ __attribute__((section(".text.start"))) [[noreturn]] void _start(uint64_t mode, 
             : mode == 10 ? drivers((const startup_t *)handle)
             : mode == 11 ? interrupts((const startup_t *)handle)
             : mode == 12 ? dma((const startup_t *)handle)
+            : mode == 13 ? memory_stats((const startup_t *)handle)
             : mode >= 0x400 ? child((uint32_t)mode, handle, vdso_base)
                         : objects());
 }

@@ -679,3 +679,68 @@ struct BorrowedAspace {
         return base
     }
 }
+
+// MARK: Statistics (ZX_INFO_TASK_STATS)
+
+extension UserAspace {
+    /// Zircon's task stats for the mappings: mapped bytes, and committed
+    /// bytes split into private (its VMO mapped by this address space only)
+    /// and shared (by others too; croi has no copy-on-write clones), the
+    /// shared ones also scaled by how many address spaces map them. A VMO
+    /// mapped twice here counts twice, as in Zircon.
+    func taskStats() throws(VmError) -> croi_info_task_stats_t {
+        try record.pointee.lock.withLock { () throws(VmError) -> croi_info_task_stats_t in
+            guard !record.pointee.dead else { throw .dead }
+            var stats = croi_info_task_stats_t()
+            let fullByte: UInt64 = 1 << 63
+            for i in 0..<record.pointee.mappings.count {
+                let m = record.pointee.mappings[i]
+                stats.mem_mapped_bytes += m.size
+                let (committed, spaces) = m.vmo.attribution(offset: m.offset, size: m.size)
+                guard committed > 0 else { continue }
+                if spaces <= 1 {
+                    stats.mem_private_bytes += committed
+                } else {
+                    stats.mem_shared_bytes += committed
+                    stats.mem_scaled_shared_bytes += committed / spaces
+                    // The remainder's share in 63-bit fixed point (0x8000... = 1 byte).
+                    let remainder = committed % spaces
+                    let fraction = spaces.dividingFullWidth((high: remainder >> 1, low: remainder << 63)).quotient
+                    stats.mem_fractional_scaled_shared_bytes += fraction
+                    if stats.mem_fractional_scaled_shared_bytes >= fullByte {
+                        stats.mem_fractional_scaled_shared_bytes -= fullByte
+                        stats.mem_scaled_shared_bytes += 1
+                    }
+                }
+            }
+            return stats
+        }
+    }
+}
+
+extension VmoPointer {
+    /// Committed bytes of [offset, offset+size), and how many address
+    /// spaces map the VMO. Physical VMOs (device memory, the kernel's shared
+    /// pages) count nothing, as Zircon's don't. Aspace lock held (aspace ->
+    /// vmo order).
+    func attribution(offset: UInt64, size: UInt64) -> (bytes: UInt64, spaces: UInt64) {
+        pointee.lock.withLock { () -> (UInt64, UInt64) in
+            let page = KernelLayout.pageSize
+            let bytes: UInt64
+            switch pointee.kind {
+            case .physical: bytes = 0
+            case .contiguous: bytes = size
+            case .anonymous:
+                let first = Int(offset / page), end = Int((offset + size + page - 1) / page)
+                bytes = UInt64(pointee.pages.count(from: first, to: end)) * page
+            }
+            var spaces: UInt64 = 0
+            for i in 0..<pointee.mappers.count {
+                var seen = false
+                for j in 0..<i where pointee.mappers[j] == pointee.mappers[i] { seen = true }
+                if !seen { spaces += 1 }
+            }
+            return (bytes, spaces)
+        }
+    }
+}

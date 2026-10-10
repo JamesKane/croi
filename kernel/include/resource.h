@@ -50,3 +50,52 @@ typedef struct {
 } croi_info_resource_t;
 
 static_assert(sizeof(croi_info_resource_t) == 56);
+
+// object_get_info(resource, CROI_INFO_KMEM_STATS): Zircon's
+// zx_info_kmem_stats_t, on a handle to the INFO system resource (or root).
+// croi fills: total (RAM the PMM manages), free, wired (kernel image,
+// boot allocations, pinned firmware memory), heap total and free,
+// vmo, mmu_overhead (page tables), and other (allocated, untracked).
+// The rest (loaned, ipc, cache, slab, zram, reclaim, discardable) are 0.
+// _V1 is Zircon's zx_info_kmem_stats_v1_t.
+enum : uint32_t {
+  CROI_INFO_KMEM_STATS = 17u | (1u << 28),
+  CROI_INFO_KMEM_STATS_V1 = 17u,
+};
+
+typedef struct {
+  uint64_t total_bytes;
+  uint64_t free_bytes;
+  uint64_t free_loaned_bytes;
+  uint64_t wired_bytes;
+  uint64_t total_heap_bytes;
+  uint64_t free_heap_bytes;
+  uint64_t vmo_bytes;
+  uint64_t mmu_overhead_bytes;
+  uint64_t ipc_bytes;
+  uint64_t cache_bytes;
+  uint64_t slab_bytes;
+  uint64_t zram_bytes;
+  uint64_t other_bytes;
+  uint64_t vmo_reclaim_total_bytes;
+  uint64_t vmo_reclaim_newest_bytes;
+  uint64_t vmo_reclaim_oldest_bytes;
+  uint64_t vmo_reclaim_disabled_bytes;
+  uint64_t vmo_discardable_locked_bytes;
+  uint64_t vmo_discardable_unlocked_bytes;
+} croi_info_kmem_stats_t;
+
+typedef struct {
+  uint64_t total_bytes;
+  uint64_t free_bytes;
+  uint64_t wired_bytes;
+  uint64_t total_heap_bytes;
+  uint64_t free_heap_bytes;
+  uint64_t vmo_bytes;
+  uint64_t mmu_overhead_bytes;
+  uint64_t ipc_bytes;
+  uint64_t other_bytes;
+} croi_info_kmem_stats_v1_t;
+
+static_assert(sizeof(croi_info_kmem_stats_t) == 152);
+static_assert(sizeof(croi_info_kmem_stats_v1_t) == 72);

@@ -110,6 +110,40 @@ extension Syscalls {
                 try put(croi_info_vmar_t(base: v.base, len: v.size), a[2])
                 return
             }
+            if a[1] == UInt64(CROI_INFO_TASK_STATS) || a[1] == UInt64(CROI_INFO_TASK_STATS_V1) {
+                let size = a[1] == UInt64(CROI_INFO_TASK_STATS) ? MemoryLayout<croi_info_task_stats_t>.size : 32
+                guard a[3] >= UInt64(size) else { throw .bufferTooSmall }
+                try check(a[2], size)
+                let process = try table.get(handle, type: .process, rights: .inspect)
+                let record = ProcessPointer(object: process.object).pointee.aspaceRecord
+                let stats: croi_info_task_stats_t
+                do throws(VmError) {
+                    stats = try UserAspace.withView(record) { (aspace: borrowing UserAspace) throws(VmError) in
+                        try aspace.taskStats()
+                    }
+                } catch {
+                    throw .badState  // the process is gone
+                }
+                try putPrefix(stats, size, a[2])
+                return
+            }
+            if a[1] == UInt64(CROI_INFO_KMEM_STATS) || a[1] == UInt64(CROI_INFO_KMEM_STATS_V1) {
+                let v1 = a[1] == UInt64(CROI_INFO_KMEM_STATS_V1)
+                let size = v1 ? MemoryLayout<croi_info_kmem_stats_v1_t>.size : MemoryLayout<croi_info_kmem_stats_t>.size
+                guard a[3] >= UInt64(size) else { throw .bufferTooSmall }
+                try check(a[2], size)
+                try Resources.check(table, handle, system: UInt64(CROI_RSRC_SYSTEM_INFO_BASE))
+                let k = KernelMemory.stats()
+                if v1 {
+                    try put(croi_info_kmem_stats_v1_t(
+                        total_bytes: k.total_bytes, free_bytes: k.free_bytes, wired_bytes: k.wired_bytes,
+                        total_heap_bytes: k.total_heap_bytes, free_heap_bytes: k.free_heap_bytes, vmo_bytes: k.vmo_bytes,
+                        mmu_overhead_bytes: k.mmu_overhead_bytes, ipc_bytes: k.ipc_bytes, other_bytes: k.other_bytes), a[2])
+                } else {
+                    try put(k, a[2])
+                }
+                return
+            }
             if a[1] == UInt64(CROI_INFO_BTI) {
                 guard a[3] >= UInt64(MemoryLayout<croi_info_bti_t>.size) else { throw .bufferTooSmall }
                 try check(a[2], MemoryLayout<croi_info_bti_t>.size)

@@ -217,6 +217,20 @@ enum ProcessSelfTest {
         console.write("cache policy, quarantine, contiguous VMOs, properties narrowing only\n")
     }
 
+    /// ZX_INFO_TASK_STATS and ZX_INFO_KMEM_STATS from user mode (mode 13).
+    static func runMemoryStats(_ console: Uart) {
+        let before = Counts()
+        let exitCode = runInProcess(mode: 13)
+        guard exitCode == 0x600D else {
+            console.write("  mem:    user program failed check ")
+            console.write(decimal: UInt64(bitPattern: exitCode))
+            console.write("\n")
+            panic("memory stats self-test: user side")
+        }
+        before.expectUnchanged(console)
+        console.write("  mem:    task stats (mapped, private, shared, scaled with its fraction), kmem stats\n")
+    }
+
     /// Live processes, address spaces and objects, to check nothing leaked.
     struct Counts {
         let processes = Processes.live.load(ordering: .relaxed)
