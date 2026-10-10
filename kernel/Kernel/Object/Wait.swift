@@ -201,6 +201,13 @@ enum ObjectWait {
     /// handle is closed meanwhile) with them in `observed`.
     static func one(_ table: borrowing HandleTable, _ handle: UInt32, signals: UInt32, deadline: UInt64,
                     observed: inout UInt32) throws(Status) {
+        // Already satisfied (a server's wait with a message queued): no
+        // wait state, no observer, just the signals.
+        let current = try table.get(handle, rights: .wait).object.signals
+        if current & signals != 0 {
+            observed = current
+            return
+        }
         var items = InlineArray<1, WaitItem>(repeating: WaitItem(handle: handle, waitFor: signals))
         var span = items.mutableSpan
         defer { observed = items[0].pending }

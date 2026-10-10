@@ -23,6 +23,9 @@ struct Thread: ~Copyable {
     /// The scheduling context it runs on, if bound to one; otherwise a
     /// fair weight of its own (`baseWeight`, from a priority).
     var context: SchedContextPointer?
+    /// A deadline context a profile object made for it (K8c): it owns it,
+    /// and it goes when the thread is freed or another profile replaces it.
+    var profileContext: SchedContextPointer? = nil
     var baseWeight: UInt64
     /// Its base profile plus what it inherits from waiters on the owned
     /// wait queues it holds (`ownedQueues`), transitively.

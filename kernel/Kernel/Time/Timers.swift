@@ -16,7 +16,9 @@ struct TimerEntry {
 struct TimerQueue {
     var entries = InlineArray<32, TimerEntry>(repeating: TimerEntry())
     var nextId: UInt32 = 1
-    /// What the hardware is armed for (monotonic ns), or .max.
+    /// What the hardware is armed for (monotonic ns), or .max; never later
+    /// than the earliest pending `latest` (it may be earlier: see
+    /// `Timers.program`).
     var programmed: UInt64 = .max
     var interrupts: UInt64 = 0
 }
@@ -103,7 +105,13 @@ enum Timers {
             let latest = deadline.addingReportingOverflow(slack).overflow ? .max : deadline + slack
             unsafe queue.pointee.entries[i] = TimerEntry(id: id, deadline: deadline, latest: latest,
                                                          callback: callback, argument: argument, context: context)
-            program()
+            // The hardware is never armed later than any other pending
+            // timer's `latest`, so only this one can make it sooner: no
+            // scan (the scheduler arms and cancels at every switch).
+            if unsafe latest < queue.pointee.programmed {
+                unsafe queue.pointee.programmed = latest
+                armHardware(atNanoseconds: latest)
+            }
             return id
         }
         return nil
@@ -116,8 +124,9 @@ enum Timers {
         defer { arch_interrupts_restore(saved) }
         let queue = unsafe self.queue
         for i in 0..<32 where unsafe queue.pointee.entries[i].id == id {
+            // The hardware stays armed: an early interrupt finds nothing
+            // due and re-arms for what is left (`program`).
             unsafe queue.pointee.entries[i] = TimerEntry()
-            program()
             return true
         }
         return false
@@ -136,6 +145,9 @@ enum Timers {
             callback(entry.argument, entry.context)
         }
         program()
+        // Nothing left: the arm64 virtual timer and the SBI timer stay
+        // pending until told otherwise.
+        if unsafe queue.pointee.programmed == .max { disarmHardware() }
     }
 
     /// Diagnostics: another CPU's queue (read racily): the deadline of
@@ -163,19 +175,22 @@ enum Timers {
         return unsafe UnsafeMutablePointer<TimerQueue>(bitPattern: UInt(record.pointee.timerQueue))!
     }
 
-    /// Arms the hardware for the earliest `latest`, or disarms it.
+    /// After an interrupt: arms the hardware for the earliest `latest` left.
+    /// `arm` and `cancel` don't come here: a cancel leaves the hardware
+    /// armed (an early interrupt finds nothing due and re-arms for what is
+    /// left), and `arm` writes it only for a sooner timer. Writing the
+    /// hardware on every arm and cancel cost two VM exits per context
+    /// switch under KVM (the scheduler re-arms its slice timer at each
+    /// one); now it is at most one interrupt per slice.
     private static func program() {
         let queue = unsafe self.queue
         var earliest = UInt64.max
         for i in 0..<32 where unsafe queue.pointee.entries[i].id != 0 {
             earliest = min(earliest, unsafe queue.pointee.entries[i].latest)
         }
+        guard unsafe earliest < queue.pointee.programmed else { return }
         unsafe queue.pointee.programmed = earliest
-        if earliest == .max {
-            disarmHardware()
-        } else {
-            armHardware(atNanoseconds: earliest)
-        }
+        armHardware(atNanoseconds: earliest)
     }
 
     private static func armHardware(atNanoseconds ns: UInt64) {

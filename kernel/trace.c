@@ -11,3 +11,4 @@ uint8_t croi_user_protection = 0;
 
 // ExtendedState's configuration for the save/restore assembly (xstate.h).
 uint64_t croi_xstate_config = 0;
+uint8_t croi_xstate_saveopt = 0;

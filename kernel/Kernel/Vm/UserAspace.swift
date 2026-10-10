@@ -315,11 +315,23 @@ struct UserAspace: ~Copyable {
         guard size > 0, UserLayout.contains(base, size) else { return false }
         return record.pointee.lock.withLock { () -> Bool in
             guard !record.pointee.dead else { return false }
+            // Syscalls ask this for every out-pointer: a binary search for
+            // the first mapping ending past `base` (sorted, disjoint), not a
+            // scan of them all.
+            var low = 0
+            var high = record.pointee.mappings.count
+            while low < high {
+                let middle = (low + high) / 2
+                let m = record.pointee.mappings[middle]
+                if m.base + m.size <= base { low = middle + 1 } else { high = middle }
+            }
             var covered: UInt64 = 0
-            for i in 0..<record.pointee.mappings.count where record.pointee.mappings[i].overlaps(base, size) {
+            var i = low
+            while i < record.pointee.mappings.count, record.pointee.mappings[i].base < base + size {
                 let m = record.pointee.mappings[i]
                 guard m.rights.isSuperset(of: rights) else { return false }
                 covered += min(m.base + m.size, base + size) - max(m.base, base)
+                i += 1
             }
             return covered == size
         }

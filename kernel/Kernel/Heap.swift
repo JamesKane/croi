@@ -45,6 +45,7 @@ let heapLock = SpinLock()
     static var largeTail: UInt8 { 0xFE }
     static var endOfList: UInt16 { 0xFFFF }
     private static var poison: UInt8 { 0xA5 }
+    private static var poisonWord: UInt64 { 0xA5A5_A5A5_A5A5_A5A5 }
 
     /// Per class: physmap address of the first slab `Page` with free objects.
     private var partial = InlineArray<13, UInt64>(repeating: 0)
@@ -156,11 +157,16 @@ let heapLock = SpinLock()
         let c = unsafe Int(slab.pointee.heapClass)
         let objectSize = Self.classSize(c)
         guard Int(offset) % objectSize == 0 else { panic("heap: free of an interior pointer") }
-        // Double free: the object is already on this slab's free list.
-        var cursor = unsafe slab.pointee.heapFree
-        while cursor != Self.endOfList {
-            guard cursor != offset else { panic("heap: double free") }
-            cursor = unsafe objectAddress(slab, cursor).load(as: UInt16.self)
+        // Double free: the object is already on this slab's free list. Only
+        // an object still poisoned (bytes 8-15; every class is >= 16) can
+        // be, so only then is the list walked: walking it on every free
+        // cost up to 256 dependent loads (~140 ns per channel message).
+        if unsafe object.load(fromByteOffset: 8, as: UInt64.self) == Self.poisonWord {
+            var cursor = unsafe slab.pointee.heapFree
+            while cursor != Self.endOfList {
+                guard cursor != offset else { panic("heap: double free") }
+                cursor = unsafe objectAddress(slab, cursor).load(as: UInt16.self)
+            }
         }
 
         let wasFull = unsafe slab.pointee.heapFree == Self.endOfList

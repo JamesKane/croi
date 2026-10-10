@@ -42,6 +42,7 @@ struct Rights: OptionSet, Equatable {
     static var manageJob: Rights { Rights(rawValue: 1 << 16) }
     static var manageProcess: Rights { Rights(rawValue: 1 << 17) }
     static var manageThread: Rights { Rights(rawValue: 1 << 18) }
+    static var applyProfile: Rights { Rights(rawValue: 1 << 19) }
     static var manageVmo: Rights { Rights(rawValue: 1 << 24) }
     /// duplicate/replace: keep the source handle's rights.
     static var sameRights: Rights { Rights(rawValue: 1 << 31) }
@@ -82,5 +83,6 @@ enum ObjectType: UInt32 {
     case job = 17
     case vmar = 18
     case timer = 22
+    case profile = 25
     case exception = 29
 }

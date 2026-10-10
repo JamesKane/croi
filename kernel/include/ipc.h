@@ -10,6 +10,7 @@ enum : uint32_t {
   CROI_SIGNAL_READABLE = 1u << 0,
   CROI_SIGNAL_WRITABLE = 1u << 1,
   CROI_SIGNAL_PEER_CLOSED = 1u << 2,
+  CROI_SIGNAL_SIGNALED = 1u << 3,  // events, timers (ZX_EVENT_SIGNALED)
   // object_get_info topics.
   CROI_INFO_HANDLE_BASIC = 2,
   CROI_INFO_VMAR = 7,  // croi_info_vmar_t (needs INSPECT)

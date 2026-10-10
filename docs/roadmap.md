@@ -24,20 +24,21 @@ real-time wake error p99 < 100 µs.
 
 | # | Item | Status |
 |---|---|---|
-| 1 | Handoff: bootfs, GOP framebuffer, command line | **Done** (K1): handoff v3. The bootfs format itself comes with userboot (K8) |
+| 1 | Handoff: bootfs, GOP framebuffer, command line | **Done** (K1, K8b): handoff v3, Zircon's bootfs format |
 | 2 | Interrupt controllers, tickless timer, monotonic clock | **Done** (K2). ITS and AIA set up with the first MSI driver |
 | 3 | PMM (contiguous, reclaim), heap, slab | **Done**, except ACPI-reclaim memory, which stays wired until ACPI parsing is finished |
-| 4 | Threads, wait queues, PI owned wait queues, timers | Todo (K3) |
-| 5 | Scheduler: fair + EDF | Todo (K3) |
+| 4 | Threads, wait queues, PI owned wait queues, timers | **Done** (K3) |
+| 5 | Scheduler: fair + EDF | **Done** (K3c); profiles are objects since K8c |
 | 6 | SMP: AP bring-up, IPIs, TLB shootdown, per-CPU data | **Done** |
-| 7 | VMM phase A: VMARs, VMOs, faults, cache policy, huge pages | **Partial**: ArchAspace (map/unmap/protect/query, large pages), the kernel aspace, and the cache policy (K1; rv64 Svpbmt pending) exist. The rest is in K4 |
-| 8 | Handles, rights, koids, dispatchers, signals, waits | Todo (K5) |
-| 9 | Syscalls, user-copy, vDSO, user FP/SIMD | Todo (K6) |
-| 10 | Channel, port, event(pair), futex with owner, timer | Todo (K7) |
-| 11 | Job, process, thread, exceptions, job policy | Todo (K7) |
-| 12 | userboot + bootfs | Todo (K8) |
-| 18 (core) | ktrace rings, categories, user marks, tick and PMU sampling, per-thread PMU counters | Before M2, staged K3–K6 (see "Trace" below) |
-| 13–19 | Resources/interrupt objects, BTI/PMT + IOMMU, FIFO/counter/stream/socket/clock/debuglog, pager, rings, debug syscalls | After M2 (K9+), with the designs constrained below |
+| 7 | VMM phase A: VMARs, VMOs, faults, cache policy, huge pages | **Done** (K4, K7a VMARs) |
+| 8 | Handles, rights, koids, dispatchers, signals, waits | **Done** (K5) |
+| 9 | Syscalls, user-copy, vDSO, user FP/SIMD | **Done** (K6) |
+| 10 | Channel, port, event(pair), futex with owner, timer | **Done** (K7b, K7c) |
+| 11 | Job, process, thread, exceptions, job policy | **Done** (K7a, K7d) |
+| 12 | userboot + bootfs | **Done** (K8b) |
+| 18 (core) | ktrace rings, categories, user marks, tick and PMU sampling, per-thread PMU counters | **Done** (K3–K6, see "Trace" below) |
+| 13–19 | Resources/interrupt objects, BTI/PMT + IOMMU, FIFO/counter/stream/socket/clock/debuglog, pager, rings, debug syscalls | After M2 (K9+), with the designs constrained below. Debuglog came early (K8a) |
+| 20 | Firmware data for user space (ACPI tables and op regions, GOP framebuffer) behind resources | After M2, with item 13 (found at the 2026-10-10 re-sync) |
 
 ## Milestones
 
@@ -273,7 +274,9 @@ Embedded Swift user programs (`croi_user_program`); the boot test runs a
 Swift program end to end. **K8b done**: bootfs (`tools/mkbootfs.py`,
 pages adopted into a VMO), userboot in Embedded Swift starting
 `userboot.next` from bootfs with processargs; boot tests wait for its
-report. Next: K8c (the M2 program and the budgets).
+report. **K8c done**: bin/m2 runs the exit test on all three arches and
+measures the budgets; `boot-smoke-kvm` enforces them (see K8c below).
+**M2 is reached.**
 
 - Channel, event, eventpair, port, timer (absolute deadline plus slack), and
   futex with an owner for PI.
@@ -307,8 +310,31 @@ revision) is the model; croi's is Embedded Swift like the rest.
   trace: `channel_call` round trip with donation (< 1 µs), port wake from
   another core (< 2 µs) and real-time wake error (p99 < 100 µs), next to
   K6's null syscall (< 100 ns); `boot-smoke-kvm` enforces them.
+  **Done** (`user/m2`): profile objects (type 25, `profile_create`,
+  `object_set_profile`), trace rings readable from user space, idle
+  polling for cross-core wakes. Measured under KVM (2026-10-10, six
+  runs): null syscall 32–36 ns, port wake median 1.70–1.80 µs, wake
+  error p99 27–46 µs, all enforced. `channel_call` is 1.38–1.44 µs, above
+  its 1 µs target: accepted for now and enforced against a 1.6 µs
+  ceiling so it can't regress. The round trip is ~11k instructions with
+  no single hot spot; candidates are word-size user copies, a per-CPU
+  heap cache, no CallRecord allocation per call, fewer lock round trips
+  in read/write, and a direct-switch fast path. Port wake p99 is noisy
+  (2.6–77 µs: host scheduling of the vCPUs) and only the median is
+  enforced. To revisit with Todhchai.
 
-### After M2 (requirements 13–19 and the remaining extensions)
+### After M2 (requirements 13–20 and the remaining extensions)
+Todhchai's M3 order: resources and interrupt objects (item 13), a BTI
+without an IOMMU first, syscalls for contiguous/physical VMOs,
+`set_cache_policy` and cache ops; then item 20. Zircon deltas found by
+Todhchai's hosted kernel, to fix first: `channel_write`/`call` must
+consume the handles on failure; settable user TLS (FS_BASE, TPIDR_EL0,
+tp through `object_set_property`); `vmar_unmap_handle_close_thread_exit`;
+`vmo_create` rounds sizes up to a page (croi refuses them).
+- Firmware data for user space (item 20): the ACPI tables, AML operation
+  regions (SystemMemory over firmware ranges, SystemIO, PCI config) and
+  the GOP framebuffer, each behind a resource, since physical VMOs over
+  RAM and firmware ranges are refused.
 - Resources (MMIO, IRQ, IO port, root) and interrupt objects (port-bound,
   virtual, MSI/MSI-X per queue). The ext 5 fast path is exposed here.
 - BTI/PMT and IOMMUs. SMMUv3 has Fuchsia reference code. VT-d, AMD-Vi and

@@ -43,6 +43,7 @@ function(croi_user_runtime)
     ${PROJECT_SOURCE_DIR}/user/lib/runtime/start.c
     ${PROJECT_SOURCE_DIR}/user/lib/runtime/stdout.c
     ${PROJECT_SOURCE_DIR}/user/lib/runtime/malloc.c
+    ${PROJECT_SOURCE_DIR}/user/lib/runtime/timing.c
     ${PROJECT_SOURCE_DIR}/lib/rt/string.c
     ${PROJECT_SOURCE_DIR}/lib/rt/int128.c
     ${PROJECT_SOURCE_DIR}/lib/rt/stack_protector.c)

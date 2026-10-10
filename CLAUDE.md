@@ -459,7 +459,7 @@ syscalls 110-112):
 bootfs and userboot (K8b, Kernel/User/Userboot.swift, user/userboot,
 tools/mkbootfs.py):
 - bootfs.img is Zircon's bootfs format (no ZBI around it), built by
-  `tools/mkbootfs.py` from the `bootfs` target (today `bin/hello`). The
+  `tools/mkbootfs.py` from the `bootfs` target (today `bin/m2`). The
   kernel adopts the loader's CROI_MEM_BOOTFS pages into an anonymous VMO
   (`Vmo(adopting:)`, `Pmm.adopt`: wired -> vmo; freed when the VMO goes).
 - After "boot complete" the kernel starts userboot (an ELF in the kernel
@@ -469,7 +469,7 @@ tools/mkbootfs.py):
   (`BootOptions.withEnvironment`).
 - userboot maps bootfs, finds `userboot.next=` (default bin/launcher;
   the build appends `userboot.next=${CROI_USERBOOT_NEXT}`, default
-  bin/hello, to the ESP cmdline), loads its ELF into a new process
+  bin/m2, to the ESP cmdline), loads its ELF into a new process
   (segments that are all file mapped straight from the bootfs VMO, others
   copied; stack from PT_GNU_STACK), passes on every handle it got plus a
   new stdout in a processargs message, starts it, waits, and prints
@@ -478,6 +478,35 @@ tools/mkbootfs.py):
 - Syscalls added for it: `vmo_get_size` (44) and object_get_info
   CROI_INFO_VMAR (base, length). Embedded Swift `String ==` needs the
   Unicode tables (not linked): compare bytes.
+
+The M2 exit test and budgets (K8c, user/m2, Kernel/Object/ProfileObject.swift,
+include/profile.h):
+- `bin/m2` is userboot.next (CROI_USERBOOT_NEXT): channel pair, a VMO
+  passed across, a port wait with a deadline timer, debuglog output; then
+  it measures the budgets from the trace (user marks via TRACE_OP_RINGS, 4:
+  each CPU's ring as a read/map-only VMO) and enforces them when
+  `croi_timing_is_real()` (user/lib/runtime/timing.c: CPUID hypervisor
+  signature isn't TCG), i.e. in `boot-smoke-kvm`. KVM: null 32-36 ns,
+  channel_call ~1.4 µs (target 1 µs, enforced against 1.6 µs for now),
+  port wake median ~1.75 µs (p99 noisy, not enforced), wake error p99
+  27-46 µs. Measure wake error with `Sys.now()` directly: converting trace
+  counter time from an anchor mark was off by up to 170 µs.
+- Profile objects (25): `profile_create` (120, profile system resource
+  base 10 or root; zx_profile_info_t), `object_set_profile` (121: MANAGE_THREAD on
+  the thread, APPLY_PROFILE on the profile), refusal reasons (ext 4) in an out-parameter.
+  Test-only syscall 6 is still used by the kernel self-test.
+- Under a hypervisor an idle CPU polls for `croi.idle_poll_us` (default
+  200, 0 on hardware) before halting, announced in `pollingCpus`, so a
+  cross-core wake skips the IPI (and its VM exits).
+- Hot-path notes from the budget work: `Scheduler.locked` drops the lock
+  through `cancelTimeout` (one round trip); `Timers.arm` writes the
+  hardware only for a sooner timer and `cancel` leaves it armed (the
+  invariant: armed no later than the earliest pending `latest`; the
+  interrupt re-arms via `program`); amd64 saves with XSAVEOPT; the heap's
+  double-free walk runs only for an object still poisoned;
+  `UserAspace.covers` binary-searches; `ObjectWait.one` returns at once
+  if the signals are already set. Channel and port default rights are
+  Zircon's (no DUPLICATE; ports no WAIT). -O was worse than -Osize.
 
 ACPI (`Kernel/Acpi/`, after Zircon's acpi_lite): `AcpiTables` validates
 RSDP/XSDT and finds tables by signature; `withPhysicalBytes` reads through

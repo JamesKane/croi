@@ -17,6 +17,8 @@ void arch_xstate_restore(const void *_Nonnull area);
 // amd64: the XCR0 feature mask (0: FXSAVE only); arm64: SVE vector length
 // in bytes (0: FP/SIMD only); rv64: vlenb (0: no V; F/D always).
 extern uint64_t croi_xstate_config;
+// amd64: 1 to save with XSAVEOPT (same format as XSAVE).
+extern uint8_t croi_xstate_saveopt;
 
 #if defined(__aarch64__)
 enum : uint32_t {

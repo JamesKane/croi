@@ -12,7 +12,7 @@ find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
 
 set(CROI_EDK2_DIR /usr/share/edk2 CACHE PATH "edk2 firmware images for QEMU")
 set(CROI_CMDLINE "croi.test=1" CACHE STRING "Kernel command line written to the ESP (\\croi\\cmdline)")
-set(CROI_USERBOOT_NEXT "bin/hello" CACHE STRING "The bootfs program userboot starts (userboot.next=)")
+set(CROI_USERBOOT_NEXT "bin/m2" CACHE STRING "The bootfs program userboot starts (userboot.next=)")
 set(CROI_ELF2EFI ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/elf2efi.py)
 set(CROI_QEMU ${CMAKE_SOURCE_DIR}/tools/qemu.sh)
 

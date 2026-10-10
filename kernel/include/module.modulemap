@@ -10,6 +10,7 @@ module CroiAbi {
   header "pmu.h"
   header "shared.h"
   header "time.h"
+  header "profile.h"
   export *
 }
 

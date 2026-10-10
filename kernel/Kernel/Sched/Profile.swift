@@ -226,6 +226,19 @@ struct SchedContext: ~Copyable {
         Scheduler.publishPowerHints()
     }
 
+    /// Takes ownership of a context someone gave up with `leak()`.
+    init(owning record: SchedContextPointer) {
+        self.record = record
+    }
+
+    /// Gives up ownership without destroying it (a thread will own it).
+    @export(interface)
+    consuming func leak() -> SchedContextPointer {
+        let record = self.record
+        discard self
+        return record
+    }
+
     var cpu: Int { record.pointee.cpu }
     var overruns: UInt64 { Scheduler.locked { record.pointee.overruns } }
 

@@ -443,8 +443,8 @@ static int64_t processes(const startup_t *s) {
   process = spawn_child(s, job, 2);
   sys(CROI_SYS_NANOSLEEP, now_ns() + 2000000, 0, 0, 0, 0);
   CHECK(95, sys(CROI_SYS_TASK_KILL, job, 0, 0, 0, 0) == 0);
-  CHECK(96, (wait_terminated(process) & CROI_SIGNAL_TASK_TERMINATED) &&
-                return_code(process) == CROI_TASK_RETCODE_SYSCALL_KILL);
+  CHECK(96, wait_terminated(process) & CROI_SIGNAL_TASK_TERMINATED);
+  CHECK(296, return_code(process) == CROI_TASK_RETCODE_SYSCALL_KILL);
   sys(CROI_SYS_HANDLE_CLOSE, process, 0, 0, 0, 0);
   CHECK(97, sys6(CROI_SYS_PROCESS_CREATE, job, 0, 0, 0, (uint64_t)&process, (uint64_t)&vmar) == ERR_BAD_STATE);
   sys(CROI_SYS_HANDLE_CLOSE, job, 0, 0, 0, 0);

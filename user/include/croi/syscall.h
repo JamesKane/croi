@@ -81,6 +81,8 @@ enum : uint64_t {
   CROI_SYS_DEBUGLOG_CREATE = 110,  // (resource or 0, options: CROI_LOG_FLAG_READABLE, out)
   CROI_SYS_DEBUGLOG_WRITE = 111,   // (log, options: CROI_LOG_LOCAL, text, length <= 216)
   CROI_SYS_DEBUGLOG_READ = 112,    // (log, options 0, croi_log_record_t *buffer, length) -> record size
+  CROI_SYS_PROFILE_CREATE = 120,     // (resource, options 0, const croi_profile_info_t *, out)
+  CROI_SYS_OBJECT_SET_PROFILE = 121, // (thread, profile, options 0, uint32_t *refusal or 0)
 };
 
 enum : uint32_t {  // timer_create options (Zircon's ZX_TIMER_SLACK_*)
@@ -96,6 +98,7 @@ enum : uint32_t {  // timer_create options (Zircon's ZX_TIMER_SLACK_*)
 #include "task.h"  // vmar options, task return codes, signals, croi_process_info_t
 #include "ipc.h"   // channel signals and limits, call args, handle info, flow ids
 #include "log.h"   // debuglog records, flags, severities
+#include "profile.h"  // profile info, admission refusals
 
 enum : uint64_t {  // CROI_SYS_TRACE_CONFIGURE ops
   CROI_TRACE_OP_START = 0,   // a: categories, b: pages per CPU, c: mode;
@@ -103,6 +106,8 @@ enum : uint64_t {  // CROI_SYS_TRACE_CONFIGURE ops
   CROI_TRACE_OP_STOP = 1,
   CROI_TRACE_OP_REWIND = 2,
   CROI_TRACE_OP_MARK = 3,    // a, b: 16 bytes of the caller's
+  CROI_TRACE_OP_RINGS = 4,   // a: uint32_t handles[], b: capacity (>= CPUs); returns the
+                             // count: each CPU's ring (croi_trace_ring_t), read/map only
 };
 
 enum : uint64_t {  // CROI_SYS_PMU_CONFIGURE ops (events: pmu.h)

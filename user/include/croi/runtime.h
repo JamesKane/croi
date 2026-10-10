@@ -32,6 +32,9 @@ const char *croi_environ(int index);
 void croi_write(const char *text, size_t length);
 void croi_flush(void);
 
+// Whether timings are real (hardware or KVM), not QEMU TCG's.
+bool croi_timing_is_real(void);
+
 // Ends the process (flushing stdout).
 [[noreturn]] void croi_exit(int64_t code);
 

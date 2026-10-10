@@ -263,12 +263,27 @@ enum Syscalls {
             case 1: try TraceControl.stop(table, handle)
             case 2: try TraceControl.rewind(table, handle)
             case 3: try TraceControl.mark(table, handle, a[2], a[3])
+            case 4:  // rings: a handle per CPU into uint32_t[a[3]] at a[2]; returns the count
+                guard a[3] >= UInt64(Smp.count) else { throw .bufferTooSmall }
+                try check(a[2], Smp.count * 4)
+                let rings = try TraceControl.rings(table, handle)
+                for i in 0..<rings.count {
+                    do throws(Status) {
+                        try put(rings[i], a[2] + UInt64(i) * 4)
+                    } catch {
+                        for j in 0..<rings.count { try? table.close(rings[j]) }
+                        throw error
+                    }
+                }
+                return Int64(rings.count)
             default: throw .invalidArgs
             }
         case 51:  // pmu_configure
             try pmuConfigure(table, handle, a)
         case 60...79:
             try taskCall(number, a, table)
+        case 120...129:
+            try Profiles.call(number, a, table)
         case 110...119:
             return try DebugLogs.call(number, a, table)
         case 100...109:

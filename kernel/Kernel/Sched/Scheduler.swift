@@ -81,6 +81,14 @@ enum Scheduler {
 
     nonisolated(unsafe) private static var cpus = InlineArray<64, CpuScheduler>(repeating: CpuScheduler())
     private static let preemptPending = Atomic<UInt64>(0)
+    /// CPUs whose idle loop is polling `preemptPending` instead of halting:
+    /// a wakeup there needs no IPI (Linux's polling idle; haltpoll).
+    private static let pollingCpus = Atomic<UInt64>(0)
+    /// How long an idle CPU polls before it halts (ns): `croi.idle_poll_us=`,
+    /// by default 200 µs under a hypervisor, where an IPI to a halted vCPU
+    /// costs VM exits on both sides (measured ~4 µs of a 6 µs wake under
+    /// KVM without APIC virtualization), and 0 on hardware (MWAIT later).
+    nonisolated(unsafe) private(set) static var idlePollWindow: UInt64 = 0
     /// Dead detached threads awaiting `reapZombies`.
     nonisolated(unsafe) private static var zombies = QueueHead()
     /// Threads waiting in `join` (woken whenever a joinable thread dies).
@@ -104,6 +112,7 @@ enum Scheduler {
     /// Every CPU's capacity starts from its core type.
     static func initializeBootCpu(stack: StackRange) {
         exitWaiters = QueuePointer.allocate()
+        idlePollWindow = (BootOptions.number(after: "croi.idle_poll_us=") ?? (underHypervisor ? 200 : 0)) * 1000
         var estimates = InlineArray<64, UInt64>(repeating: 1024)
         var biggest: UInt64 = 1
         for cpu in 0..<Smp.count {
@@ -182,11 +191,50 @@ enum Scheduler {
                 refreshEligibility(me, Clock.now())
             }
             lock.unlockMasked()
+            if idlePollWindow != 0, poll(me) { continue }
             // A wakeup aimed here after the check above sends an IPI, and a
             // throttled thread's period start has a timer: either ends the
             // wait.
             arch_wait_for_interrupt()
         }
+    }
+
+    /// Polls for a reschedule request for up to `idlePollWindow`, with
+    /// interrupts on: true if one came. Announced in `pollingCpus` so a
+    /// waker skips the IPI; withdrawn, then the request rechecked, before
+    /// the caller halts (with `kick`'s order, one of them sees the other).
+    private static func poll(_ me: Int) -> Bool {
+        let bit: UInt64 = 1 << UInt64(me)
+        _ = pollingCpus.bitwiseOr(bit, ordering: .sequentiallyConsistent)
+        let until = Clock.now() + idlePollWindow
+        arch_interrupts_enable()
+        while preemptPending.load(ordering: .relaxed) & bit == 0, Clock.now() < until {
+            arch_spin_pause()
+        }
+        _ = arch_interrupts_save()
+        _ = pollingCpus.bitwiseAnd(~bit, ordering: .sequentiallyConsistent)
+        return preemptPending.load(ordering: .sequentiallyConsistent) & bit != 0
+    }
+
+    /// CPUID.1:ECX[31] on amd64. Unknown elsewhere: no polling by default.
+    private static var underHypervisor: Bool {
+        #if arch(x86_64)
+        var regs = InlineArray<4, UInt32>(repeating: 0)
+        var span = regs.mutableSpan
+        span.withUnsafeMutableBufferPointer { unsafe arch_cpuid(1, 0, $0.baseAddress!) }
+        return regs[2] & (1 << 31) != 0
+        #else
+        return false
+        #endif
+    }
+
+    /// Asks another CPU to reschedule: its request bit, and an IPI unless
+    /// its idle loop is polling for that bit. Scheduler lock held.
+    private static func kick(_ cpu: Int) {
+        let bit: UInt64 = 1 << UInt64(cpu)
+        _ = preemptPending.bitwiseOr(bit, ordering: .sequentiallyConsistent)
+        guard pollingCpus.load(ordering: .sequentiallyConsistent) & bit == 0 else { return }
+        Ipi.requestReschedule(cpu)
     }
 
     private static var allCpus: UInt64 { Smp.count >= 64 ? .max : (1 << UInt64(Smp.count)) - 1 }
@@ -308,8 +356,7 @@ enum Scheduler {
         let saved = arch_interrupts_save()
         lock.lockMasked()
         let result = body()
-        lock.unlockMasked()
-        cancelTimeout()
+        cancelTimeout()  // unlocks
         if preemptible { preemptIfRequested() }
         arch_interrupts_restore(saved)
         return result
@@ -438,13 +485,17 @@ enum Scheduler {
         thread.pointee.staleTimerCount = count + 1
     }
 
-    /// Cancels the running thread's leftover timeouts, now that the lock is
-    /// dropped: a timer firing after its thread is freed would touch freed
-    /// memory. Interrupts masked.
+    /// Cancels the running thread's leftover timeouts and drops the lock
+    /// (held on entry, interrupts masked): a timer firing after its thread
+    /// is freed would touch freed memory. Ones on other CPUs are cancelled
+    /// by IPI once the lock is dropped. (It used to take the lock again for
+    /// this, a second round trip at the end of every `locked`.)
     private static func cancelTimeout() {
-        let me = Int(Cpu.current)
-        guard let thread = cpus[me].current else { return }
-        lock.lockMasked()
+        let me = Int(Cpu.current)  // afresh: `body` may have switched CPUs
+        guard let thread = cpus[me].current else {
+            lock.unlockMasked()
+            return
+        }
         dropTimeout(thread, me)
         var stale = thread.pointee.staleTimers
         let count = thread.pointee.staleTimerCount
@@ -779,6 +830,27 @@ enum Scheduler {
         }
     }
 
+    /// Applies a profile object's settings to `thread` (K8c): a CPU mask,
+    /// then either a fair weight (leaving any context) or a deadline context
+    /// it will own. A context it owned before is destroyed.
+    static func applyProfile(_ thread: ThreadPointer, weight: UInt64?, context: consuming SchedContext?,
+                             affinity: UInt64?) {
+        let owned = context?.leak()
+        let old = locked { () -> SchedContextPointer? in
+            if let affinity, affinity & allCpus != 0 { thread.pointee.affinity = affinity & allCpus }
+            if weight != nil || owned != nil { detachContext(thread) }
+            if let weight { thread.pointee.baseWeight = weight }
+            if let owned { attach(thread, owned) }
+            if weight != nil, owned == nil { setProfile(thread, computeEffective(thread), Clock.now()) }
+            reposition(thread)
+            guard weight != nil || owned != nil else { return nil }
+            let old = thread.pointee.profileContext
+            thread.pointee.profileContext = owned
+            return old
+        }
+        if let old { _ = SchedContext(owning: old) }  // unbound now: destroyed
+    }
+
     private static func attach(_ thread: ThreadPointer, _ context: SchedContextPointer) {
         context.pointee.boundThreads += 1
         thread.pointee.context = context
@@ -1067,7 +1139,7 @@ enum Scheduler {
         let me = Int(Cpu.current)
         let current = cpus[cpu].current!
         if thread.pointee.runQueue == .throttled {
-            if cpu == me { refreshEligibility(me, now) } else { Ipi.requestReschedule(cpu) }
+            if cpu == me { refreshEligibility(me, now) } else { kick(cpu) }
         } else if preempts(thread, current)
                     || (current.pointee.effective.discipline == .fair && cpus[cpu].sliceTimer == 0) {
             requestPreemption(on: cpu)
@@ -1123,6 +1195,13 @@ enum Scheduler {
         }
         refreshEligibility(me, now)
         let next = pop(me) ?? (current.pointee.state == .running ? current : cpus[me].idle!)
+        // Leaving the idle thread (an interrupt can switch away mid-poll):
+        // this CPU no longer polls, so wakers must send IPIs again. Under
+        // the lock, as `kick` is: a waker sees the bit cleared or enqueued
+        // before this switch chose.
+        if current.pointee.isIdle, next != current {
+            _ = pollingCpus.bitwiseAnd(~(1 << UInt64(me)), ordering: .sequentiallyConsistent)
+        }
         next.pointee.state = .running
         next.pointee.runStart = now
         advanceMinVruntime(me, next)
@@ -1260,7 +1339,7 @@ enum Scheduler {
     /// Asks `cpu` to reschedule: this one at its next preemption point,
     /// another by IPI.
     private static func requestPreemption(on cpu: Int) {
-        if cpu == Int(Cpu.current) { requestPreemption() } else { Ipi.requestReschedule(cpu) }
+        if cpu == Int(Cpu.current) { requestPreemption() } else { kick(cpu) }
     }
 
     /// Asks this CPU to reschedule when the current interrupt returns.
@@ -1350,6 +1429,10 @@ enum Scheduler {
 
     /// Frees a thread that is dead and off its stack.
     private static func free(_ thread: ThreadPointer) {
+        if let owned = thread.pointee.profileContext {
+            thread.pointee.profileContext = nil
+            _ = SchedContext(owning: owned)  // unbound at exit: destroyed
+        }
         locked {
             if allThreads == thread {
                 allThreads = thread.pointee.allNext

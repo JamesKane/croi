@@ -74,7 +74,8 @@ struct PortObject: ~Copyable {
     var queued = 0
     let waiters = QueuePointer.allocate()
 
-    static var defaultRights: Rights { [.basic, .read, .write] }
+    /// ZX_DEFAULT_PORT_RIGHTS: no WAIT (ports are waited on with port_wait).
+    static var defaultRights: Rights { Rights.basic.subtracting(.wait).union([.read, .write]) }
 }
 
 @safe struct PortPointer {

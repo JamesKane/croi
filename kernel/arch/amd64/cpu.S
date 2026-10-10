@@ -404,7 +404,11 @@ arch_xstate_save:
     jz      1f
     mov     %rax, %rdx
     shr     $32, %rdx
+    cmpb    $0, croi_xstate_saveopt(%rip)
+    jne     2f
     xsave64 (%rdi)
+    ret
+2:  xsaveopt64 (%rdi)
     ret
 1:  fxsave64 (%rdi)
     ret

@@ -114,6 +114,7 @@ enum Objects {
         case .eventpair: Channels.destroyEventPair(object)
         case .timer: free(object, as: TimerObject.self)
         case .log: DebugLogs.destroy(object)
+        case .profile: free(object, as: ProfileObject.self)
         case .exception: Exceptions.destroy(object)
         case .none: panic("object: destroying an untyped object")
         }

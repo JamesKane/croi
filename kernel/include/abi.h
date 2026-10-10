@@ -10,3 +10,4 @@
 #include "pmu.h"
 #include "shared.h"
 #include "time.h"
+#include "profile.h"

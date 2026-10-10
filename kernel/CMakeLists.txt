@@ -42,6 +42,7 @@ add_library(kernel-swift OBJECT
   Kernel/Object/TimerObject.swift
   Kernel/Object/Exception.swift
   Kernel/Object/DebugLog.swift
+  Kernel/Object/ProfileObject.swift
   Kernel/Object/ProcessSelfTest.swift
   Kernel/Object/VmoObject.swift
   Kernel/Object/ObjectSelfTest.swift
@@ -135,12 +136,12 @@ set_source_files_properties(userprogram.S PROPERTIES
 
 # bootfs (K8b): the programs userboot can start, in Zircon's bootfs format
 # (tools/mkbootfs.py), served on the ESP as \croi\bootfs.img.
-set(_hello ${CMAKE_CURRENT_BINARY_DIR}/hello.elf)
-croi_user_program(${_hello} SWIFT ${_user_dir}/test/hello/Main.swift)
+set(_m2 ${CMAKE_CURRENT_BINARY_DIR}/m2.elf)
+croi_user_program(${_m2} SWIFT ${_user_dir}/m2/Main.swift ${_user_dir}/m2/Sys.swift ${_user_dir}/m2/Bench.swift)
 set(CROI_BOOTFS_IMAGE ${CMAKE_BINARY_DIR}/bootfs.img PARENT_SCOPE)
 add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/bootfs.img
   COMMAND ${Python3_EXECUTABLE} -I ${PROJECT_SOURCE_DIR}/tools/mkbootfs.py ${CMAKE_BINARY_DIR}/bootfs.img
-          bin/hello=${_hello}
-  DEPENDS ${_hello} ${PROJECT_SOURCE_DIR}/tools/mkbootfs.py
+          bin/m2=${_m2}
+  DEPENDS ${_m2} ${PROJECT_SOURCE_DIR}/tools/mkbootfs.py
   COMMENT "Building bootfs")
 add_custom_target(bootfs DEPENDS ${CMAKE_BINARY_DIR}/bootfs.img)

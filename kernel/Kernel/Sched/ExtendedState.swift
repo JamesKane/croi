@@ -9,6 +9,8 @@ struct ExtendedStateFacts: Equatable {
     var xsave = false
     var features: UInt64 = 0
     var xfd = false
+    /// XSAVEOPT: skips components in their initial state (or unchanged).
+    var xsaveopt = false
     #elseif arch(arm64)
     var fp = false
     /// Vector lengths in bytes (0: no SVE / SME); SME2's ZT0.
@@ -30,6 +32,7 @@ struct ExtendedStateFacts: Equatable {
         result.xsave = xsave && other.xsave
         result.features = features & other.features
         result.xfd = xfd && other.xfd
+        result.xsaveopt = xsaveopt && other.xsaveopt
         #elseif arch(arm64)
         result.fp = fp && other.fp
         result.sveLength = min(sveLength, other.sveLength)
@@ -95,6 +98,9 @@ enum ExtendedState {
         // and AMX tiles (lazy XFD support isn't built yet).
         let excluded: UInt64 = 1 << 9 | 1 << 17 | 1 << 18
         croi_xstate_config = shared.xsave ? shared.features & ~excluded : 0
+        // User code mostly leaves AVX/AVX-512 in their initial state: plain
+        // XSAVE still wrote all ~2.5 KiB of it at every switch.
+        croi_xstate_saveopt = shared.xsave && shared.xsaveopt ? 1 : 0
         #elseif arch(arm64)
         croi_xstate_config = shared.sveLength
         #elseif arch(riscv64)
@@ -126,7 +132,9 @@ enum ExtendedState {
         if facts.xsave {
             let leaf = cpuid(0xD, 0)
             facts.features = UInt64(leaf[3]) << 32 | UInt64(leaf[0])
-            facts.xfd = cpuid(0xD, 1)[0] & (1 << 4) != 0
+            let sub1 = cpuid(0xD, 1)[0]
+            facts.xfd = sub1 & (1 << 4) != 0
+            facts.xsaveopt = sub1 & 1 != 0
         }
         #elseif arch(arm64)
         let pfr0 = arch_arm64_id_register(UInt32(CROI_ID_AA64PFR0))

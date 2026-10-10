@@ -120,7 +120,10 @@ struct MessageHeader {
 struct CallRecord: ~Copyable {
     enum State { case pending, replied, peerClosed, abandoned }
 
-    let queue = QueuePointer.allocate()
+    /// The caller waits here (an owned queue while a server holds the
+    /// call). First, so the record's address is the queue's: no separate
+    /// allocation per call.
+    var waiters = QueueHead()
     let txid: UInt32
     var state = State.pending
     var reply: UInt64 = 0
@@ -146,12 +149,14 @@ struct CallRecord: ~Copyable {
         return CallRecordPointer(address: UInt64(UInt(bitPattern: raw)))
     }
 
+    /// The caller's wait queue, inside the record.
+    var queue: QueuePointer { QueuePointer(address: address) }
+
     func retain() { pointee.references.add(1, ordering: .relaxed) }
 
     func release() {
         guard pointee.references.subtract(1, ordering: .acquiringAndReleasing).newValue == 0 else { return }
         if pointee.reply != 0 { MessagePointer(address: pointee.reply).free() }
-        pointee.queue.deallocate()
         let raw = unsafe UnsafeMutablePointer<CallRecord>(bitPattern: UInt(address))!
         unsafe raw.deinitialize(count: 1)
         unsafe heap.free(UnsafeMutableRawPointer(raw))
@@ -173,7 +178,8 @@ struct ChannelObject: ~Copyable {
     var calls = UniqueArray<UInt64>()
     var nextTxid: UInt32 = 0
 
-    static var defaultRights: Rights { [.basic, .read, .write, .signal, .signalPeer] }
+    /// ZX_DEFAULT_CHANNEL_RIGHTS: no DUPLICATE (an endpoint has one reader).
+    static var defaultRights: Rights { Rights.basic.subtracting(.duplicate).union([.read, .write, .signal, .signalPeer]) }
 }
 
 @safe struct ChannelPointer {
@@ -275,8 +281,8 @@ enum Channels {
     /// donation to whoever received it. Drops the reference passed in.
     private static func finishCall(_ call: CallRecordPointer) {
         Scheduler.locked {
-            Scheduler.setOwner(call.pointee.queue, nil)
-            Scheduler.wakeAll(call.pointee.queue)
+            Scheduler.setOwner(call.queue, nil)
+            Scheduler.wakeAll(call.queue)
         }
         call.release()
     }
@@ -368,7 +374,7 @@ enum Channels {
             Scheduler.locked {
                 guard call.pointee.state == .pending else { return }
                 // The caller may not have blocked yet: it lends once it does.
-                if Scheduler.setOwner(call.pointee.queue, Scheduler.current) {
+                if Scheduler.setOwner(call.queue, Scheduler.current) {
                     Trace.event(CROI_TRACE_IPC, UInt16(CROI_TK_DONATE), call.pointee.flow,
                                 UInt64(call.pointee.callerTraceId))
                 }
@@ -418,7 +424,7 @@ enum Channels {
         if failure == nil {
             Scheduler.locked {
                 while call.pointee.state == .pending {
-                    let result = Scheduler.block(on: call.pointee.queue, deadline: deadline, interruptible: true)
+                    let result = Scheduler.block(on: call.queue, deadline: deadline, interruptible: true)
                     if result == .interrupted {
                         interrupted = true
                         return
@@ -439,7 +445,7 @@ enum Channels {
             if call.pointee.state == .pending { call.pointee.state = .abandoned }
             return call.pointee.state
         }
-        _ = Scheduler.locked { Scheduler.setOwner(call.pointee.queue, nil) }
+        _ = Scheduler.locked { Scheduler.setOwner(call.queue, nil) }
         var reply: MessagePointer? = nil
         if outcome == .replied {
             reply = MessagePointer(address: call.pointee.reply)
