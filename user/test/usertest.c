@@ -1499,10 +1499,12 @@ static int64_t virtual_interrupts(const startup_t *s, uint32_t port) {
   return 0x600D;
 }
 
-// K9d: MSI. amd64: edu (00:10.0) delivers a real MSI (port and wait);
-// virtio-blk's MSI-X table (not enabled, so it never fires) shows the
-// kernel programming, masking and moving its entries. Elsewhere
-// msi_allocate is NOT_SUPPORTED until the ITS / IMSIC.
+// K9d: MSI. amd64: edu delivers a real MSI (port and wait); virtio-blk's
+// MSI-X table (not enabled, so it never fires) shows the kernel
+// programming, masking and moving its entries. Both are found by scanning
+// bus 0 and skipped if absent (other machines boot this kernel too), and
+// every config register touched is put back. Elsewhere msi_allocate is
+// NOT_SUPPORTED until the ITS / IMSIC.
 #if defined(__x86_64__)
 #define ECAM 0xE0000000ull
 // A physical VMO over [base, base + size) under the root resource, and a
@@ -1539,14 +1541,18 @@ static uint64_t bar(volatile uint8_t *cfg, uint32_t index) {
   return address;
 }
 
+// Bus 0's function-0 device with this ID and capability, or 0.
+static uint32_t find_device(volatile uint8_t *bus, uint32_t vendor_mask, uint32_t id, uint8_t cap, uint32_t *at) {
+  for (uint32_t device = 0; device < 32; device++) {
+    volatile uint8_t *cfg = bus + (device << 15);
+    if ((cfg32(cfg, 0) & vendor_mask) == id && (*at = capability(cfg, cap)) != 0) return device << 15;
+  }
+  return 0;
+}
+
 static int64_t msi_test(const startup_t *s, uint32_t port) {
   volatile uint8_t *bus = 0;
   uint32_t bus_vmo = physical_vmo(s, ECAM, 32 * 0x8000, &bus);  // bus 0, devices 0-31, function 0
-  volatile uint8_t *edu = bus + (0x10 << 15);
-  CHECK(281, cfg32(edu, 0) == 0x11e81234);
-  cfg32_write(edu, 4, cfg32(edu, 4) | 1u << 1 | 1u << 2 | 1u << 10);  // memory, bus master, no INTx
-  uint32_t cap = capability(edu, 0x05);
-  CHECK(282, cap != 0);
 
   // Allocations: the MSI resource; a power of two up to 32.
   uint32_t msi = 0, tracing = 0, intr = 0, other = 0, anon = 0;
@@ -1561,16 +1567,22 @@ static int64_t msi_test(const startup_t *s, uint32_t port) {
                  (info.target_addr & ~0xFF000ull) == 0xFEE00000 && info.target_data == info.base_irq_id &&
                  info.base_irq_id >= 0xB0 && info.base_irq_id < 0xF0 && info.num_irq == 1 &&
                  info.interrupt_count == 0);
+  uint32_t cap = 0;
+  uint32_t edu_at = find_device(bus, ~0u, 0x11e81234, 0x05, &cap);
+  if (edu_at != 0) {
+  volatile uint8_t *edu = bus + edu_at;
+  uint32_t command = cfg32(edu, 4) & 0xFFFF;
+  cfg32_write(edu, 4, command | 1u << 1 | 1u << 2 | 1u << 10);  // memory, bus master, no INTx
   // Interrupt objects: the capability must be MSI's; ids once each.
   CHECK(285, sys(CROI_SYS_VMO_CREATE, PAGE, 0, (uint64_t)&anon, 0, 0) == 0 &&
                  sys6(CROI_SYS_MSI_CREATE, msi, 0, 0, anon, 0, (uint64_t)&intr) == ERR_INVALID_ARGS &&
-                 sys6(CROI_SYS_MSI_CREATE, msi, 0, 0, bus_vmo, 0x10 << 15, (uint64_t)&intr) == ERR_INVALID_ARGS &&
-                 sys6(CROI_SYS_MSI_CREATE, msi, 0, 1, bus_vmo, (0x10 << 15) + cap, (uint64_t)&intr) ==
+                 sys6(CROI_SYS_MSI_CREATE, msi, 0, 0, bus_vmo, edu_at, (uint64_t)&intr) == ERR_INVALID_ARGS &&
+                 sys6(CROI_SYS_MSI_CREATE, msi, 0, 1, bus_vmo, edu_at + cap, (uint64_t)&intr) ==
                      ERR_INVALID_ARGS &&
-                 sys6(CROI_SYS_MSI_CREATE, msi, 2, 0, bus_vmo, (0x10 << 15) + cap, (uint64_t)&intr) ==
+                 sys6(CROI_SYS_MSI_CREATE, msi, 2, 0, bus_vmo, edu_at + cap, (uint64_t)&intr) ==
                      ERR_INVALID_ARGS &&
-                 sys6(CROI_SYS_MSI_CREATE, msi, 0, 0, bus_vmo, (0x10 << 15) + cap, (uint64_t)&intr) == 0 &&
-                 sys6(CROI_SYS_MSI_CREATE, msi, 0, 0, bus_vmo, (0x10 << 15) + cap, (uint64_t)&other) ==
+                 sys6(CROI_SYS_MSI_CREATE, msi, 0, 0, bus_vmo, edu_at + cap, (uint64_t)&intr) == 0 &&
+                 sys6(CROI_SYS_MSI_CREATE, msi, 0, 0, bus_vmo, edu_at + cap, (uint64_t)&other) ==
                      ERR_ALREADY_BOUND &&
                  sys(CROI_SYS_OBJECT_GET_INFO, msi, CROI_INFO_MSI, (uint64_t)&info, sizeof info, 0) == 0 &&
                  info.interrupt_count == 1 &&
@@ -1608,23 +1620,33 @@ static int64_t msi_test(const startup_t *s, uint32_t port) {
   edu_regs[0x60 / 4] = 2;
   CHECK(290, sys(CROI_SYS_INTERRUPT_WAIT, intr, (uint64_t)&time, 0, 0, 0) == 0 && time >= before);
   edu_regs[0x64 / 4] = 2;
-  *(volatile uint16_t *)(edu + cap + 2) = control & ~1u;  // MSI off again
+  *(volatile uint16_t *)(edu + cap + 2) = control;  // MSI as it was
+  cfg32_write(edu, 4, command);                     // and the command register
   CHECK(291, sys(CROI_SYS_INTERRUPT_DESTROY, intr, 0, 0, 0, 0) == 0 && sys(CROI_SYS_HANDLE_CLOSE, intr, 0, 0, 0, 0) == 0);
   sys(CROI_SYS_HANDLE_CLOSE, regs_vmo, 0, 0, 0, 0);
+  }
   sys(CROI_SYS_HANDLE_CLOSE, msi, 0, 0, 0, 0);
 
   // MSI-X: virtio-blk's table. Entries programmed from the allocation,
   // unmasked; entry 1 moved to CPU 1 (QEMU's APIC IDs are CPU numbers);
   // cleared and masked when the objects go.
-  volatile uint8_t *virtio = 0;
   uint32_t msix = 0;
-  for (uint32_t device = 0; device < 32 && !virtio; device++) {
-    volatile uint8_t *cfg = bus + (device << 15);
-    if ((cfg32(cfg, 0) & 0xFFFF) == 0x1af4 && (msix = capability(cfg, 0x11)) != 0) virtio = cfg;
+  uint32_t virtio_at = find_device(bus, 0xFFFF, 0x1af4, 0x11, &msix);
+  if (virtio_at == 0) {
+    sys(CROI_SYS_HANDLE_CLOSE, bus_vmo, 0, 0, 0, 0);
+    return 0x600D;
   }
-  CHECK(292, virtio != 0 && (*(volatile uint16_t *)(virtio + msix + 2) & 0x7FF) >= 1);
-  cfg32_write(virtio, 4, cfg32(virtio, 4) | 1u << 1);
+  volatile uint8_t *virtio = bus + virtio_at;
+  CHECK(292, (*(volatile uint16_t *)(virtio + msix + 2) & 0x7FF) >= 1 &&
+                 !(*(volatile uint16_t *)(virtio + msix + 2) & 0x8000));  // MSI-X not enabled
+  uint32_t virtio_command = cfg32(virtio, 4) & 0xFFFF;
+  cfg32_write(virtio, 4, virtio_command | 1u << 1);
   uint32_t table = cfg32(virtio, msix + 4);
+  if (bar(virtio, table & 7) == 0) {  // no address assigned: nothing to look at
+    cfg32_write(virtio, 4, virtio_command);
+    sys(CROI_SYS_HANDLE_CLOSE, bus_vmo, 0, 0, 0, 0);
+    return 0x600D;
+  }
   uint64_t table_base = bar(virtio, table & 7) + (table & ~7u);
   volatile uint8_t *entries = 0;
   uint32_t table_vmo = physical_vmo(s, table_base & ~(PAGE - 1), PAGE, &entries);
@@ -1643,6 +1665,7 @@ static int64_t msi_test(const startup_t *s, uint32_t port) {
                  e[6] >= 0xB0 && e[6] < 0xF0 && (e[7] & 1) == 0 && e[0] == (uint32_t)info.target_addr);
   CHECK(296, sys(CROI_SYS_HANDLE_CLOSE, x1, 0, 0, 0, 0) == 0 && e[4] == 0 && e[6] == 0 && (e[7] & 1) == 1 &&
                  sys(CROI_SYS_HANDLE_CLOSE, x0, 0, 0, 0, 0) == 0 && e[0] == 0 && (e[3] & 1) == 1);
+  cfg32_write(virtio, 4, virtio_command);
   sys(CROI_SYS_HANDLE_CLOSE, table_vmo, 0, 0, 0, 0);
   sys(CROI_SYS_HANDLE_CLOSE, msi, 0, 0, 0, 0);
   sys(CROI_SYS_HANDLE_CLOSE, bus_vmo, 0, 0, 0, 0);

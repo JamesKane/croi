@@ -193,8 +193,8 @@ enum ProcessSelfTest {
         console.write(decimal: Syscalls.reported.load(ordering: .relaxed) / 1000)
         console.write(" us median\n")
         #if arch(x86_64)
-        console.write("  msi:    edu's MSI by port and by wait; virtio-blk MSI-X entries programmed, masked, ")
-        console.write("moved to CPU 1, cleared\n")
+        console.write("  msi:    allocations and info; where present, edu's MSI by port and by wait and a virtio ")
+        console.write("MSI-X table's entries programmed, masked, moved to CPU 1, cleared\n")
         #else
         console.write("  msi:    not supported yet (ITS / IMSIC)\n")
         #endif

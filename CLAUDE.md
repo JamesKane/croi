@@ -653,10 +653,13 @@ include/interrupt.h; syscalls 147 msi_allocate, 148 msi_create):
 - The kernel's mappings of MSI-X tables and capabilities are `shared`
   (`mapPhysical(shared:)`): they don't enter the root filter's list of
   kernel MMIO, so the driver keeps its resource over them.
-- Boot test (mode 11, amd64; QEMU gets `-device edu,addr=0x10`): edu's
-  MSI by port and by wait, with the driver programming the capability
-  from the info; virtio-blk's MSI-X table (MSI-X not enabled, so it never
-  fires) read back after create, a move to CPU 1, and close. KVM timing
+- Boot test (mode 11, amd64; croi's QEMU gets `-device edu,addr=0x10`):
+  edu's MSI by port and by wait, with the driver programming the
+  capability from the info; a virtio device's MSI-X table (MSI-X not
+  enabled, so it never fires) read back after create, a move to CPU 1,
+  and close. Both are found by scanning bus 0 and skipped when absent,
+  and the config registers touched are restored: Todhchai boots this
+  kernel on other machine shapes, with its own edu driver (INTx). KVM timing
   note: channel_call in m2 reads 1.4-2.8 us when the host is busy
   building; compare builds interleaved, not one after the other.
 
