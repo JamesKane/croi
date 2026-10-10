@@ -2,10 +2,11 @@
 
 croi's first consumer is Todhchai (`../todhchai`). Its kernel requirements
 are in `../todhchai/docs/croi-requirements.md` (items 1–19 and extensions
-ext 1–10), and its milestone M2 ("croi reaches user space") is croi's next
-big target. This file orders croi's work so those needs are designed in
+ext 1–10), and its milestone M2 ("croi reaches user space") was croi's
+first big target, reached on 2026-10-10 (K8c). Its M3 (native tier 0)
+is next: K9. This file orders croi's work so those needs are designed in
 early, not bolted on later. Reviewed against the requirements on
-2026-10-09.
+2026-10-09 and re-synced on 2026-10-10.
 
 ## M2 exit test (from Todhchai)
 
@@ -37,8 +38,10 @@ real-time wake error p99 < 100 µs.
 | 11 | Job, process, thread, exceptions, job policy | **Done** (K7a, K7d) |
 | 12 | userboot + bootfs | **Done** (K8b) |
 | 18 (core) | ktrace rings, categories, user marks, tick and PMU sampling, per-thread PMU counters | **Done** (K3–K6, see "Trace" below) |
-| 13–19 | Resources/interrupt objects, BTI/PMT + IOMMU, FIFO/counter/stream/socket/clock/debuglog, pager, rings, debug syscalls | After M2 (K9+), with the designs constrained below. Debuglog came early (K8a) |
-| 20 | Firmware data for user space (ACPI tables and op regions, GOP framebuffer) behind resources | After M2, with item 13 (found at the 2026-10-10 re-sync) |
+| 13 | Resources, interrupt objects, MSI | **Partial**: root and system resources (tracing, debuglog, profile). The rest is K9a, K9c, K9d |
+| 14 | BTI/PMT and IOMMUs | Todo: a BTI without an IOMMU in K9e, IOMMUs after M3 |
+| 15–19 | FIFO/counter/stream/socket/clock/debuglog, pager, rings, debug syscalls | After M3, except debuglog (K8a) and exception channels (K7d). Item 17 needs nothing from croi |
+| 20 | Firmware data for user space (ACPI tables and op regions, GOP framebuffer) behind resources | Todo (K9b) |
 
 ## Milestones
 
@@ -323,29 +326,139 @@ revision) is the model; croi's is Embedded Swift like the rest.
   (2.6–77 µs: host scheduling of the vCPUs) and only the median is
   enforced. To revisit with Todhchai.
 
-### After M2 (requirements 13–20 and the remaining extensions)
-Todhchai's M3 order: resources and interrupt objects (item 13), a BTI
-without an IOMMU first, syscalls for contiguous/physical VMOs,
-`set_cache_policy` and cache ops; then item 20. The Zircon deltas
-Todhchai's hosted kernel found are fixed (2026-10-10): `channel_write`/
-`call` consume the handles on failure; user TLS (amd64 FS/GS through
-`object_set_property`, arm64 TPIDR_EL0 and rv64 tp kept per thread);
-`vmar_unmap_handle_close_thread_exit` (syscall 75); `vmo_create` rounds
-sizes up to a page. Still open: zero-size VMOs (refused).
-- Firmware data for user space (item 20): the ACPI tables, AML operation
-  regions (SystemMemory over firmware ranges, SystemIO, PCI config) and
-  the GOP framebuffer, each behind a resource, since physical VMOs over
-  RAM and firmware ranges are refused.
-- Resources (MMIO, IRQ, IO port, root) and interrupt objects (port-bound,
-  virtual, MSI/MSI-X per queue). The ext 5 fast path is exposed here.
-- BTI/PMT and IOMMUs. SMMUv3 has Fuchsia reference code. VT-d, AMD-Vi and
-  the RISC-V IOMMU need designs from their specs.
-- FIFO, counter (ext), stream, socket, clock and debuglog. Debuglog may come
-  earlier, since the M2 exit test prints over it.
-- Pager, IOB or SPSC ring VMOs with futex doorbells, and debug syscalls.
-  The trace core is pulled ahead of M2 (see "Trace").
-- Todhchai M4 needs **ext 1** (display timeline) and **ext 4** (admission
-  with a reason). Their foundations are in K2, K3 and K5.
+### K9: Todhchai M3, native tier 0 (requirements 7's syscalls, 13, 14 without an IOMMU, 20)
+Todhchai's M3 (`../todhchai/docs/milestones/M3.md`) moves its services
+onto croi, then adds devmgr, ACPI, PCI, virtio and a framebuffer console.
+M3a–M3d are done on croi as it stands, and M3e (N0's boot on a ramdisk)
+needs nothing new from the kernel. M3f onwards need K9:
+
+| Todhchai step | Needs from croi |
+|---|---|
+| M3f devmgr, ACPI, PCI over ECAM | K9a (MMIO, IO port resources), K9b (firmware data), K9c (interrupts) |
+| M3g virtio-blk, Taisce on it | K9a, K9c, K9d (MSI), K9e (BTI with no IOMMU, contiguous VMOs) |
+| M3h framebuffer console | K9b |
+| M3i other virtio devices | as M3g |
+| M3j exit and budgets | K9f |
+
+Todhchai asked for item 13, then the BTI, the VMO syscalls and cache
+ops, then item 20. The order below moves item 20 up to second: it is
+small, needs only K9a's resources, and on its own unblocks M3h's console
+and the ACPI half of M3f. To confirm with Todhchai.
+
+Decided by Todhchai for M3: amd64 boots under KVM in `td ci`; arm64 and
+rv64 build. croi still runs every K9 self-test on all three arches in
+QEMU, and each arch's controller work below is in scope, but where an
+arch's piece is large and only needed later (the GICv3 ITS, RISC-V
+IMSIC MSIs, SMC) it may land after amd64's.
+
+Test device: QEMU's `edu` PCI device (all three machines) has INTx, MSI
+and DMA, so the self-tests can cover a real interrupt, an MSI and a
+pinned DMA without a driver stack. The boot tests add it.
+
+- **K9a: resources and the VMO syscalls.** Zircon's resource kinds and
+  numbers (MMIO 0, IRQ 1, IOPORT 2, SMC 4, SYSTEM 5) with ranges
+  (`resource_create(parent, options, base, size, name)`, EXCLUSIVE, a
+  child inside its parent's range; root mints all). An MMIO resource
+  over RAM the PMM owns is refused, as Zircon's root filter does.
+  Syscalls over K4's kernel-only VMOs: `vmo_create_physical` (an MMIO
+  resource covering the range; default cache policy uncached-device),
+  `vmo_set_cache_policy` (unmapped VMOs only), `vmo_op_range` (COMMIT,
+  DECOMMIT, ZERO, and the CACHE_SYNC/CLEAN/CLEAN_INVALIDATE ops;
+  INVALIDATE stays behind a debug option, as Zircon's), and the vDSO's
+  `cache_flush`. User cache maintenance needs EL0/U-mode access opened:
+  arm64 SCTLR_EL1.UCI (and UCT for the line size), rv64 senvcfg.CBCFE
+  where Zicbom exists; amd64 `clflush(opt)` already works in user mode.
+  amd64 `ioports_request`/`release` (IOPORT resource): a per-process I/O
+  permission bitmap, loaded into the TSS at a switch between processes
+  (Zircon's design; lazily, so a process without ports costs nothing).
+  Also the deltas left: zero-size VMOs (Zircon allows them) and the
+  tracing resource's base, which is 6 in croi and 14 (TRACING_BASE) in
+  Zircon at the pin (6 is MEXEC): Todhchai's native tracer (M3e) asks
+  for it by number.
+- **K9b: firmware data for user space (item 20).** Zircon tells user
+  space about firmware through ZBI items (RSDP, SMBIOS, framebuffer,
+  memory ranges), and its drivers read ACPI tables through physical VMOs
+  under an MMIO resource. croi has no ZBI, so:
+  - userboot gets one more startup handle: a read-only VMO of ZBI-format
+    items (`ZBI_TYPE_ACPI_RSDP`, `ZBI_TYPE_SMBIOS`, `ZBI_TYPE_FRAMEBUFFER`,
+    `ZBI_TYPE_MEM_CONFIG` for the firmware ranges), built from the
+    handoff. Item formats are Zircon's, so Todhchai's parsing is ported
+    code. To settle with Todhchai: ZBI items, or a croi struct.
+  - Physical VMOs over firmware ranges (ACPI reclaim and NVS, runtime
+    services, reserved MMIO) are allowed with an MMIO resource that
+    covers them; RAM the PMM owns stays refused. ACPI reclaim stays wired
+    for good instead of going to the PMM after parsing, since user space
+    reads the tables there (they are small).
+  - The GOP framebuffer: a physical VMO under an MMIO resource over the
+    CROI_MEM_FRAMEBUFFER range, mapped write-combining by the console.
+    The kernel stops drawing to it once userboot runs (today only the
+    boot self-test draws).
+  - AML's SystemIO regions use K9a's IO ports; PCI config uses ECAM
+    (MCFG ranges, MMIO) and, on amd64, ports 0xCF8/0xCFC.
+- **K9c: interrupt objects (item 13).** Zircon's calls:
+  `interrupt_create(resource, vector, options)` (an IRQ resource
+  covering the vector; EDGE/LEVEL and HIGH/LOW modes; VIRTUAL),
+  `interrupt_bind` (to a port: a packet per interrupt, re-armed by
+  `interrupt_ack`; a level interrupt stays masked until then),
+  `interrupt_wait` (thread-direct, no port: ext 5's path; the
+  scheduling-context handoff on wakeup is the extension, the hook
+  exists), `interrupt_trigger` (virtual), `interrupt_destroy`. Every
+  interrupt object gets a CPU affinity from policy (item 2), which Zircon
+  lacks: an extension call (`interrupt_set_affinity`, or a property: to
+  settle with Todhchai), with nothing routed until it is set or a
+  default (the boot CPU) is chosen. Controllers: amd64 IOAPIC pins (GSI
+  numbering; MADT overrides for ISA IRQs; PCI INTx modes come from `_PRT`,
+  i.e. user space), arm64 GICv3 SPIs (IROUTER for affinity), rv64
+  APLIC/PLIC (QEMU virt with ACPI). Budget: IRQ to the driver thread
+  running < 5 µs (Todhchai, on hardware; measured in QEMU from the irq
+  and sched trace).
+- **K9d: MSI and MSI-X (item 13).** Zircon's `msi_allocate(resource
+  MSI_BASE 11, count)` and `msi_create(msi, options, id, vmo, offset)`
+  (the MSI-X table in a BAR VMO, programmed by the kernel; masking
+  through the table), each vector an interrupt object with its own
+  affinity. amd64 first: LAPIC message address/data, vectors allocated
+  per CPU. arm64 needs the GICv3 ITS (device and collection tables,
+  LPIs; Zircon panics here), rv64 the IMSIC: designed now, implemented
+  when those arches boot Todhchai (virtio-pci falls back to INTx there
+  meanwhile).
+- **K9e: BTI with no IOMMU, PMTs, contiguous VMOs (item 14, part).**
+  `iommu_create(resource IOMMU_BASE 8, DUMMY)`, `bti_create(iommu, 0,
+  bti_id)`, `bti_pin(bti, options, vmo, offset, size, addrs)` returning a
+  PMT, `pmt_unpin`, `bti_release_quarantine`, `vmo_create_contiguous(bti,
+  size, alignment_log2)`. Pinned pages get a pin count: decommit and
+  teardown wait for or refuse them, as Zircon's do. The BTI's croi
+  properties are designed in now even with no IOMMU: a DMA address width
+  (pins and contiguous allocations above it refused; contiguous VMOs use
+  K4's address limit), an IOVA window (with no IOMMU, a physical range
+  check) and the device's memory type. Creating a no-IOMMU BTI is a
+  recorded trust decision: a debuglog record names the process and BTI
+  id. VT-d (first, for the reference machine), AMD-Vi, SMMUv3 and the
+  RISC-V IOMMU follow after M3.
+- **K9f: M3's budgets and the rest.** Kernel entry to the text console
+  < 100 ms: today every boot runs the whole self-test suite first, so a
+  `croi.selftest=` option (off for Todhchai boots, on in croi's tests)
+  and a trace mark at userboot start. Spawn to `main` < 200 µs: Todhchai
+  measured 178 µs on croi's head under KVM (2026-10-10, its N0 boot),
+  so this is a watch item: croi's own boot test gets a trace mark around
+  `process_create` through the first user instruction. The SMC
+  resource scoped by function-ID range (arm64; not needed in QEMU) can
+  land here or after M3.
+
+Todhchai's other M3 budgets (ring submit, futex wake with no sleeper,
+cached reads, live queries, resident memory) are user-space work.
+
+### After M3 (requirements 14–19 and the remaining extensions)
+- IOMMUs: VT-d first, then AMD-Vi, SMMUv3 (Fuchsia reference code) and
+  the RISC-V IOMMU, with the BTI properties above, RMR/RMRR identity
+  maps and leave-alone IOMMUs.
+- FIFO, counter (ext), stream, socket and clock (debuglog is done).
+- Pager, and debug syscalls (debugger channels, process memory access,
+  suspended start).
+- Todhchai M4 needs **ext 1** (display timeline) and admission with a
+  reason (**ext 4**, done in K8c's profile objects). Their foundations
+  are in K2, K3 and K5.
+- The `channel_call` budget (1 µs; ~1.4 µs at K8c), revisited with
+  Todhchai.
 
 ## Review: board requirements (2026-10-09)
 

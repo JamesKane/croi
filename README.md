@@ -11,48 +11,53 @@ ARC and no garbage collection. It uses `~Copyable` types, typed throws and
 entry code, trap vectors, context switches, user-copy fixups and the
 compiler runtime.
 
-It boots on **amd64, arm64 and rv64** from UEFI with ACPI, runs SMP on all
-three, and already runs preemptible user-mode code with a vDSO. Performance
-targets come from its first consumer, the
-Todhchai OS, and are measured with croi's own trace
-(amd64 under KVM):
+It boots on **amd64, arm64 and rv64** from UEFI with ACPI and runs SMP on
+all three. userboot starts Embedded Swift programs from a Zircon-format
+bootfs, in processes that talk over channels and ports. Its first
+consumer, the Todhchai OS, runs its services on croi natively. Performance
+targets come from Todhchai and are measured with croi's own trace, under
+KVM on amd64:
 
 | Measurement | Today | Budget |
 |---|---|---|
-| Null syscall | ~40 ns | < 100 ns |
-| `clock_get_monotonic` via vDSO | ~13 ns | — |
-| Enabled trace event | ~19 ns | < 30 ns |
+| Null syscall | ~35 ns | < 100 ns |
+| `channel_call` round trip, one core, deadline donation | ~1.4 µs | < 1 µs (not met yet; enforced at 1.6 µs) |
+| Port wake from another core (median) | ~1.75 µs | < 2 µs |
+| Real-time wake error, p99 | 27–46 µs | < 100 µs |
+| `clock_get_monotonic` via the vDSO | ~12 ns | — |
+| Enabled trace event | ~18 ns | < 30 ns |
 
-About 15k lines of Swift, 3.9k lines of assembly (three architectures),
-and about 100 lines of kernel-side C, plus the C headers that define the
-loader, kernel and user ABIs.
+The kernel is about 19k lines of Swift and 4.1k lines of assembly (three
+architectures), with about 100 lines of C (the compiler runtime and two
+globals Swift would initialize lazily), plus the C headers that define
+the loader, kernel and user ABIs.
 
 ## Progress
 
-The next major target is **M2: croi reaches user space**. userboot starts
-a Swift process from bootfs. The process creates a channel pair, passes a
+**M2, croi reaches user space, is done** (2026-10-10). userboot starts a
+Swift process from bootfs. The process creates a channel pair, passes a
 VMO across it, waits on a port with a deadline timer, and prints over
-debuglog. All of this has to work on all three architectures, within
-Todhchai's latency budgets.
+debuglog, on all three architectures; the budgets above are checked on
+every KVM boot.
 
-**M2 requirements: 9 of 13 done, 1 partial**
-
-```
-[████████████████████████████████████░░░░░░░░░]  ~75%
-```
+The next target is **M3, Todhchai's native tier 0**: devmgr, ACPI, PCI,
+virtio-blk and a framebuffer console on croi. Todhchai's services already
+boot from bootfs on croi under KVM; what they still need from the kernel
+is driver support (milestone K9 below).
 
 | Milestone | Scope | Status |
 |---|---|---|
 | K1 | UEFI loader, handoff v3 (bootfs, cmdline, framebuffer), cache policy | ✅ |
 | K2 | Interrupt controllers, IPIs, TLB shootdown, monotonic clock, tickless timers, topology | ✅ |
 | K3 | Threads, priority inheritance, scheduling contexts, fair + EDF, admission, extended state | ✅ |
-| Trace | Per-CPU rings; `sched`, `irq`, `vm` and `syscall` categories; user marks | 🟡 sampling and PMU next (K6e) |
+| Trace | Per-CPU rings; `sched`, `irq`, `vm`, `syscall`, `ipc` (flows), `futex` categories; user marks; tick and PMU sampling; per-thread PMU counters | ✅ |
 | K4 | User address spaces, VMOs, regions and views, demand paging, accounts, W^X/JIT | ✅ (COW clones and page loaning later) |
 | K5 | Objects, handles, rights, signals, waits, ports, resources | ✅ |
-| K6 | Syscalls, SMEP/SMAP/PAN/SUM, user copies, vDSO + shared pages, user FP/SIMD | 🟡 K6a–d done, K6e in progress |
-| K7 | Channels, eventpairs, timers, futex; jobs, processes, threads, exceptions | ⬜ |
-| K8 | userboot + bootfs: the M2 exit test | ⬜ |
-| K9+ | Interrupt objects, BTI/PMT + IOMMUs, sockets/FIFOs/streams, debuglog, pager | ⬜ after M2 |
+| K6 | Syscalls, SMEP/SMAP/PAN/SUM, user copies, vDSO + shared pages, user FP/SIMD | ✅ |
+| K7 | Channels, eventpairs, timers, futexes with owners; jobs, processes, threads, exceptions, job policy | ✅ |
+| K8 | Debuglog, ELF loading, Swift user programs, bootfs + userboot, the M2 exit test and budgets | ✅ |
+| K9 | M3: resources, VMO syscalls, firmware data, interrupt objects, MSI, BTI without an IOMMU | ⬜ next |
+| Later | IOMMUs (VT-d first), FIFOs/counters/sockets/streams/clocks, pager, debugger syscalls | ⬜ after M3 |
 
 See [`docs/roadmap.md`](docs/roadmap.md) for the detailed plan and the
 requirement-by-requirement mapping.
@@ -80,9 +85,13 @@ What a Zircon user-space program would recognize:
   syscall.
 - **Resources** gating privileged operations; the root resource mints the
   rest.
-- **Planned with the same semantics:** channels, events, eventpairs,
-  futexes with owners, timers, jobs, processes, threads, exception
-  channels, job policy, userboot and bootfs.
+- **IPC and tasks:** channels (with `channel_call` transaction ids),
+  events, eventpairs, futexes with owners, timers with slack, jobs,
+  processes, threads, exception channels and job policy.
+- **Startup:** Zircon's bootfs format, userboot, and the processargs
+  bootstrap message; debuglog with Zircon's record layout.
+- **Profiles:** `profile_create` / `object_set_profile` with
+  `zx_profile_info_t`.
 - **Internal designs followed closely:** PmmNode-style physical memory,
   a physmap-backed heap, `acpi_lite`-style table parsing, `mp_sync_exec`
   cross-calls, and RefPtr-style intrusive reference counts.
@@ -96,7 +105,8 @@ What a Zircon user-space program would recognize:
 | Devicetree and platform IDs | ACPI only (MADT, SPCR/DBG2, GTDT, PPTT, RHCT, IORT, DMAR…) |
 | cmpctmalloc | Slab heap: 13 size classes, bookkeeping in the page records |
 | Thread-bound scheduler state | Scheduling contexts separate from threads (seL4 MCS style) |
-| ktrace format | Per-CPU 32-byte record rings, lock-free, exported as read-only VMOs |
+| ktrace format | Per-CPU 32-byte record rings, lock-free, exported as read-only VMOs, with flow ids shared by a call and its reply |
+| Rust userboot | userboot in Embedded Swift |
 | GN / Bazel | CMake + Ninja, one tree per architecture |
 
 ### Modified or extended
@@ -105,7 +115,8 @@ These are additions Todhchai needs. Each was checked against Zircon first.
 
 - **Real-time:** admission control that refuses with a reason against a
   per-user budget; capacity-aware EDF on heterogeneous cores; budget
-  overrun packets to a port; IPC deadline donation (K7); reserved CPUs.
+  overrun packets to a port; IPC deadline donation through
+  `channel_call`; reserved CPUs.
 - **Memory:** memory accounts with pressure packets; device-local and
   pinned VMOs that are never evicted; atomic view replacement inside a
   reservation; contiguous VMOs with a physical address limit and a boot
@@ -143,9 +154,11 @@ cmake --build --preset arm64        # build only
 ninja -C build/rv64 run             # boot interactively (Ctrl-A x quits)
 ```
 
-Each boot runs the kernel's self-tests: PMM, heap, SMP, IPIs and
-shootdowns, timers, the scheduler, the VM, objects, user mode and a
-framebuffer screendump check.
+Each boot runs the kernel's self-tests (PMM, heap, SMP, IPIs and
+shootdowns, timers, the scheduler, the VM, objects, user mode, IPC,
+processes and exceptions, and a framebuffer screendump check), then
+userboot starts `bin/m2`, the M2 exit test. On amd64 with `/dev/kvm`,
+`boot-smoke-kvm` also enforces the budgets.
 
 ## Layout
 
@@ -155,7 +168,8 @@ framebuffer screendump check.
 | `kernel/Kernel/` | The kernel in Swift: `Vm/`, `Sched/`, `Object/`, `User/`, `Irq/`, `Time/`, `Acpi/`, `Trace/` |
 | `kernel/arch/` | Per-arch assembly: entry, exceptions, context switch, SMP trampolines, user copies |
 | `lib/` | Shared by loader and kernel: handoff ABI, page tables, text formatting, C runtime |
-| `user/` | User-space headers (`croi/syscall.h`), the vDSO and test programs |
+| `user/` | User-space headers (`croi/syscall.h`), the C user runtime, the vDSO, userboot, `m2` and test programs |
+| `tools/` | `mkbootfs.py`, `elf2efi.py`, the QEMU runner and its helpers |
 | `docs/` | Roadmap |
 
 `CLAUDE.md` is the detailed design notebook for each subsystem.
