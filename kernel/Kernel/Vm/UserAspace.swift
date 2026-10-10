@@ -141,6 +141,7 @@ struct UserAspace: ~Copyable {
         unsafe raw.bindMemory(to: UserAspaceRecord.self, capacity: 1)
             .initialize(to: UserAspaceRecord(arch: arch, asid: Asids.allocate()))
         record = UserAspacePointer(address: UInt64(UInt(bitPattern: raw)))
+        record.pointee.arch.owner = record.address  // shootdowns reach its active CPUs only
         UserAspaces.live.add(1, ordering: .relaxed)
     }
 
@@ -591,6 +592,11 @@ enum Asids {
     nonisolated(unsafe) private(set) static var count = 0
     nonisolated(unsafe) private(set) static var flushOnSwitch = false
     private static let lock = SpinLock()
+
+    /// Whether a CPU keeps an address space's TLB entries after switching
+    /// away (ASIDs in use): shootdowns can't skip CPUs that aren't running
+    /// it now. arm64 broadcasts its TLBIs, so this is about rv64.
+    static var keepsEntriesAcrossSwitches: Bool { count > 0 && !flushOnSwitch }
 
     static func initialize() {
         let bits = min(arch_asid_bits(), 8)  // 256 tracked; arm64 runs with 8-bit ASIDs

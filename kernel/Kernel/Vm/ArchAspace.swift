@@ -1,4 +1,5 @@
 import CKernel
+import Synchronization
 import PageTables
 
 enum VmError: Error, Equatable {
@@ -48,6 +49,9 @@ struct ArchAspace {
     /// Never free the tables the root points at (the kernel's on amd64/
     /// rv64: user roots copy those entries, so they must never change).
     var pinsTopLevel = false
+    /// The UserAspaceRecord these tables belong to (0: the kernel's), whose
+    /// `activeCpus` says which CPUs a shootdown must reach.
+    var owner: UInt64 = 0
 
     init(rootLow: UInt64, rootHigh: UInt64) {
         self.rootLow = rootLow
@@ -88,7 +92,7 @@ struct ArchAspace {
         // filling holes needs no remote flush, and every user page fault
         // used to wait for every CPU to answer an IPI (K9f: most of spawn
         // to main). RISC-V without Svvptc may cache invalid entries.
-        TlbShootdown.flushOthers(virt &- size, size)
+        flushOthers(virt &- size, size)
         #endif
     }
 
@@ -120,7 +124,7 @@ struct ArchAspace {
     /// are only partly covered. Holes are fine.
     func unmap(virt: UInt64, size: UInt64) throws(VmError) {
         try checkRange(virt, size)
-        defer { TlbShootdown.flushOthers(virt, size) }
+        defer { flushOthers(virt, size) }
         try update(table: root(virt), level: 0, start: virt, end: virt + size, .unmap)
     }
 
@@ -128,8 +132,28 @@ struct ArchAspace {
     /// splitting large pages that are only partly covered. Holes are skipped.
     func protect(virt: UInt64, size: UInt64, _ attributes: MapAttributes) throws(VmError) {
         try checkRange(virt, size)
-        defer { TlbShootdown.flushOthers(virt, size) }
+        defer { flushOthers(virt, size) }
         try update(table: root(virt), level: 0, start: virt, end: virt + size, .protect(attributes))
+    }
+
+    /// The remote half of a change this CPU has already invalidated
+    /// locally. Kernel tables: every CPU. A user address space's: only the
+    /// CPUs that have it loaded (Zircon's x86 active_cpus), where a CPU that
+    /// loads it later starts with no entries for it: amd64 (no PCIDs: CR3
+    /// loads drop non-global entries, paging-structure caches too), and
+    /// rv64 without ASIDs. rv64 with ASIDs keeps old entries tagged across
+    /// switches, so it still flushes everywhere (as Zircon's riscv64 does).
+    private func flushOthers(_ start: UInt64, _ size: UInt64) {
+        guard owner != 0, !Asids.keepsEntriesAcrossSwitches else {
+            TlbShootdown.flushOthers(start, size)
+            return
+        }
+        // A full barrier between the page-table stores and reading the
+        // mask (x86 may otherwise move the load ahead of them): a CPU not
+        // in the mask set its bit, then loaded the tables, after them.
+        let cpus = UserAspacePointer(address: owner).pointee.activeCpus
+            .bitwiseOr(0, ordering: .sequentiallyConsistent).oldValue
+        TlbShootdown.flushOthers(start, size, cpus: cpus)
     }
 
     private enum Operation {

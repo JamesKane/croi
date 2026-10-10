@@ -88,6 +88,7 @@ add_library(kernel-swift OBJECT
   Kernel/Vm/AspaceSelfTest.swift
   Kernel/Vm/VmoSelfTest.swift
   Kernel/Vm/RegionSelfTest.swift
+  Kernel/Vm/ShootdownSelfTest.swift
   Kernel/Vm/PhysicalSelfTest.swift
   Kernel/Vm/AccountSelfTest.swift
   Kernel/Vm/JitSelfTest.swift)

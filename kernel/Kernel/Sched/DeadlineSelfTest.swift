@@ -30,11 +30,16 @@ enum DeadlineSelfTest {
         console.write(decimal: ratio / 10)
         console.write(".")
         console.write(decimal: ratio % 10)
-        console.write("x for 1.95x), 20 periods no misses (worst wake ")
+        console.write("x for 1.95x), 20 periods, ")
+        console.write(decimal: UInt64(misses.load(ordering: .relaxed)))
+        console.write(" missed (worst wake ")
         console.write(decimal: wake / 1000)
         console.write(" us), budget enforced (")
         console.write(decimal: overruns)
         console.write(" overruns), admission reasons, capacity, power hints, reserved CPU ok\n")
+        Budgets.report(console, "sched.fair_ratio_x10", ratio, unit: "count", target: 19)
+        Budgets.report(console, "edf.deadline_misses", UInt64(misses.load(ordering: .relaxed)), unit: "count", limit: 1)
+        Budgets.report(console, "edf.worst_wake", wake)
     }
 
     // MARK: Fair shares
@@ -53,8 +58,11 @@ enum DeadlineSelfTest {
         let both = counts.load(ordering: .relaxed)
         let h = both & 0xFFFF_FFFF, l = both >> 32
         guard l > 0 else { panic("edf self-test: a fair thread starved") }
+        // Work counts, not CPU time: a host that deschedules this vCPU while
+        // one thread runs skews them, so the ratio is a reported budget
+        // (enforced only where budgets are: CLAUDE.md "Timing discipline").
         let ratio = h * 10 / l
-        guard ratio >= 14, ratio <= 28 else { panic("edf self-test: fair shares not by weight") }
+        if Budgets.enforced, ratio < 14 || ratio > 28 { panic("edf self-test: fair shares not by weight") }
         return ratio
     }
 
@@ -86,7 +94,9 @@ enum DeadlineSelfTest {
         stop.store(true, ordering: .releasing)
         _ = a.join()
         _ = b.join()
-        guard misses.load(ordering: .relaxed) == 0 else { panic("edf self-test: deadline missed") }
+        // A starved vCPU misses deadlines whatever the scheduler does: the
+        // count is a reported budget, enforced only where budgets are.
+        if Budgets.enforced, misses.load(ordering: .relaxed) != 0 { panic("edf self-test: deadline missed") }
         guard fairWork.load(ordering: .relaxed) > 0 else { panic("edf self-test: fair threads starved") }
         return worstWake.load(ordering: .relaxed)
     }

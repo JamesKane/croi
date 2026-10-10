@@ -288,6 +288,7 @@ private func runSelfTests(_ console: Uart) {
     AspaceSelfTest.run(console)
     VmoSelfTest.run(console)
     RegionSelfTest.run(console)
+    ShootdownSelfTest.run(console)
     PhysicalSelfTest.run(console)
     AccountSelfTest.run(console)
     JitSelfTest.run(console)

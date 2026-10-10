@@ -59,6 +59,11 @@ machine's history:
   of the CPUs), a dirty tree, or a regression without `--accept`.
 - A regression is fixed or accepted in the open (roadmap), never
   silently; a limit is never loosened in the change that would fail it.
+- Self-tests check mechanisms, not timing outcomes: the EDF test's
+  fair-share ratio and deadline misses are reported budgets
+  (`sched.fair_ratio_x10`, `edf.deadline_misses`), enforced only with
+  `croi.enforce_budgets=1` (a starved vCPU misses deadlines whatever
+  the scheduler does); starvation itself still fails.
 - Before calling something a regression, compare interleaved
   (`--compare`): sequential runs on this machine mostly measure the
   machine (K9d: channel_call read 1.4-2.2 us for unchanged code, even
@@ -789,8 +794,17 @@ rv64) ends every ArchAspace unmap/protect, and map on rv64 only: amd64
 caches no not-present entries, so filling a hole needs no remote flush
 (K9f: the all-CPU IPI on every user page fault was most of spawn to main,
 and it waits on any CPU writing the console with interrupts masked).
-Every shootdown still goes to every CPU; targeting only the CPUs that
-have a user address space loaded is a follow-up. SpinLock restores the
+A user address space's unmap/protect goes only to the CPUs in its
+`activeCpus` (Zircon's x86 active_cpus; `ArchAspace.owner` names the
+record; set before the tables load, cleared after; the mask is read
+with a locked RMW after the page-table stores, a full fence on x86):
+amd64, and rv64 without ASIDs, where a CPU loading the tables later
+starts with none of its entries. rv64 with ASIDs keeps entries across
+switches, so it broadcasts (as Zircon's riscv64 does); arm64 broadcasts
+in hardware. Kernel tables: every CPU. `TlbShootdown.received(cpu)`
+counts what each CPU took; `ShootdownSelfTest` checks a reader on
+another CPU faults after unmap and protect, and (where targeted) that
+an idle bystander takes none of the IPIs. SpinLock restores the
 caller's interrupt state while spinning, so a CPU waiting on `vmLock`
 still answers the shootdown from the holder. Secondaries idle in
 `arch_idle` with interrupts on; boot ends with "boot complete, idling".

@@ -62,6 +62,8 @@ RULES = {
     "irq.wait_wake_median": (0.25, 3_000),
     "boot.userboot_start": (0.15, 15_000_000),
     "boot.userboot_start_selftests": (0.25, 300_000_000),
+    "edf.deadline_misses": (0.0, 0.5),
+    "edf.worst_wake": (0.50, 20_000),
 }
 DEFAULT_RULE = (0.25, 0)
 WINDOW = 5
@@ -118,8 +120,12 @@ def boot(build, profile, label, index, any_exit=False):
         fail(f"{label} {profile} boot {index} didn't finish; see {log}")
     budgets = {}
     for m in LINE.finditer(result.stdout):
+        UNITS[m.group(1)] = m.group(3)
         budgets[m.group(1)] = (int(m.group(2)), m.group(4) and int(m.group(4)), m.group(5) and int(m.group(5)))
     return budgets
+
+
+UNITS = {}  # budget name -> its unit, as the boot reported it
 
 
 def collect(build, label, runs, values, meta):
@@ -181,12 +187,14 @@ def judge(name, value, limit, history):
         verdict = "REGRESSED"
     else:
         verdict = "ok"
-    return baseline, verdict, f"+{int(tolerance * 100)}%, {fmt(floor)}"
+    return baseline, verdict, f"+{int(tolerance * 100)}%, {fmt(floor, name)}"
 
 
-def fmt(ns):
+def fmt(ns, name=None):
     if ns is None:
         return "—"
+    if UNITS.get(name) == "count":
+        return f"{float(ns):g}"
     ns = float(ns)
     if ns >= 1e6:
         return f"{ns / 1e6:.1f} ms"
@@ -241,8 +249,8 @@ def main():
               "|---|---:|---:|---:|---:|---:|---|---|"]
     for name, value, baseline, change, limit, target, rule, verdict in rows:
         shown = f"**{verdict}**" if verdict in ("OVER LIMIT", "REGRESSED") else verdict
-        report.append(f"| `{name}` | {fmt(value)} | {fmt(baseline)} | {change} | {fmt(limit)} | {fmt(target)} "
-                      f"| {rule} | {shown} |")
+        report.append(f"| `{name}` | {fmt(value, name)} | {fmt(baseline, name)} | {change} | {fmt(limit, name)} "
+                      f"| {fmt(target, name)} | {rule} | {shown} |")
     report.append("")
     report.append("Enforced: a regression or a missed limit fails." if args.enforce
                   else "Advisory: nothing fails here (a shared machine's timings are noisy).")
@@ -306,8 +314,8 @@ def compare(args, load_before):
         mh = statistics.median(here) if here else None
         mt = statistics.median(there) if there else None
         change = f"{(mh - mt) / mt * 100:+.0f}%" if mh and mt else "—"
-        spread = f"{fmt(min(here))}-{fmt(max(here))}" if here else "—"
-        lines.append(f"| `{name}` | {fmt(mh)} | {fmt(mt)} | {change} | {spread} |")
+        spread = f"{fmt(min(here), name)}-{fmt(max(here), name)}" if here else "—"
+        lines.append(f"| `{name}` | {fmt(mh, name)} | {fmt(mt, name)} | {change} | {spread} |")
     text = "\n".join(lines) + "\n"
     with open(os.path.join(OUT, "compare.md"), "w") as f:
         f.write(text)

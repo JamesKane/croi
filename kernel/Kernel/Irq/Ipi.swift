@@ -28,7 +28,14 @@ enum Ipi {
     /// all have finished. Returns how many CPUs ran it. Any context.
     @discardableResult
     static func callOthers(_ function: Function, _ argument: UInt64) -> Int {
-        call(on: -1, function, argument)
+        call(cpus: ~0, function, argument)
+    }
+
+    /// Runs `function(argument)` on the other ready CPUs in `cpus` (a bit
+    /// per CPU) and waits for them. Returns how many ran it.
+    @discardableResult
+    static func call(cpus: UInt64, _ function: Function, _ argument: UInt64) -> Int {
+        call(mask: cpus, function, argument)
     }
 
     /// Runs `function(argument)` on CPU `cpu` (this CPU: directly) and
@@ -41,7 +48,7 @@ enum Ipi {
             arch_interrupts_restore(saved)
             return true
         }
-        return call(on: cpu, function, argument) == 1
+        return call(mask: 1 << UInt64(cpu), function, argument) == 1
     }
 
     /// Sends the reschedule kind to `cpu` (no waiting).
@@ -51,8 +58,8 @@ enum Ipi {
         unsafe Interrupts.sendIpi(record)
     }
 
-    /// Runs `function` on CPU `only` (or every other ready CPU if -1).
-    private static func call(on only: Int, _ function: Function, _ argument: UInt64) -> Int {
+    /// Runs `function` on the other ready CPUs in `mask`.
+    private static func call(mask: UInt64, _ function: Function, _ argument: UInt64) -> Int {
         let saved = arch_interrupts_save()
         defer { arch_interrupts_restore(saved) }
 
@@ -62,13 +69,17 @@ enum Ipi {
         }
         let me = Cpu.current
         var targets = 0
-        for i in 0..<Smp.count where UInt32(i) != me && isReady(i) && (only < 0 || i == only) {
+        for i in 0..<Smp.count where UInt32(i) != me && isReady(i) && mask & (1 << UInt64(i)) != 0 {
             targets += 1
+        }
+        guard targets > 0 else {
+            busy.store(false, ordering: .releasing)
+            return 0
         }
         Self.function = function
         Self.argument = argument
         remaining.store(targets, ordering: .releasing)
-        for i in 0..<Smp.count where UInt32(i) != me && isReady(i) && (only < 0 || i == only) {
+        for i in 0..<Smp.count where UInt32(i) != me && isReady(i) && mask & (1 << UInt64(i)) != 0 {
             let record = unsafe UnsafePointer<PerCpu>(bitPattern: UInt(Smp.records[i]))!
             _ = unsafe record.pointee.ipiPending.bitwiseOr(call, ordering: .releasing)
             unsafe Interrupts.sendIpi(record)
@@ -128,18 +139,26 @@ enum TlbShootdown {
         var pages: UInt64
     }
 
-    /// Invalidates [start, start+size) on every other ready CPU. The caller
-    /// has already invalidated it locally.
-    static func flushOthers(_ start: UInt64, _ size: UInt64) {
+    /// Invalidates [start, start+size) on the other ready CPUs in `cpus`
+    /// (default: all). The caller has already invalidated it locally.
+    static func flushOthers(_ start: UInt64, _ size: UInt64, cpus: UInt64 = ~0) {
         #if arch(x86_64) || arch(riscv64)
-        guard Ipi.otherReadyCpus > 0 else { return }
+        let others = cpus & ~(1 << UInt64(Cpu.current))
+        guard others != 0, Ipi.otherReadyCpus > 0 else { return }
         var range = Range(start: start, pages: (size + KernelLayout.pageSize - 1) / KernelLayout.pageSize)
         let address = withUnsafeMutablePointer(to: &range) { UInt64(UInt(bitPattern: $0)) }
-        Ipi.callOthers(invalidate, address)
+        Ipi.call(cpus: others, invalidate, address)
         #endif
     }
 
+    /// Shootdowns each CPU has taken (written only by that CPU; for the
+    /// self-test and dumps).
+    nonisolated(unsafe) private static var receivedCounts = InlineArray<64, UInt64>(repeating: 0)
+
+    static func received(_ cpu: Int) -> UInt64 { receivedCounts[cpu] }
+
     private static let invalidate: Ipi.Function = { address in
+        receivedCounts[Int(Cpu.current)] &+= 1
         let range = unsafe UnsafePointer<Range>(bitPattern: UInt(address))!.pointee
         if range.pages > pageLimit {
             arch_tlb_invalidate_all()
