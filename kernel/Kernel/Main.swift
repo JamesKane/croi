@@ -62,6 +62,8 @@ func kernel_main(_ handoffAddress: UInt64) -> Never {
     #endif
     console.write("\n  ACPI:   RSDP at ")
     console.write(hex: handoff.acpi_rsdp)
+    console.write(", SMBIOS at ")
+    console.write(hex: handoff.smbios)
     console.write("\n")
 
     // Move off the loader's page tables onto our own.
@@ -94,6 +96,7 @@ func kernel_main(_ handoffAddress: UInt64) -> Never {
     }
     reportMemory(allocator, to: console)
     BootOptions.capture(handoff)  // before the handoff memory is reclaimed
+    BootData.build(handoff, &allocator)
     console.write("  boot:   cmdline \"")
     BootOptions.write(to: console)
     console.write("\", bootfs ")
@@ -256,6 +259,7 @@ func kernel_main_continue() -> Never {
         // From here on the boot code is the "bootstrap" thread.
         unsafe Scheduler.initializeBootCpu(stack: UnsafePointer<PerCpu>(bitPattern: UInt(Smp.records[0]))!.pointee.stack)
         Processes.initialize()
+        BootData.makeObject()
         DebugLog.initialize()
         SharedPages.initialize()
         Vdso.initialize()
@@ -329,7 +333,7 @@ private func reportMemory(_ allocator: BootAllocator, to console: some TextOutpu
         let range = allocator.range(i)
         switch range.type {
         case CROI_MEM_FREE: free += range.size
-        case CROI_MEM_ACPI_RECLAIM, CROI_MEM_HANDOFF: reclaimable += range.size
+        case CROI_MEM_HANDOFF: reclaimable += range.size
         default: ()
         }
     }
@@ -635,7 +639,14 @@ private func framebufferSelfTest(_ console: Uart) {
     console.write(decimal: UInt64(bootHandoff.framebuffer.format))
     console.write(", mapped write-combining at ")
     console.write(hex: framebuffer.pixels)
-    console.write("\n")
+    console.write(", unmapped (user space owns it)\n")
+    // The kernel draws nothing more: a driver maps it through a physical
+    // VMO (K9b), so no second mapping may linger with another memory type.
+    do throws(VmError) {
+        try framebuffer.unmap()
+    } catch {
+        panic("framebuffer: can't unmap it")
+    }
 }
 
 /// Probes run on other CPUs by the IPI self-test (C function pointers:

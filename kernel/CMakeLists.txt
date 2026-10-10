@@ -29,6 +29,7 @@ add_library(kernel-swift OBJECT
   Kernel/User/ProgramLoader.swift
   Kernel/User/ProgramSelfTest.swift
   Kernel/User/Userboot.swift
+  Kernel/User/BootData.swift
   Kernel/User/VdsoSelfTest.swift
   Kernel/User/FpSelfTest.swift
   Kernel/User/UserSelfTest.swift

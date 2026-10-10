@@ -27,6 +27,15 @@ extension EFI_GUID {
                  Data4: (0xBC, 0x22, 0x00, 0x80, 0xC7, 0x3C, 0x88, 0x81))
     }
 
+    static var smbios3Table: EFI_GUID {
+        EFI_GUID(Data1: 0xF2FD_1544, Data2: 0x9794, Data3: 0x4A2C,
+                 Data4: (0x99, 0x2E, 0xE5, 0xBB, 0xCF, 0x20, 0xE3, 0x94))
+    }
+    static var smbiosTable: EFI_GUID {
+        EFI_GUID(Data1: 0xEB9D_2D31, Data2: 0x2D88, Data3: 0x11D3,
+                 Data4: (0x9A, 0x16, 0x00, 0x90, 0x27, 0x3F, 0xC1, 0x4D))
+    }
+
     static var graphicsOutput: EFI_GUID {
         EFI_GUID(Data1: 0x9042_A9DE, Data2: 0x23DC, Data3: 0x4A38,
                  Data4: (0x96, 0xFB, 0x7A, 0xDE, 0xD0, 0x80, 0x51, 0x6A))
@@ -40,6 +49,17 @@ extension EFI_GUID {
         unsafe Data1 == other.Data1 && Data2 == other.Data2 && Data3 == other.Data3
             && unsafeBitCast(Data4, to: UInt64.self) == unsafeBitCast(other.Data4, to: UInt64.self)
     }
+}
+
+/// The physical address of the UEFI configuration table entry `guid`.
+@unsafe func configurationTable(_ systemTable: UnsafeMutablePointer<EFI_SYSTEM_TABLE>, _ guid: EFI_GUID) -> UInt64? {
+    guard let tables = unsafe systemTable.pointee.ConfigurationTable else { return nil }
+    let count = unsafe Int(systemTable.pointee.NumberOfTableEntries)
+    for i in 0..<count {
+        let entry = unsafe tables[i]
+        if unsafe entry.VendorGuid.matches(guid) { return unsafe UInt64(UInt(bitPattern: entry.VendorTable)) }
+    }
+    return nil
 }
 
 /// The UEFI boot services the loader uses. Invalid after ExitBootServices.

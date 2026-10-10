@@ -10,17 +10,7 @@ struct Acpi {
 
     /// Finds the RSDP in the UEFI configuration table and validates it.
     init?(systemTable: UnsafeMutablePointer<EFI_SYSTEM_TABLE>) {
-        var found: UInt64?
-        let count = unsafe Int(systemTable.pointee.NumberOfTableEntries)
-        if let tables = unsafe systemTable.pointee.ConfigurationTable {
-            for i in 0..<count {
-                let entry = unsafe tables[i]
-                if unsafe entry.VendorGuid.matches(.acpi20Table) {
-                    found = unsafe UInt64(UInt(bitPattern: entry.VendorTable))
-                }
-            }
-        }
-        guard let address = found else { return nil }
+        guard let address = unsafe configurationTable(systemTable, .acpi20Table) else { return nil }
 
         let valid: UInt64? = unsafe withPhysical(address, size: 36) { (rsdp: RawSpan) -> UInt64? in
             guard rsdp.load(fromByteOffset: 0, as: UInt64.self) == 0x2052_5450_2044_5352,  // "RSD PTR "

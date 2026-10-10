@@ -13,6 +13,7 @@ module CroiAbi {
   header "profile.h"
   header "resource.h"
   header "vmo.h"
+  header "zbi.h"
   export *
 }
 

@@ -13,3 +13,4 @@
 #include "profile.h"
 #include "resource.h"
 #include "vmo.h"
+#include "zbi.h"

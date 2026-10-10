@@ -14,7 +14,7 @@ Reference source: `../fuchsia/zircon/` (port semantics, not C++ structure).
 
 ## Roadmap
 
-`docs/roadmap.md` orders croi's work (K1 handoff v3 + cache policy, K2
+`docs/roadmap.md` orders croi's work (K1 handoff + cache policy, K2
 interrupts/IPIs/clock/timers, K3 threads + scheduling contexts, K4 VMM
 phase A, K5 objects, K6 syscalls/vDSO/user SIMD, K7 IPC/processes, K8
 userboot) against Todhchai's needs (`../todhchai/docs/croi-requirements.md`).
@@ -55,12 +55,13 @@ Loader (`boot/Loader/Main.swift`): read `\croi\kernel.elf` from the boot
 volume -> load + relocate it at its link address -> optional
 `\croi\bootfs.img` (own memory type, CROI_MEM_BOOTFS) and `\croi\cmdline`
 (copied into the handoff pages) -> GOP framebuffer (linear only) -> RSDP
-from the UEFI
-config table, early UART from ACPI SPCR (COM1 fallback on amd64) -> boot
-page tables (all RAM identity mapped RWX, UART as device, kernel segments
-W^X at CROI_KERNEL_BASE; Sv39 on rv64, TTBR0/TTBR1 on arm64) ->
+and SMBIOS (3.x, else 2.x) from the UEFI config table, early UART from
+ACPI SPCR (COM1 fallback on amd64) -> boot page tables (all RAM identity
+mapped RWX, UART as device, kernel segments W^X at CROI_KERNEL_BASE; Sv39
+on rv64, TTBR0/TTBR1 on arm64) ->
 ExitBootServices -> memory map converted into the handoff, framebuffer
-range overlaid as CROI_MEM_FRAMEBUFFER -> handoff v3 ->
+range overlaid as CROI_MEM_FRAMEBUFFER (holes in it filled: q35's is a
+PCI BAR no firmware range covers) -> handoff v4 ->
 `croi_arch_enter_kernel` (boot/arch/<arch>/enter.S). Loader allocations
 use OS-defined memory types 0x80000001 (kernel) / 0x80000002 (handoff and
 page tables) / 0x80000003 (bootfs) so they show up as CROI_MEM_KERNEL /
@@ -76,11 +77,12 @@ by the loader (Normal WB, Device-nGnRE, Normal-NC, Device-nGnRnE); WC =
 uncached = Normal-NC. rv64: Svpbmt when every RHCT ISA string lists it
 (`PageTableFormat.svpbmt`, set by the kernel; NC for uncached/WC, IO for
 device), else the PMAs decide. QEMU runs rv64 with `-cpu max` (Svpbmt);
-`boot-smoke-no-svpbmt` covers `-cpu rv64`. The framebuffer (CROI_MEM_FRAMEBUFFER) is in no PMM arena and not
-in the cached physmap; `Framebuffer` maps it WC. The boot test draws a
-pattern and checks it with a QEMU screendump (`qemu.sh --screendump`,
-`tools/check-pixels.py`); arm64/rv64 get a framebuffer from
-`-device ramfb`.
+`boot-smoke-no-svpbmt` covers `-cpu rv64`. The framebuffer
+(CROI_MEM_FRAMEBUFFER) is in no PMM arena and not in the cached physmap;
+`Framebuffer` maps it WC for the boot self-test, which draws a pattern
+and unmaps it (user space owns it from then on, K9b), checked with a QEMU
+screendump (`qemu.sh --screendump`, `tools/check-pixels.py`); arm64/rv64
+get a framebuffer from `-device ramfb`.
 
 Kernel (`kernel/Kernel/Main.swift`): validates the handoff, builds its own
 page tables from free RAM with `BootAllocator` (front-to-back, never frees;
@@ -94,15 +96,15 @@ first thing, since firmware's sits in memory reported free.
 
 Physical memory (`Kernel/Pmm.swift`, global `pmm`, after Zircon's
 PmmNode): arenas over contiguous RAM the kernel owns (free, kernel,
-handoff, ACPI reclaim; firmware runtime/NVS get none), each with a `Page`
-array (32 B/page) carved by the boot allocator. Pages start `.wired`;
+handoff, bootfs; ACPI reclaim, firmware runtime/NVS get none), each with
+a `Page` array (32 B/page) carved by the boot allocator. Pages start `.wired`;
 free RAM the boot allocator never handed out (it records exact spans) goes
 on a doubly linked free list. amd64 keeps the first MiB wired for SMP
 trampolines. `allocatePage`, `allocateContiguous(count, alignLog2:)`,
 `free` (panics on double free), `endHandoff()` (frees the loader's handoff
 data and boot page tables; nothing may read the handoff afterwards).
-Guarded by `pmmLock`. ACPI reclaim stays wired until ACPI is parsed. Boot
-runs a PMM self-test.
+Guarded by `pmmLock`. ACPI reclaim is never the PMM's: user space reads
+the tables there for good (K9b). Boot runs a PMM self-test.
 
 Kernel heap (`Kernel/Heap.swift`, global `heap`): PMM pages (state `.heap`)
 through the physmap, like Zircon's. Requests up to 2 KiB use one-page slabs
@@ -168,8 +170,12 @@ User address spaces and VMOs (K4a, Kernel/Vm/):
   mapping them (`mappers`); `decommit` takes pages out of the VMO, then
   unmaps them from each aspace (held by a reference, skipped if `dead`),
   then frees them, so the aspace -> vmo lock order holds.
-- Physical (K4b): `PhysicalMap` keeps every memory-map range that is RAM
-  or firmware's; physical VMOs over them are refused (`.denied`).
+- Physical (K4b, K9b): `PhysicalMap` keeps the memory-map ranges that
+  are RAM (and persistent/unusable memory); physical VMOs over them are
+  refused (`.denied`). Firmware memory the physmap maps cached (ACPI
+  reclaim and NVS, UEFI runtime) is allowed but only whole, and such a
+  VMO is always cached (`cachedFirmware`; `setCachePolicy` refuses
+  anything else), so no mapping disagrees with the physmap.
   Contiguous VMOs take an address `limit` and come from `ContiguousPool`
   first (`croi.contiguous_pool=<MiB>`, default 8, below 4 GiB if it can).
   `cacheOp` (include/cache.h: clflush, dc cvac/ivac/civac, Zicbom cbo.*
@@ -533,11 +539,11 @@ User/IoPorts.swift, include/resource.h, include/vmo.h; Todhchai M3):
   and no children of it; overlaps with an exclusive one NOT_FOUND).
   `Resources.validate` is Zircon's validate_ranged_resource (non-strict:
   an MMIO resource grants the pages it touches); `check(system:)` uses
-  it. `RootFilter` is the root filter: RAM and cached-firmware ranges
-  (`PhysicalMap`; RESERVED ranges such as PCIe ECAM are allowed, as in
-  Zircon), device registers the kernel maps (`mapPhysical` with device
-  caching records them; the console UART, the amd64 LAPIC/MSI window,
-  the GIC ITS), and on amd64 the 8259 and console UART ports.
+  it. `RootFilter` is the root filter: RAM (`PhysicalMap`; firmware
+  ranges and RESERVED ones such as PCIe ECAM are allowed, as in Zircon),
+  device registers the kernel maps (`mapPhysical` with device caching
+  records them; the console UART, the amd64 LAPIC/MSI window, the GIC
+  ITS), and on amd64 the 8259 and console UART ports.
   ZX_INFO_RESOURCE (18). The tracing base is Zircon's 14.
 - VMOs: `vmo_create_physical` (47; MMIO resource; uncached-device by
   default), `vmo_set_cache_policy` (46; MAP right; unmapped only, else
@@ -564,6 +570,28 @@ User/IoPorts.swift, include/resource.h, include/vmo.h; Todhchai M3):
 - Boot test mode 10 (`ProcessSelfTest.runDrivers`, startup block word 3
   is the root resource) reads a device register through a physical VMO
   per arch (q35 ECAM at 0xE0000000, the PL031, the goldfish RTC).
+
+Firmware data for user space, K9b (Kernel/User/BootData.swift,
+include/zbi.h; Todhchai item 20):
+- Boot data: one ZBI container (Zircon's format; croi has no ZBI
+  otherwise) of ACPI_RSDP, SMBIOS, FRAMEBUFFER (zbi_swfb_t; GOP BGRX is
+  RGB_X888, RGBX is BGR_888_X) and MEM_CONFIG (RAM the kernel owns,
+  PERIPHERAL for MMIO and the framebuffer, RESERVED for the rest)
+  items. `BootData.build` writes it into boot allocator pages before the
+  PMM takes over (the memory map lives in handoff memory); `makeObject`
+  adopts them into a VMO. userboot gets it read only (no WRITE) as
+  Zircon's PA_VMO_BOOTDATA (0x1A) and passes it on. zbi.h is the whole
+  contract (Todhchai writes its own reader).
+- Firmware memory is read through physical VMOs under an MMIO resource
+  (always cached, see Physical above); RAM stays refused. The kernel
+  unmaps the framebuffer after its self-test, so a driver's physical VMO
+  over it (WRITE_COMBINING) is its only mapping.
+- Boot test mode 10 continues (startup block word 4 is the boot data):
+  the container and every item well formed, the RSDP through a narrow
+  MMIO resource (uncached and WC refused), the XSDT's checksum, every
+  MEM_CONFIG RAM range refused, the SMBIOS anchor, and the kernel's
+  framebuffer pattern read back write-combining. QEMU has SMBIOS and a
+  framebuffer on all three machines.
 
 ACPI (`Kernel/Acpi/`, after Zircon's acpi_lite): `AcpiTables` validates
 RSDP/XSDT and finds tables by signature; `withPhysicalBytes` reads through

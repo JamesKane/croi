@@ -157,6 +157,8 @@ enum ProcessSelfTest {
         before.expectUnchanged(console)
         console.write("  drv:    resources (ranges, exclusive, RAM and kernel MMIO refused, info), physical VMO over ")
         console.write("a device read through a mapping, cache policy, op_range (commit, zero, decommit, cache ops), IO ports (amd64)\n")
+        console.write("  fw:     boot data (ZBI: RSDP, SMBIOS, framebuffer, memory ranges) read only; ACPI tables and SMBIOS ")
+        console.write("through physical VMOs, cached only; the kernel's framebuffer pattern read write-combining\n")
     }
 
     /// Live processes, address spaces and objects, to check nothing leaked.
@@ -192,7 +194,8 @@ enum ProcessSelfTest {
     }
 
     /// Runs the user test program as a process in `mode`, with a startup
-    /// block at 0x3000000 (job, self, root VMAR, code VMO, code size), and
+    /// block at 0x3000000 (job, self, root VMAR, code VMO, code size, root
+    /// resource, boot data), and
     /// returns its return code once it has exited.
     static func runInProcess(mode: UInt64) -> Int64 {
         let page = KernelLayout.pageSize
@@ -222,14 +225,16 @@ enum ProcessSelfTest {
             let codeHandle = try Processes.addHandle(codeVmo, rights: VmoObject.defaultRights.union(.execute),
                                                      to: process)
             let resource = try Processes.addHandle(Resources.root, rights: ResourceObject.defaultRights, to: process)
-            var block = InlineArray<4, UInt64>(repeating: 0)
+            let bootData = try Processes.addHandle(BootData.object, rights: BootData.rights, to: process)
+            var block = InlineArray<5, UInt64>(repeating: 0)
             block[0] = UInt64(job) | UInt64(me) << 32
             block[1] = UInt64(root) | UInt64(codeHandle) << 32
             block[2] = codeSize
             block[3] = UInt64(resource)
+            block[4] = UInt64(bootData)
             var span = block.mutableSpan
             span.withUnsafeMutableBytes { raw in
-                startup.writeBytes(at: 0, from: UInt64(UInt(bitPattern: raw.baseAddress!)), count: 32)
+                startup.writeBytes(at: 0, from: UInt64(UInt(bitPattern: raw.baseAddress!)), count: 40)
             }
             codeVmo.release()
             startupVmo.release()

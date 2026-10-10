@@ -147,10 +147,10 @@ let pmmLock = SpinLock()
     }
 
     /// RAM the PMM tracks. Firmware runtime/NVS and persistent memory are
-    /// never the kernel's to allocate, so they get no arena.
+    /// never the kernel's to allocate, so they get no arena; nor do the
+    /// ACPI tables (reclaim), which user space reads for good (K9b).
     private static func isManaged(_ type: UInt32) -> Bool {
-        type == CROI_MEM_FREE || type == CROI_MEM_KERNEL || type == CROI_MEM_HANDOFF
-            || type == CROI_MEM_ACPI_RECLAIM || type == CROI_MEM_BOOTFS
+        type == CROI_MEM_FREE || type == CROI_MEM_KERNEL || type == CROI_MEM_HANDOFF || type == CROI_MEM_BOOTFS
     }
 
     // MARK: Allocation
@@ -327,14 +327,18 @@ let pmmLock = SpinLock()
 }
 
 /// Physical ranges physical VMOs may never cover (Todhchai's RAM deny
-/// list; Zircon's root filter): every memory-map range that is RAM or
-/// firmware memory the physmap maps cached, kept after the handoff is
-/// gone. MMIO, the framebuffer, RESERVED ranges (firmware's "never
-/// touch": PCIe ECAM, flash; the kernel doesn't) and holes are allowed.
-/// K9b decides how ACPI NVS and runtime ranges may be mapped.
+/// list; Zircon's root filter): RAM the kernel owns or may reuse, and
+/// persistent or unusable memory, kept after the handoff is gone.
+/// Firmware's memory the physmap maps cached (ACPI tables and NVS, UEFI
+/// runtime: K9b) is allowed but only cached, so no mapping disagrees with
+/// the physmap's. MMIO, the framebuffer, RESERVED ranges (firmware's
+/// "never touch": PCIe ECAM, flash; the kernel doesn't) and holes are
+/// allowed with any memory type.
 enum PhysicalMap {
     nonisolated(unsafe) private static var denied = InlineArray<64, (UInt64, UInt64)>(repeating: (0, 0))
     nonisolated(unsafe) private(set) static var deniedCount = 0
+    nonisolated(unsafe) private static var firmware = InlineArray<64, (UInt64, UInt64)>(repeating: (0, 0))
+    nonisolated(unsafe) private(set) static var firmwareCount = 0
     /// The end of the highest range of any type.
     nonisolated(unsafe) private(set) static var highestEnd: UInt64 = 0
 
@@ -342,22 +346,56 @@ enum PhysicalMap {
         for i in 0..<boot.rangeCount {
             let r = boot.range(i)
             highestEnd = max(highestEnd, r.base + r.size)
-            guard r.type != CROI_MEM_MMIO, r.type != CROI_MEM_FRAMEBUFFER, r.type != CROI_MEM_RESERVED,
-                  r.size > 0 else { continue }
-            if deniedCount > 0, denied[deniedCount - 1].1 == r.base {
-                denied[deniedCount - 1].1 = r.base + r.size  // merge with the previous range
-            } else if deniedCount < 64 {
-                denied[deniedCount] = (r.base, r.base + r.size)
-                deniedCount += 1
-            } else {
-                denied[63].1 = max(denied[63].1, r.base + r.size)  // be conservative, never permissive
+            guard r.size > 0 else { continue }
+            switch r.type {
+            case CROI_MEM_MMIO, CROI_MEM_FRAMEBUFFER, CROI_MEM_RESERVED:
+                continue
+            case CROI_MEM_ACPI_RECLAIM, CROI_MEM_ACPI_NVS, CROI_MEM_FIRMWARE_RUNTIME:
+                // Too many to list: deny the rest rather than allow it uncached.
+                if !add(&firmware, &firmwareCount, r.base, r.base + r.size, grow: false) {
+                    _ = add(&denied, &deniedCount, r.base, r.base + r.size, grow: true)
+                }
+            default:
+                _ = add(&denied, &deniedCount, r.base, r.base + r.size, grow: true)
             }
         }
     }
 
-    /// Whether [base, base+size) touches RAM or firmware memory.
+    /// Appends [start, end), merged with the previous range if they touch.
+    /// With the list full, `grow` widens the last entry to cover it (for
+    /// the deny list: conservative, never permissive); else false.
+    private static func add(_ list: inout InlineArray<64, (UInt64, UInt64)>, _ count: inout Int,
+                            _ start: UInt64, _ end: UInt64, grow: Bool) -> Bool {
+        if count > 0, list[count - 1].1 == start {
+            list[count - 1].1 = end
+        } else if count < 64 {
+            list[count] = (start, end)
+            count += 1
+        } else if grow {
+            list[63].1 = max(list[63].1, end)
+        } else {
+            return false
+        }
+        return true
+    }
+
+    /// Whether [base, base+size) touches RAM or memory that is never mapped.
     static func overlapsDenied(_ base: UInt64, _ size: UInt64) -> Bool {
         for i in 0..<deniedCount where base < denied[i].1 && denied[i].0 < base &+ size { return true }
+        return false
+    }
+
+    /// Whether [base, base+size) lies inside firmware memory the physmap
+    /// maps cached.
+    static func firmwareCovers(_ base: UInt64, _ size: UInt64) -> Bool {
+        for i in 0..<firmwareCount where firmware[i].0 <= base && base &+ size <= firmware[i].1 { return true }
+        return false
+    }
+
+    /// Whether [base, base+size) touches firmware memory the physmap maps
+    /// cached.
+    static func overlapsFirmware(_ base: UInt64, _ size: UInt64) -> Bool {
+        for i in 0..<firmwareCount where base < firmware[i].1 && firmware[i].0 < base &+ size { return true }
         return false
     }
 }

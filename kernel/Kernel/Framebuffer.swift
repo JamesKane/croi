@@ -20,6 +20,12 @@ struct Framebuffer {
         pixels = window + (info.base - first)
     }
 
+    /// Removes the kernel's mapping; the framebuffer can't be drawn on
+    /// afterwards.
+    func unmap() throws(VmError) {
+        try kernelAspace.free(pixels & ~(KernelLayout.pageSize - 1))
+    }
+
     var width: Int { Int(info.width) }
     var height: Int { Int(info.height) }
 

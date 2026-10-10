@@ -27,7 +27,7 @@ real-time wake error p99 < 100 µs.
 |---|---|---|
 | 1 | Handoff: bootfs, GOP framebuffer, command line | **Done** (K1, K8b): handoff v3, Zircon's bootfs format |
 | 2 | Interrupt controllers, tickless timer, monotonic clock | **Done** (K2). ITS and AIA set up with the first MSI driver |
-| 3 | PMM (contiguous, reclaim), heap, slab | **Done**, except ACPI-reclaim memory, which stays wired until ACPI parsing is finished |
+| 3 | PMM (contiguous, reclaim), heap, slab | **Done**; ACPI-reclaim memory is never the PMM's (user space reads the tables, K9b) |
 | 4 | Threads, wait queues, PI owned wait queues, timers | **Done** (K3) |
 | 5 | Scheduler: fair + EDF | **Done** (K3c); profiles are objects since K8c |
 | 6 | SMP: AP bring-up, IPIs, TLB shootdown, per-CPU data | **Done** |
@@ -38,10 +38,10 @@ real-time wake error p99 < 100 µs.
 | 11 | Job, process, thread, exceptions, job policy | **Done** (K7a, K7d) |
 | 12 | userboot + bootfs | **Done** (K8b) |
 | 18 (core) | ktrace rings, categories, user marks, tick and PMU sampling, per-thread PMU counters | **Done** (K3–K6, see "Trace" below) |
-| 13 | Resources, interrupt objects, MSI | **Partial**: root and system resources (tracing, debuglog, profile). The rest is K9a, K9c, K9d |
+| 13 | Resources, interrupt objects, MSI | **Partial**: resources and physical VMOs (K9a). Interrupts and MSI are K9c, K9d |
 | 14 | BTI/PMT and IOMMUs | Todo: a BTI without an IOMMU in K9e, IOMMUs after M3 |
 | 15–19 | FIFO/counter/stream/socket/clock/debuglog, pager, rings, debug syscalls | After M3, except debuglog (K8a) and exception channels (K7d). Item 17 needs nothing from croi |
-| 20 | Firmware data for user space (ACPI tables and op regions, GOP framebuffer) behind resources | Todo (K9b) |
+| 20 | Firmware data for user space (ACPI tables and op regions, GOP framebuffer) behind resources | **Done** (K9b) |
 
 ## Milestones
 
@@ -379,7 +379,12 @@ pinned DMA without a driver stack. The boot tests add it.
   tracing resource's base, which is 6 in croi and 14 (TRACING_BASE) in
   Zircon at the pin (6 is MEXEC): Todhchai's native tracer (M3e) asks
   for it by number.
-- **K9b: firmware data for user space (item 20).** Zircon tells user
+- **K9b: firmware data for user space (item 20).** **Done** (2026-10-10):
+  as below. The loader also fills holes in the framebuffer's range (q35's
+  GOP framebuffer is a PCI BAR outside every firmware range), physical
+  VMOs over firmware memory are always cached (the physmap maps it
+  cached; other policies ACCESS_DENIED), and the boot data handle is
+  Zircon's PA_VMO_BOOTDATA. Details in CLAUDE.md. Zircon tells user
   space about firmware through ZBI items (RSDP, SMBIOS, framebuffer,
   memory ranges), and its drivers read ACPI tables through physical VMOs
   under an MMIO resource. croi has no ZBI, so:

@@ -20,6 +20,7 @@ enum : uint32_t {
   CROI_PA_VMO_VDSO = 0x11,
   CROI_PA_VMO_STACK = 0x13,
   CROI_PA_VMO_EXECUTABLE = 0x14,
+  CROI_PA_VMO_BOOTDATA = 0x1A,  // read-only ZBI container of firmware items (zbi.h)
   CROI_PA_VMO_BOOTFS = 0x1B,
   CROI_PA_FD = 0x30,              // argument: the fd (1: stdout, a debuglog)
   CROI_PA_RESOURCE = 0x3F,        // argument 0: the root resource

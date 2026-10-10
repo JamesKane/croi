@@ -1,4 +1,4 @@
-// Boot handoff from the croi loader to the kernel (version 3).
+// Boot handoff from the croi loader to the kernel (version 4).
 //
 // The loader fills one croi_handoff_t and passes its physical address to the
 // kernel entry point. All addresses here are physical. On entry the boot
@@ -13,7 +13,7 @@
 
 // Enum constants rather than macros so Swift imports them.
 enum : uint64_t { CROI_HANDOFF_MAGIC = 0x31464f444e414843 };  // "CHANDOF1"
-enum : uint32_t { CROI_HANDOFF_VERSION = 3 };
+enum : uint32_t { CROI_HANDOFF_VERSION = 4 };
 
 // Physical memory range types.
 enum : uint32_t {
@@ -104,9 +104,13 @@ typedef struct {
   uint64_t cmdline_size;
 
   croi_framebuffer_t framebuffer;  // format CROI_PIXEL_NONE if there is none
+
+  // The SMBIOS entry point from the UEFI configuration table (SMBIOS 3.x
+  // "_SM3_" preferred, else 2.x "_SM_"), 0 if none.
+  uint64_t smbios;
 } croi_handoff_t;
 
 static_assert(sizeof(croi_mem_range_t) == 24);
 static_assert(sizeof(croi_uart_t) == 24);
 static_assert(sizeof(croi_framebuffer_t) == 48);
-static_assert(sizeof(croi_handoff_t) == 184);
+static_assert(sizeof(croi_handoff_t) == 192);

@@ -307,6 +307,7 @@ typedef struct {
   uint32_t job, process, vmar, code_vmo;
   uint64_t code_size;
   uint32_t resource, padding;  // the root resource
+  uint32_t bootdata, padding2;  // the boot data VMO (read only)
 } startup_t;
 
 #define CHILD_CODE 0x1000000ull
@@ -1081,6 +1082,131 @@ static void port_worker(uint64_t arg) {
 }
 #endif
 
+// K9b: maps [base, base + size), rounded out to pages, through a physical
+// VMO under `resource` with `policy` and `perms`. Returns base's address.
+static uint64_t map_physical(const startup_t *s, uint32_t resource, uint64_t base, uint64_t size, uint32_t policy,
+                             uint32_t perms) {
+  uint64_t first = base & ~(PAGE - 1), length = ((base + size + PAGE - 1) & ~(PAGE - 1)) - first, at = 0;
+  uint32_t vmo = 0;
+  CHECK(240, sys(CROI_SYS_VMO_CREATE_PHYSICAL, resource, first, length, (uint64_t)&vmo, 0) == 0 &&
+                 sys(CROI_SYS_VMO_SET_CACHE_POLICY, vmo, policy, 0, 0, 0) == 0 &&
+                 sys6(CROI_SYS_VMAR_MAP, s->vmar | (uint64_t)perms << 32, 0, vmo, 0, length, (uint64_t)&at) == 0);
+  sys(CROI_SYS_HANDLE_CLOSE, vmo, 0, 0, 0, 0);
+  return at + (base - first);
+}
+
+static uint8_t checksum(const volatile uint8_t *bytes, uint64_t count) {
+  uint8_t sum = 0;
+  for (uint64_t i = 0; i < count; i++) sum += bytes[i];
+  return sum;
+}
+
+// The MEM_CONFIG type of the range holding `paddr`, 0 if none.
+static uint32_t mem_type(const croi_zbi_mem_range_t *ranges, uint64_t count, uint64_t paddr) {
+  for (uint64_t i = 0; i < count; i++) {
+    if (ranges[i].paddr <= paddr && paddr - ranges[i].paddr < ranges[i].length) return ranges[i].type;
+  }
+  return 0;
+}
+
+// Mode 10, K9b: the boot data (a ZBI container of firmware items, zbi.h)
+// and firmware memory through physical VMOs: the ACPI tables (cached only),
+// SMBIOS, and the framebuffer the kernel drew its pattern on.
+static int64_t firmware(const startup_t *s) {
+  uint64_t size = 0, at = 0, word = 0;
+  CHECK(231, sys(CROI_SYS_VMO_GET_SIZE, s->bootdata, (uint64_t)&size, 0, 0, 0) == 0 && size >= PAGE &&
+                 sys(CROI_SYS_VMO_WRITE, s->bootdata, (uint64_t)&word, 0, 8, 0) == ERR_ACCESS_DENIED &&
+                 sys6(CROI_SYS_VMAR_MAP, s->vmar | (uint64_t)(CROI_VM_PERM_READ | CROI_VM_PERM_WRITE) << 32, 0,
+                      s->bootdata, 0, size, (uint64_t)&at) == ERR_ACCESS_DENIED &&
+                 sys6(CROI_SYS_VMAR_MAP, s->vmar | (uint64_t)CROI_VM_PERM_READ << 32, 0, s->bootdata, 0, size,
+                      (uint64_t)&at) == 0);
+  const croi_zbi_header_t *container = (const croi_zbi_header_t *)at;
+  CHECK(232, container->type == CROI_ZBI_TYPE_CONTAINER && container->extra == CROI_ZBI_CONTAINER_MAGIC &&
+                 (container->flags & CROI_ZBI_FLAGS_VERSION) && container->magic == CROI_ZBI_ITEM_MAGIC &&
+                 container->length % CROI_ZBI_ALIGNMENT == 0 && container->length + sizeof *container <= size);
+  // Every item well formed; RSDP and MEM_CONFIG present.
+  uint64_t rsdp = 0, smbios = 0, ranges_count = 0;
+  const croi_zbi_mem_range_t *ranges = 0;
+  const croi_zbi_swfb_t *fb = 0;
+  for (uint64_t offset = sizeof *container; offset < sizeof *container + container->length;) {
+    const croi_zbi_header_t *item = (const croi_zbi_header_t *)(at + offset);
+    const void *payload = item + 1;
+    CHECK(233, item->magic == CROI_ZBI_ITEM_MAGIC && (item->flags & CROI_ZBI_FLAGS_VERSION) &&
+                   item->crc32 == CROI_ZBI_ITEM_NO_CRC32 &&
+                   offset + sizeof *item + item->length <= sizeof *container + container->length);
+    if (item->type == CROI_ZBI_TYPE_ACPI_RSDP && item->length == 8) rsdp = *(const uint64_t *)payload;
+    if (item->type == CROI_ZBI_TYPE_SMBIOS && item->length == 8) smbios = *(const uint64_t *)payload;
+    if (item->type == CROI_ZBI_TYPE_FRAMEBUFFER && item->length == sizeof *fb) fb = payload;
+    if (item->type == CROI_ZBI_TYPE_MEM_CONFIG && item->length % sizeof *ranges == 0) {
+      ranges = payload;
+      ranges_count = item->length / sizeof *ranges;
+    }
+    offset += sizeof *item + ((item->length + CROI_ZBI_ALIGNMENT - 1) & ~(uint64_t)(CROI_ZBI_ALIGNMENT - 1));
+  }
+  CHECK(234, rsdp != 0 && ranges_count > 0);
+  for (uint64_t i = 1; i < ranges_count; i++) {
+    CHECK(235, ranges[i - 1].paddr + ranges[i - 1].length <= ranges[i].paddr);
+  }
+  // The RSDP is in firmware memory (RESERVED): readable through an MMIO
+  // resource over it, cached only.
+  uint32_t mmio = 0, vmo = 0;
+  uint64_t first = rsdp & ~(PAGE - 1), pages = ((rsdp + 36 + PAGE - 1) & ~(PAGE - 1)) - first;
+  CHECK(236, mem_type(ranges, ranges_count, rsdp) == CROI_ZBI_MEM_TYPE_RESERVED &&
+                 mem_type(ranges, ranges_count, DRV_RAM) == CROI_ZBI_MEM_TYPE_RAM &&
+                 resource_create(s->resource, CROI_RSRC_KIND_MMIO, first, pages, &mmio) == 0 &&
+                 sys(CROI_SYS_VMO_CREATE_PHYSICAL, mmio, first, pages, (uint64_t)&vmo, 0) == 0 &&
+                 sys(CROI_SYS_VMO_SET_CACHE_POLICY, vmo, CROI_CACHE_POLICY_UNCACHED, 0, 0, 0) == ERR_ACCESS_DENIED &&
+                 sys(CROI_SYS_VMO_SET_CACHE_POLICY, vmo, CROI_CACHE_POLICY_WRITE_COMBINING, 0, 0, 0) ==
+                     ERR_ACCESS_DENIED &&
+                 sys(CROI_SYS_HANDLE_CLOSE, vmo, 0, 0, 0, 0) == 0);
+  const volatile uint8_t *table = (const volatile uint8_t *)map_physical(s, mmio, rsdp, 36, CROI_CACHE_POLICY_CACHED,
+                                                                          CROI_VM_PERM_READ);
+  CHECK(237, table[0] == 'R' && table[1] == 'S' && table[2] == 'D' && table[7] == ' ' && table[15] >= 2 &&
+                 checksum(table, 36) == 0);
+  uint64_t xsdt = *(const volatile uint64_t *)(table + 24);
+  sys(CROI_SYS_HANDLE_CLOSE, mmio, 0, 0, 0, 0);
+  // The XSDT, through the root resource: whole and summing to zero.
+  table = (const volatile uint8_t *)map_physical(s, s->resource, xsdt, 36, CROI_CACHE_POLICY_CACHED, CROI_VM_PERM_READ);
+  uint32_t length = *(const volatile uint32_t *)(table + 4);
+  CHECK(238, table[0] == 'X' && table[1] == 'S' && table[2] == 'D' && table[3] == 'T' && length >= 36 &&
+                 length < 65536);
+  table = (const volatile uint8_t *)map_physical(s, s->resource, xsdt, length, CROI_CACHE_POLICY_CACHED,
+                                                 CROI_VM_PERM_READ);
+  CHECK(239, checksum(table, length) == 0);
+  // RAM stays refused, whatever MEM_CONFIG range it is.
+  for (uint64_t i = 0; i < ranges_count; i++) {
+    if (ranges[i].type != CROI_ZBI_MEM_TYPE_RAM) continue;
+    CHECK(241, sys(CROI_SYS_VMO_CREATE_PHYSICAL, s->resource, ranges[i].paddr, PAGE, (uint64_t)&vmo, 0) ==
+                   ERR_ACCESS_DENIED);
+  }
+  // SMBIOS, if firmware has it: the entry point's anchor.
+  if (smbios != 0) {
+    table = (const volatile uint8_t *)map_physical(s, s->resource, smbios, 5, CROI_CACHE_POLICY_CACHED,
+                                                   CROI_VM_PERM_READ);
+    CHECK(242, table[0] == '_' && table[1] == 'S' && table[2] == 'M' &&
+                   (table[3] == '_' || (table[3] == '3' && table[4] == '_')));
+  }
+  // The framebuffer (PERIPHERAL), mapped write-combining: the kernel's
+  // pattern is there, background (16, 48, 96) and a (240, 192, 32) block
+  // at (16, 16) sized 64x32.
+  if (fb != 0) {
+    uint32_t background, block;
+    if (fb->format == CROI_ZBI_PIXEL_FORMAT_RGB_X888) {
+      background = 0x103060, block = 0xF0C020;
+    } else {
+      CHECK(243, fb->format == CROI_ZBI_PIXEL_FORMAT_BGR_888_X);
+      background = 0x603010, block = 0x20C0F0;
+    }
+    CHECK(244, mem_type(ranges, ranges_count, fb->base) == CROI_ZBI_MEM_TYPE_PERIPHERAL && fb->width >= 80 &&
+                   fb->height >= 48 && fb->stride >= fb->width);
+    const volatile uint32_t *pixels = (const volatile uint32_t *)map_physical(
+        s, s->resource, fb->base, (uint64_t)fb->stride * fb->height * 4, CROI_CACHE_POLICY_WRITE_COMBINING,
+        CROI_VM_PERM_READ | CROI_VM_PERM_WRITE);
+    CHECK(245, (pixels[0] & 0xFFFFFF) == background && (pixels[30 * fb->stride + 40] & 0xFFFFFF) == block);
+  }
+  return 0x600D;
+}
+
 static int64_t drivers(const startup_t *s) {
   uint32_t root = s->resource, mmio = 0, other = 0, vmo = 0;
   // The root filter: RAM and the kernel's own registers.
@@ -1194,7 +1320,7 @@ static int64_t drivers(const startup_t *s) {
   CHECK(227, sys(CROI_SYS_VMO_CREATE, 0, 0, (uint64_t)&anon, 0, 0) == 0 &&
                  sys(CROI_SYS_VMO_GET_SIZE, anon, (uint64_t)&size, 0, 0, 0) == 0 && size == 0 &&
                  sys(CROI_SYS_HANDLE_CLOSE, anon, 0, 0, 0, 0) == 0);
-  return 0x600D;
+  return firmware(s);
 }
 
 // Mode 4: something to sample. Three frames deep, spin for `ns`, with a

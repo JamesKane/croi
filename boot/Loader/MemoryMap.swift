@@ -94,7 +94,12 @@ import CHandoff
         unsafe ranges[count] = croi_mem_range_t(base: base, size: size, type: MemoryMap.handoffType(type), reserved: 0)
         count += 1
     }
-    // Insertion sort: the map is small and usually sorted already.
+    unsafe sortRanges(ranges, count: count)
+    return unsafe mergeRanges(ranges, count: count)
+}
+
+/// Insertion sort by base: the map is small and usually sorted already.
+@unsafe private func sortRanges(_ ranges: UnsafeMutablePointer<croi_mem_range_t>, count: Int) {
     for i in 1..<max(count, 1) {
         let item = unsafe ranges[i]
         var j = i
@@ -104,19 +109,36 @@ import CHandoff
         }
         unsafe ranges[j] = item
     }
-    return unsafe mergeRanges(ranges, count: count)
 }
 
-/// Re-types [base, base+size) as `type`, splitting the ranges it overlaps.
-/// Needs room for two more ranges. Returns the new count.
+/// Re-types [base, base+size) as `type`, splitting the ranges it overlaps
+/// and filling the holes in it (a framebuffer in a PCI BAR is in no
+/// firmware range at all). Needs room for two more ranges per range it
+/// touches. Returns the new count.
 @unsafe func overlayRange(
     _ ranges: UnsafeMutablePointer<croi_mem_range_t>, count: Int, capacity: Int,
     base: UInt64, size: UInt64, type: UInt32
 ) -> Int {
     guard size > 0 else { return count }
     let end = base + size
-    var i = 0
     var count = count
+    var cursor = base
+    for i in 0..<count where count < capacity {
+        let r = unsafe ranges[i]
+        guard r.base + r.size > cursor else { continue }
+        guard r.base < end else { break }
+        if r.base > cursor {
+            unsafe ranges[count] = croi_mem_range_t(base: cursor, size: r.base - cursor, type: type, reserved: 0)
+            count += 1
+        }
+        cursor = max(cursor, r.base + r.size)
+    }
+    if cursor < end, count < capacity {
+        unsafe ranges[count] = croi_mem_range_t(base: cursor, size: end - cursor, type: type, reserved: 0)
+        count += 1
+    }
+    unsafe sortRanges(ranges, count: count)
+    var i = 0
     while i < count {
         let r = unsafe ranges[i]
         let rEnd = r.base + r.size

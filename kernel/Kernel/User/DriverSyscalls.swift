@@ -26,7 +26,8 @@ extension Syscalls {
                     try vmo.setCachePolicy(policy)
                 }
             } catch {
-                throw .badState  // mapped
+                guard case .denied = error else { throw .badState }  // mapped
+                throw .accessDenied  // firmware memory: cached only
             }
         case 47:  // vmo_create_physical(resource, paddr, size, out)
             try Policy.check(UInt32(CROI_POL_NEW_VMO))
@@ -36,7 +37,8 @@ extension Syscalls {
             try Resources.validate(table, handle, kind: UInt32(CROI_RSRC_KIND_MMIO), base: a[1], size: a[2])
             let vmo: Vmo
             do throws(VmError) {
-                vmo = try Vmo(physical: a[1], size: a[2], cache: .device)  // Zircon's default: uncached
+                // Zircon's default: uncached (firmware memory: cached).
+                vmo = try Vmo(physical: a[1], size: a[2], cache: .device)
             } catch {
                 throw error == .outOfMemory ? .noMemory : .accessDenied
             }

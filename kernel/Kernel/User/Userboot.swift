@@ -6,8 +6,9 @@ import Fmt
 /// boot. userboot (user/userboot, an ELF in the kernel image) is loaded by
 /// `ProgramLoader` into a process in the root job, with what it needs to
 /// start everything else: the root job, the root resource, bootfs as a VMO
-/// (the loader's CROI_MEM_BOOTFS pages, adopted), a debuglog as stdout, and
-/// the kernel command line's words as its environment. userboot finds
+/// (the loader's CROI_MEM_BOOTFS pages, adopted), the boot data (firmware
+/// items, `BootData`), a debuglog as stdout, and the kernel command line's
+/// words as its environment. userboot finds
 /// `userboot.next=` in bootfs and starts it.
 enum Userboot {
     static func start(_ console: Uart) {
@@ -34,7 +35,7 @@ enum Userboot {
             defer { bootfsObject.release() }
             let (stdout, stdoutRights) = try DebugLogs.create(readable: false)
             defer { stdout.release() }
-            var handles = InlineArray<9, ProgramLoader.StartupHandle>(repeating: ProgramLoader.StartupHandle(
+            var handles = InlineArray<10, ProgramLoader.StartupHandle>(repeating: ProgramLoader.StartupHandle(
                 object: Processes.rootJob, rights: JobObject.defaultRights,
                 info: croi_pa_hnd(UInt32(CROI_PA_JOB_DEFAULT), 0)))
             handles[1] = ProgramLoader.StartupHandle(object: Resources.root, rights: ResourceObject.defaultRights,
@@ -44,8 +45,10 @@ enum Userboot {
                                                      info: croi_pa_hnd(UInt32(CROI_PA_VMO_BOOTFS), 0))
             handles[3] = ProgramLoader.StartupHandle(object: stdout, rights: stdoutRights,
                                                      info: croi_pa_hnd(UInt32(CROI_PA_FD), 1))
+            handles[4] = ProgramLoader.StartupHandle(object: BootData.object, rights: BootData.rights,
+                                                     info: croi_pa_hnd(UInt32(CROI_PA_VMO_BOOTDATA), 0))
             // Each kind's ranged root, as Zircon's userboot gets them.
-            var count = 4
+            var count = 5
             let kinds: InlineArray<5, (UInt32, UInt32)> = [
                 (UInt32(CROI_RSRC_KIND_MMIO), UInt32(CROI_PA_MMIO_RESOURCE)),
                 (UInt32(CROI_RSRC_KIND_IRQ), UInt32(CROI_PA_IRQ_RESOURCE)),

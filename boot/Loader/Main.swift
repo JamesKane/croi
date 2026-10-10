@@ -113,8 +113,12 @@ func croi_loader_main(
         uartSource = "COM1 default"
     }
     #endif
+    // SMBIOS for user space (the kernel passes it on as a ZBI item).
+    let smbios = unsafe configurationTable(systemTable, .smbios3Table) ?? configurationTable(systemTable, .smbiosTable) ?? 0
     console.write("acpi: RSDP ")
     console.write(hex: acpi?.rsdp ?? 0)
+    console.write(", smbios ")
+    console.write(hex: smbios)
     console.write(", uart kind ")
     console.write(decimal: UInt64(uart.kind))
     console.write(" at ")
@@ -237,7 +241,8 @@ func croi_loader_main(
         bootfs_size: UInt64(bootfs?.size ?? 0),
         cmdline: cmdlineSize > 0 ? cmdlinePhys : 0,
         cmdline_size: UInt64(cmdlineSize),
-        framebuffer: framebuffer)
+        framebuffer: framebuffer,
+        smbios: smbios)
 
     // Everything the kernel reads early must be visible with the MMU off.
     for i in 0..<rangeCount {

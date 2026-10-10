@@ -110,6 +110,7 @@ enum : uint32_t {  // timer_create options (Zircon's ZX_TIMER_SLACK_*)
 #include "profile.h"  // profile info, admission refusals
 #include "resource.h" // resource kinds, flags, system bases, croi_info_resource_t
 #include "vmo.h"      // vmo_op_range ops, cache policies, cache_flush options
+#include "zbi.h"      // boot data items (CROI_PA_VMO_BOOTDATA)
 
 enum : uint64_t {  // CROI_SYS_TRACE_CONFIGURE ops
   CROI_TRACE_OP_START = 0,   // a: categories, b: pages per CPU, c: mode;

@@ -35,6 +35,9 @@ struct VmoRecord: ~Copyable {
     var neverEvict = false
     /// A kernel shared page: user mappings are read only, always.
     var sharedReadOnly = false
+    /// Physical, over firmware memory the physmap maps cached (K9b): the
+    /// cache policy stays `.cached`.
+    var cachedFirmware = false
     var committedPages: UInt64 = 0
     /// The address spaces mapping it, once per mapping (for decommit).
     var mappers = UniqueArray<UInt64>()
@@ -188,7 +191,9 @@ struct Vmo: ~Copyable {
     /// that is never paged or evicted and is charged to `account` in full.
     init(deviceLocal base: UInt64, size: UInt64, cache: CachePolicy, account: MemoryAccountPointer) throws(VmError) {
         guard base % KernelLayout.pageSize == 0 else { throw .unaligned(base) }
-        guard !PhysicalMap.overlapsDenied(base, size) else { throw .denied(base) }
+        guard !PhysicalMap.overlapsDenied(base, size), !PhysicalMap.overlapsFirmware(base, size) else {
+            throw .denied(base)
+        }
         guard account.charge(size) else { throw .outOfMemory }
         let made: VmoPointer
         do throws(VmError) {
@@ -212,12 +217,16 @@ struct Vmo: ~Copyable {
         record.pointee.account = account
     }
 
-    /// An existing physical range (device memory, a framebuffer). The VMO
-    /// doesn't own it.
+    /// An existing physical range (device memory, a framebuffer, firmware
+    /// tables). The VMO doesn't own it. Firmware memory is always cached,
+    /// whatever `cache` says, and a range only partly in it is refused.
     init(physical base: UInt64, size: UInt64, cache: CachePolicy) throws(VmError) {
         guard base % KernelLayout.pageSize == 0 else { throw .unaligned(base) }
         guard !PhysicalMap.overlapsDenied(base, size) else { throw .denied(base) }
-        record = try Self.make(.physical(base: base), size: size, cache: cache)
+        let firmware = PhysicalMap.overlapsFirmware(base, size)
+        guard !firmware || PhysicalMap.firmwareCovers(base, size) else { throw .denied(base) }
+        record = try Self.make(.physical(base: base), size: size, cache: firmware ? .cached : cache)
+        record.pointee.cachedFirmware = firmware
     }
 
     /// One of the kernel's shared read-only pages (time, topology, power),
@@ -410,6 +419,7 @@ struct Vmo: ~Copyable {
     /// the old type outlives the change.
     func setCachePolicy(_ policy: CachePolicy) throws(VmError) {
         try record.pointee.lock.withLock { () throws(VmError) in
+            guard !record.pointee.cachedFirmware || policy == .cached else { throw .denied(0) }
             guard record.pointee.mappers.count == 0 else { throw .alreadyMapped(0) }
         }
         if size > 0 { try cacheOp(offset: 0, size: size, CROI_CACHE_CLEAN_INVALIDATE) }
