@@ -326,11 +326,12 @@ revision) is the model; croi's is Embedded Swift like the rest.
 ### After M2 (requirements 13–20 and the remaining extensions)
 Todhchai's M3 order: resources and interrupt objects (item 13), a BTI
 without an IOMMU first, syscalls for contiguous/physical VMOs,
-`set_cache_policy` and cache ops; then item 20. Zircon deltas found by
-Todhchai's hosted kernel, to fix first: `channel_write`/`call` must
-consume the handles on failure; settable user TLS (FS_BASE, TPIDR_EL0,
-tp through `object_set_property`); `vmar_unmap_handle_close_thread_exit`;
-`vmo_create` rounds sizes up to a page (croi refuses them).
+`set_cache_policy` and cache ops; then item 20. The Zircon deltas
+Todhchai's hosted kernel found are fixed (2026-10-10): `channel_write`/
+`call` consume the handles on failure; user TLS (amd64 FS/GS through
+`object_set_property`, arm64 TPIDR_EL0 and rv64 tp kept per thread);
+`vmar_unmap_handle_close_thread_exit` (syscall 75); `vmo_create` rounds
+sizes up to a page. Still open: zero-size VMOs (refused).
 - Firmware data for user space (item 20): the ACPI tables, AML operation
   regions (SystemMemory over firmware ranges, SystemIO, PCI config) and
   the GOP framebuffer, each behind a resource, since physical VMOs over

@@ -627,3 +627,19 @@ arch_pmu_event_type:
     isb
     ret
 .size arch_pmu_event_type, . - arch_pmu_event_type
+
+// uint64_t arch_user_tls_read(void): TPIDR_EL0 (user.h)
+.globl arch_user_tls_read
+.type arch_user_tls_read, %function
+arch_user_tls_read:
+    mrs     x0, tpidr_el0
+    ret
+.size arch_user_tls_read, . - arch_user_tls_read
+
+// void arch_user_tls_write(uint64_t value)
+.globl arch_user_tls_write
+.type arch_user_tls_write, %function
+arch_user_tls_write:
+    msr     tpidr_el0, x0
+    ret
+.size arch_user_tls_write, . - arch_user_tls_write

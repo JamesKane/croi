@@ -46,7 +46,11 @@ enum : uint32_t {
   CROI_EXCP_UNALIGNED_ACCESS = 0x508,
   CROI_EXCP_POLICY_ERROR = 0x8208,  // synthetic
 
-  // The exception's state property (object_set_property).
+  // Properties (object_get/set_property). amd64 only, on the calling
+  // thread's own handle: its TLS bases (arm64 TPIDR_EL0 and rv64 tp are
+  // user-writable registers). Then the exception's state.
+  CROI_PROP_REGISTER_GS = 2,
+  CROI_PROP_REGISTER_FS = 4,
   CROI_PROP_EXCEPTION_STATE = 16,
   CROI_EXCEPTION_STATE_TRY_NEXT = 0,
   CROI_EXCEPTION_STATE_HANDLED = 1,
@@ -65,8 +69,7 @@ typedef struct {
 
 // General registers (zx_thread_state_general_regs_t's layout per arch).
 // Writes keep only user-settable flags (amd64 arithmetic flags, arm64
-// NZCV); fs_base/gs_base and tpidr read 0 and are ignored until croi
-// keeps user TLS registers.
+// NZCV); fs_base/gs_base must be canonical.
 typedef struct {
 #if defined(__x86_64__)
   uint64_t rax, rbx, rcx, rdx, rsi, rdi, rbp, rsp, r8, r9, r10, r11, r12, r13, r14, r15;

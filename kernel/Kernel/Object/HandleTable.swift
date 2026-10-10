@@ -131,6 +131,21 @@ struct HandleTable: ~Copyable {
         object.release()
     }
 
+    /// Removes `handle` like `close`, but hands its reference and rights to
+    /// the caller instead of dropping them.
+    func take(_ handle: UInt32) throws(Status) -> (object: ObjectPointer, rights: Rights) {
+        let entry = try table.pointee.lock.withLock { () throws(Status) -> (ObjectPointer, Rights) in
+            let index = try slot(handle)
+            let entry = table.pointee.slots[index]
+            table.pointee.slots[index].object = 0
+            table.pointee.slots[index].generation = (table.pointee.slots[index].generation + 1) & 0xFF
+            table.pointee.count -= 1
+            return (ObjectPointer(address: entry.object), entry.rights)
+        }
+        Observers.handleClosed(entry.0, table: table.address, handle: handle)
+        return entry
+    }
+
     /// A second handle to the same object with `rights` (a subset of the
     /// original's, or sameRights). Needs the duplicate right.
     func duplicate(_ handle: UInt32, rights: Rights) throws(Status) -> UInt32 {

@@ -48,6 +48,7 @@ enum : uint64_t {
   CROI_SYS_VMAR_UNMAP = 72,        // (vmar, addr, len)
   CROI_SYS_VMAR_PROTECT = 73,      // (vmar | options << 32, addr, len)
   CROI_SYS_VMAR_DESTROY = 74,      // (vmar)
+  CROI_SYS_VMAR_UNMAP_HANDLE_CLOSE_THREAD_EXIT = 75,  // (vmar, addr, len, close_handle): no return on success
   // Channels, eventpairs (K7b): Zircon's, except channel_read packs its
   // capacities (bytes | handles << 32) and writes both actuals (two
   // uint32_t) through one pointer.

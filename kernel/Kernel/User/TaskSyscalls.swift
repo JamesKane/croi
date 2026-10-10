@@ -77,14 +77,7 @@ extension Syscalls {
         case 70: try vmarAllocate(table, a)
         case 71: try vmarMap(table, a)
         case 72:  // vmar_unmap(vmar, addr, len)
-            let vmar = try table.get(handle, type: .vmar)
-            let v = VmarPointer(object: vmar.object).info
-            guard inside(a[1], a[2], v.base, v.size) else { throw .invalidArgs }
-            try vm { () throws(VmError) in
-                try UserAspace.withView(v.aspace) { (aspace: borrowing UserAspace) throws(VmError) in
-                    try aspace.unmap(a[1], size: a[2])
-                }
-            }
+            try vmarUnmap(table, a)
         case 73:  // vmar_protect(vmar | options << 32, addr, len)
             let rights = try vmRights(UInt32(truncatingIfNeeded: a[0] >> 32))
             let vmar = try table.get(handle, type: .vmar, rights: handleRights(rights))
@@ -219,5 +212,31 @@ extension Syscalls {
 
     private static func vm<R>(_ body: () throws(VmError) -> R) throws(Status) -> R {
         try vmStatus(body)
+    }
+
+    private static func vmarUnmap(_ table: borrowing HandleTable, _ a: InlineArray<6, UInt64>) throws(Status) {
+        let vmar = try table.get(UInt32(truncatingIfNeeded: a[0]), type: .vmar)
+        let v = VmarPointer(object: vmar.object).info
+        guard inside(a[1], a[2], v.base, v.size) else { throw .invalidArgs }
+        try vm { () throws(VmError) in
+            try UserAspace.withView(v.aspace) { (aspace: borrowing UserAspace) throws(VmError) in
+                try aspace.unmap(a[1], size: a[2])
+            }
+        }
+    }
+
+    /// vmar_unmap_handle_close_thread_exit(vmar, addr, len, close_handle),
+    /// up to the exit (`run` does it, once nothing holds a reference):
+    /// vmar_unmap's errors return; then 0, or 1 if the handle wouldn't
+    /// close. The unmap may take the caller's own stack: it never runs
+    /// user code again unless an exception handler resumes it.
+    static func unmapAndClose(_ a: InlineArray<6, UInt64>, _ table: borrowing HandleTable) throws(Status) -> Int64 {
+        try vmarUnmap(table, a)
+        do throws(Status) {
+            try table.close(UInt32(truncatingIfNeeded: a[3]))
+        } catch {
+            return 1
+        }
+        return 0
     }
 }

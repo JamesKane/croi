@@ -21,6 +21,9 @@ struct CpuScheduler {
     var activeAspace: UserAspacePointer?
     /// The PKRU loaded here (amd64 with PKU).
     var pkru: UInt32 = 0
+    /// The user FS and GS bases loaded here (amd64; see Thread.tls).
+    var tls: UInt64 = 0
+    var gs: UInt64 = 0
     /// Wakes the CPU when the first throttled thread's period starts.
     var eligibilityTimer: UInt32 = 0
     var eligibilityAt: UInt64 = 0
@@ -1225,6 +1228,7 @@ enum Scheduler {
             cpus[me].activeAspace = next.pointee.aspace
         }
         loadPkru(next.pointee.pkru, me)
+        switchUserTls(from: current, to: next, me)
         setKernelStack(next.pointee.stack.top)
         Sampler.switched(to: next)
         Pmu.switched(from: current, to: next)
@@ -1641,6 +1645,45 @@ enum Scheduler {
         #if arch(x86_64)
         if unsafe percpu.pointee.arch.tss != 0 {
             unsafe UnsafeMutableRawPointer(bitPattern: UInt(percpu.pointee.arch.tss + 4))!.storeBytes(of: top, as: UInt64.self)
+        }
+        #endif
+    }
+
+    /// User TLS registers at a switch (see Thread.tls). Kernel threads
+    /// never use them, so they leave whatever is loaded alone.
+    private static func switchUserTls(from current: ThreadPointer, to next: ThreadPointer, _ me: Int) {
+        #if arch(x86_64)
+        guard next.pointee.aspace != nil else { return }
+        loadUserTls(fs: next.pointee.tls, gs: next.pointee.gs, me)
+        #elseif arch(arm64)
+        if current.pointee.aspace != nil { current.pointee.tls = arch_user_tls_read() }
+        if next.pointee.aspace != nil { arch_user_tls_write(next.pointee.tls) }
+        #endif
+    }
+
+    #if arch(x86_64)
+    private static func loadUserTls(fs: UInt64, gs: UInt64, _ me: Int) {
+        if cpus[me].tls != fs {
+            arch_wrmsr(0xC000_0100, fs)  // FS_BASE
+            cpus[me].tls = fs
+        }
+        if cpus[me].gs != gs {
+            arch_wrmsr(0xC000_0102, gs)  // KERNEL_GS_BASE: the user's GS while in the kernel
+            cpus[me].gs = gs
+        }
+    }
+    #endif
+
+    /// Sets the running thread's user FS or GS base (amd64,
+    /// object_set_property's REGISTER_FS/GS), loaded at once.
+    static func setUserTls(fs: UInt64? = nil, gs: UInt64? = nil) {
+        #if arch(x86_64)
+        locked {
+            let me = Int(Cpu.current)
+            let thread = cpus[me].current!
+            if let fs { thread.pointee.tls = fs }
+            if let gs { thread.pointee.gs = gs }
+            loadUserTls(fs: thread.pointee.tls, gs: thread.pointee.gs, me)
         }
         #endif
     }

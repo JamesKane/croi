@@ -233,16 +233,52 @@ enum Exceptions {
         object.header.lock.withLock { ExceptionPointer(object: object).pointee.state }
     }
 
-    /// The registers of `thread`, which must be waiting in an exception.
+    /// The registers of `thread`, which must be waiting in an exception
+    /// (so its TLS registers are in its record: Thread.tls).
     static func readState(_ thread: ObjectPointer) throws(Status) -> croi_thread_state_general_regs_t {
         let frame = try unsafe frame(of: thread)
-        return unsafe generalRegisters(frame.pointee)
+        var registers = unsafe generalRegisters(frame.pointee)
+        let running = runningThread(thread)
+        #if arch(x86_64)
+        registers.fs_base = running.pointee.tls
+        registers.gs_base = running.pointee.gs
+        #elseif arch(arm64)
+        registers.tpidr = running.pointee.tls
+        #endif
+        return registers
     }
 
     static func writeState(_ thread: ObjectPointer, _ registers: croi_thread_state_general_regs_t) throws(Status) {
         let frame = try unsafe frame(of: thread)
+        #if arch(x86_64)
+        guard isCanonical(registers.fs_base), isCanonical(registers.gs_base) else { throw .invalidArgs }
+        #endif
         try unsafe setGeneralRegisters(&frame.pointee, registers)
+        let running = runningThread(thread)
+        // Loaded when it next switches in.
+        Scheduler.locked {
+            #if arch(x86_64)
+            running.pointee.tls = registers.fs_base
+            running.pointee.gs = registers.gs_base
+            #elseif arch(arm64)
+            running.pointee.tls = registers.tpidr
+            #endif
+        }
     }
+
+    /// The scheduler thread of a thread object in an exception (`frame`
+    /// found it there, and it can't exit while waiting).
+    private static func runningThread(_ thread: ObjectPointer) -> ThreadPointer {
+        ThreadPointer(address: thread.header.lock.withLock { ThreadObjectPointer(object: thread).pointee.thread })
+    }
+
+    #if arch(x86_64)
+    /// Bits 63:47 all equal (4-level paging), as FS/GS bases need.
+    static func isCanonical(_ address: UInt64) -> Bool {
+        let top = address >> 47
+        return top == 0 || top == 0x1_FFFF
+    }
+    #endif
 
     private static func frame(of thread: ObjectPointer) throws(Status) -> UnsafeMutablePointer<arch_exception_frame_t> {
         let address = thread.header.lock.withLock { ThreadObjectPointer(object: thread).pointee.exceptionFrame }
@@ -257,7 +293,7 @@ enum Exceptions {
         croi_thread_state_general_regs_t(rax: f.rax, rbx: f.rbx, rcx: f.rcx, rdx: f.rdx, rsi: f.rsi, rdi: f.rdi,
                                          rbp: f.rbp, rsp: f.rsp, r8: f.r8, r9: f.r9, r10: f.r10, r11: f.r11,
                                          r12: f.r12, r13: f.r13, r14: f.r14, r15: f.r15, rip: f.rip,
-                                         rflags: f.rflags, fs_base: 0, gs_base: 0)
+                                         rflags: f.rflags, fs_base: 0, gs_base: 0)  // readState fills them
     }
 
     private static func setGeneralRegisters(_ f: inout arch_exception_frame_t,

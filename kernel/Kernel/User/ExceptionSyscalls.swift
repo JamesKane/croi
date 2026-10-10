@@ -31,12 +31,36 @@ extension Syscalls {
             }
             try put(value, a[1])
         case 103:  // object_get_property(handle, property, value, size)
+            #if arch(x86_64)
+            if a[1] == UInt64(CROI_PROP_REGISTER_FS) || a[1] == UInt64(CROI_PROP_REGISTER_GS) {
+                let thread = try table.get(handle, rights: .getProperty)
+                try requireCurrent(thread.object)
+                guard a[3] >= 8 else { throw .bufferTooSmall }
+                try check(a[2], 8)
+                let me = Scheduler.current
+                try put(a[1] == UInt64(CROI_PROP_REGISTER_FS) ? me.pointee.tls : me.pointee.gs, a[2])
+                return
+            }
+            #endif
             guard a[1] == UInt64(CROI_PROP_EXCEPTION_STATE) else { throw .notSupported }
             guard a[3] >= 4 else { throw .bufferTooSmall }
             try check(a[2], 4)
             let exception = try table.get(handle, type: .exception, rights: .getProperty)
             try put(Exceptions.state(exception.object), a[2])
         case 104:  // object_set_property(handle, property, value, size)
+            #if arch(x86_64)
+            if a[1] == UInt64(CROI_PROP_REGISTER_FS) || a[1] == UInt64(CROI_PROP_REGISTER_GS) {
+                let thread = try table.get(handle, rights: .setProperty)
+                try requireCurrent(thread.object)
+                guard a[3] >= 8 else { throw .bufferTooSmall }
+                var base: UInt64 = 0
+                let copied = withUnsafeMutableBytes(of: &base) { unsafe UserCopy.from($0.baseAddress!, a[2], 8) }
+                guard copied == 0 else { throw .invalidArgs }
+                guard Exceptions.isCanonical(base) else { throw .invalidArgs }
+                if a[1] == UInt64(CROI_PROP_REGISTER_FS) { Scheduler.setUserTls(fs: base) } else { Scheduler.setUserTls(gs: base) }
+                return
+            }
+            #endif
             guard a[1] == UInt64(CROI_PROP_EXCEPTION_STATE) else { throw .notSupported }
             guard a[3] >= 4 else { throw .bufferTooSmall }
             var state: UInt32 = 0
@@ -77,4 +101,13 @@ extension Syscalls {
             throw .notSupported
         }
     }
+
+    #if arch(x86_64)
+    /// Zircon's rule for the FS/GS properties: a thread object, and the
+    /// calling thread's own.
+    private static func requireCurrent(_ object: ObjectPointer) throws(Status) {
+        guard object.header.type == .thread else { throw .wrongType }
+        guard object.address == Scheduler.current.pointee.object else { throw .accessDenied }
+    }
+    #endif
 }

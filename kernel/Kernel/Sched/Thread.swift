@@ -79,6 +79,14 @@ struct Thread: ~Copyable {
     var handleTable: UInt64 = 0
     /// amd64 PKRU for JIT write gating (Jit.swift): 0 for kernel threads.
     var pkru: UInt32 = 0
+    /// User thread-local storage registers (user threads only): amd64
+    /// FS_BASE and the user GS base, set only through object_set_property
+    /// (user code can't write them: CR4.FSGSBASE stays off), so these are
+    /// the truth; arm64 TPIDR_EL0 (`tls`), which user code writes itself,
+    /// so it is saved at each switch out. rv64's tp is a general register,
+    /// in the exception frame.
+    var tls: UInt64 = 0
+    var gs: UInt64 = 0
     /// Its extended register state area (ExtendedState), or 0: kernel
     /// threads never use FP/SIMD.
     var extendedState: UInt64 = 0

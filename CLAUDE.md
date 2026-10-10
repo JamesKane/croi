@@ -350,6 +350,18 @@ Processes (K7a, Kernel/Object/Process.swift, include/task.h, syscalls
   pack handle | options << 32 into one register (six argument
   registers). A dead address space refuses operations under its lock
   (`VmError.dead`). User code has `croi_syscall6`.
+  `vmar_unmap_handle_close_thread_exit` (75) is a syscall (Zircon's is
+  vDSO code): `Syscalls.run` exits the thread after the handle-table
+  borrow ends, so no frame holds a reference; a failed close raises an
+  undefined-instruction exception (Zircon's vDSO traps).
+- User TLS (`Thread.tls`/`gs`, switched in `switchUserTls`): amd64 FS
+  and user GS bases only through object_set/get_property REGISTER_FS/GS
+  (4/2; the calling thread's own handle, canonical; CR4.FSGSBASE stays
+  off, so the record is the truth and a per-CPU cache skips unchanged
+  WRMSRs); arm64 TPIDR_EL0 saved and restored per user thread; rv64 tp
+  is in the frame. thread_read/write_state carry them.
+- `vmo_create` rounds sizes up to a page (Zircon's RoundSize); size 0
+  is still refused (Zircon allows it).
 - Lock order: job -> process -> thread object -> scheduler.
 
 Channels (K7b, Kernel/Object/Channel.swift, include/ipc.h, syscalls 80-86
@@ -358,8 +370,10 @@ in User/IpcSyscalls.swift):
   channel id = smaller koid); peers link without references and reach
   each other with `ObjectPointer.tryRetain`. Messages (bytes up to 64
   KiB, up to 64 handles) are one heap block owning a reference per
-  handle; writes move handles out of the table only after every check
-  (TRANSFER, not the channel itself, no repeats). Closing an endpoint
+  handle; as in Zircon, write and call consume every listed handle
+  whether or not they succeed (`build` takes each out of the table,
+  closing the bad ones, first error wins: TRANSFER, not the channel
+  itself, a repeat finds BAD_HANDLE), unless the list can't be read. Closing an endpoint
   raises PEER_CLOSED on the peer, ends calls waiting on it, and frees
   unread messages outside the lock. READABLE/WRITABLE/PEER_CLOSED are
   object signals, so waits and ports see them.
@@ -421,8 +435,7 @@ syscalls 100-107 in User/ExceptionSyscalls.swift):
   syscall unwind (Swift frames hold references) before the thread exits
   on its way out; *_EXCEPTION raise POLICY_ERROR first.
 - Not yet: debugger channels, exception reports with fault details,
-  SError delivery to the faulting process, user TLS registers in the
-  thread state.
+  SError delivery to the faulting process.
 
 Debuglog and user programs (K8a, Kernel/Object/DebugLog.swift,
 Kernel/User/ProgramLoader.swift, include/log.h, include/processargs.h,

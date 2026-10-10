@@ -22,11 +22,14 @@ struct VmoObject: ~Copyable {
         return object
     }
 
-    /// vmo_create: anonymous memory.
+    /// vmo_create: anonymous memory, the size rounded up to a page
+    /// (Zircon's RoundSize: OUT_OF_RANGE if that overflows).
     static func create(size: UInt64) throws(Status) -> ObjectPointer {
+        let pageMask = KernelLayout.pageSize - 1
+        guard size <= UInt64.max - pageMask else { throw .outOfRange }
         let vmo: Vmo
         do throws(VmError) {
-            vmo = try Vmo(anonymous: size)
+            vmo = try Vmo(anonymous: (size + pageMask) & ~pageMask)
         } catch {
             throw error == .invalidArgument ? .invalidArgs : .noMemory
         }

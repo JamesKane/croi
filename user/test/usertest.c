@@ -10,6 +10,7 @@
 
 #define ERR_BAD_HANDLE (-11)
 #define ERR_INVALID_ARGS (-10)
+#define ERR_OUT_OF_RANGE (-14)
 #define ERR_TIMED_OUT (-21)
 #define ERR_ACCESS_DENIED (-30)
 #define ERR_BAD_STATE (-20)
@@ -78,6 +79,13 @@ static int64_t objects(void) {
 
   // VMOs: write, read back, map and use directly.
   CHECK(16, sys(CROI_SYS_VMO_CREATE, 8192, 0, (uint64_t)&vmo, 0, 0) == 0);
+  // Sizes round up to a page, as Zircon's do.
+  uint32_t odd = 0;
+  uint64_t odd_size = 0;
+  CHECK(169, sys(CROI_SYS_VMO_CREATE, 3584, 0, (uint64_t)&odd, 0, 0) == 0 &&
+                 sys(CROI_SYS_VMO_GET_SIZE, odd, (uint64_t)&odd_size, 0, 0, 0) == 0 && odd_size == 4096 &&
+                 sys(CROI_SYS_HANDLE_CLOSE, odd, 0, 0, 0, 0) == 0);
+  CHECK(181, sys(CROI_SYS_VMO_CREATE, ~0ull, 0, (uint64_t)&odd, 0, 0) == ERR_OUT_OF_RANGE);
   static const char text[] = "written through vmo_write";
   CHECK(17, sys(CROI_SYS_VMO_WRITE, vmo, (uint64_t)text, 4090, sizeof text, 0) == 0);  // spans two pages
   char back[sizeof text];
@@ -566,16 +574,34 @@ static int64_t ipc(const startup_t *s) {
   CHECK(119, sys(CROI_SYS_OBJECT_SIGNAL, handles[0], 0, SIGNALED, 0, 0) == 0 &&
                  (wait_for(event, SIGNALED, 1000000000) & SIGNALED));
   CHECK(120, !(wait_for(b, CROI_SIGNAL_READABLE, 0) & CROI_SIGNAL_READABLE));
-  // Refusals: the channel itself; a handle without TRANSFER (it stays).
-  CHECK(121, chan_write(a, "x", 1, &a, 1) == ERR_NOT_SUPPORTED);
-  uint32_t no_transfer = 0;
-  CHECK(122, sys(CROI_SYS_HANDLE_DUPLICATE, event, RIGHT_WAIT, (uint64_t)&no_transfer, 0, 0) == 0 &&
-                 chan_write(a, "x", 1, &no_transfer, 1) == ERR_ACCESS_DENIED &&
-                 sys(CROI_SYS_HANDLE_CLOSE, no_transfer, 0, 0, 0, 0) == 0);
-  // Peer closed: signal, writes refused, reads drain then refuse.
-  CHECK(123, chan_write(a, "bye", 3, 0, 0) == 0 && sys(CROI_SYS_HANDLE_CLOSE, a, 0, 0, 0, 0) == 0);
+  // Refusals consume the handles listed, as Zircon's do (unless the list
+  // can't be read): without TRANSFER (the first error wins, the rest go
+  // too); a repeat (gone by the second look); a bad channel handle.
+  uint32_t two[2] = {0, 0};
+  CHECK(122, sys(CROI_SYS_HANDLE_DUPLICATE, event, RIGHT_WAIT, (uint64_t)&two[0], 0, 0) == 0 &&
+                 sys(CROI_SYS_HANDLE_DUPLICATE, event, RIGHT_SAME, (uint64_t)&two[1], 0, 0) == 0 &&
+                 chan_write(a, "x", 1, two, 2) == ERR_ACCESS_DENIED &&
+                 sys(CROI_SYS_HANDLE_CLOSE, two[0], 0, 0, 0, 0) == ERR_BAD_HANDLE &&
+                 sys(CROI_SYS_HANDLE_CLOSE, two[1], 0, 0, 0, 0) == ERR_BAD_HANDLE);
+  CHECK(147, sys(CROI_SYS_HANDLE_DUPLICATE, event, RIGHT_SAME, (uint64_t)&two[0], 0, 0) == 0 && (two[1] = two[0]) &&
+                 chan_write(a, "x", 1, two, 2) == ERR_BAD_HANDLE &&
+                 sys(CROI_SYS_HANDLE_CLOSE, two[0], 0, 0, 0, 0) == ERR_BAD_HANDLE);
+  CHECK(148, sys(CROI_SYS_HANDLE_DUPLICATE, event, RIGHT_SAME, (uint64_t)&two[0], 0, 0) == 0 &&
+                 chan_write(0x7FFFFFF0u, "x", 1, two, 1) == ERR_BAD_HANDLE &&
+                 sys(CROI_SYS_HANDLE_CLOSE, two[0], 0, 0, 0, 0) == ERR_BAD_HANDLE);
+  CHECK(149, sys(CROI_SYS_HANDLE_DUPLICATE, event, RIGHT_SAME, (uint64_t)&two[0], 0, 0) == 0 &&
+                 chan_write(a, "x", 1, (const uint32_t *)0x10, 1) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_HANDLE_CLOSE, two[0], 0, 0, 0, 0) == 0);  // unreadable list: kept
+  // The channel itself: refused, and its handle consumed too, which
+  // closes this end (peer closed below).
+  CHECK(123, chan_write(a, "bye", 3, 0, 0) == 0);
+  CHECK(121, chan_write(a, "x", 1, &a, 1) == ERR_NOT_SUPPORTED &&
+                 sys(CROI_SYS_HANDLE_CLOSE, a, 0, 0, 0, 0) == ERR_BAD_HANDLE);
+  // Peer closed: signal, writes refused (consuming), reads drain then refuse.
   CHECK(124, wait_for(b, CROI_SIGNAL_PEER_CLOSED, 1000000000) & CROI_SIGNAL_PEER_CLOSED);
-  CHECK(125, chan_write(b, "x", 1, 0, 0) == ERR_PEER_CLOSED);
+  CHECK(125, sys(CROI_SYS_HANDLE_DUPLICATE, event, RIGHT_SAME, (uint64_t)&two[0], 0, 0) == 0 &&
+                 chan_write(b, "x", 1, two, 1) == ERR_PEER_CLOSED &&
+                 sys(CROI_SYS_HANDLE_CLOSE, two[0], 0, 0, 0, 0) == ERR_BAD_HANDLE);
   CHECK(126, chan_read(b, buffer, handles, sizeof buffer, 4, actual) == 0 && actual[0] == 3);
   CHECK(127, chan_read(b, buffer, handles, sizeof buffer, 4, actual) == ERR_PEER_CLOSED);
   sys(CROI_SYS_HANDLE_CLOSE, b, 0, 0, 0, 0);
@@ -811,7 +837,110 @@ static int64_t finished(uint32_t process) {
   return code;
 }
 
+// User TLS registers survive switches: two threads, each with its own
+// value (amd64 FS base via object_set_property; arm64 TPIDR_EL0 and rv64
+// tp written directly), checked across sleeps.
+typedef struct {
+  uint32_t self;
+  volatile uint32_t ok;
+  uint64_t value;
+} tls_worker_t;
+
+static uint64_t tls_read(void) {
+  uint64_t v;
+#if defined(__x86_64__)
+  __asm__ volatile("mov %%fs:0, %0" : "=r"(v));  // FS points at the value
+#elif defined(__aarch64__)
+  __asm__ volatile("mrs %0, tpidr_el0" : "=r"(v));
+#else
+  __asm__ volatile("mv %0, tp" : "=r"(v));
+#endif
+  return v;
+}
+
+static void tls_worker(uint64_t arg) {
+  tls_worker_t *w = (tls_worker_t *)arg;
+  int good = 1;
+#if defined(__x86_64__)
+  uint64_t base = (uint64_t)&w->value, got = 0;
+  good = sys(CROI_SYS_OBJECT_SET_PROPERTY, w->self, CROI_PROP_REGISTER_FS, (uint64_t)&base, 8, 0) == 0 &&
+         sys(CROI_SYS_OBJECT_GET_PROPERTY, w->self, CROI_PROP_REGISTER_FS, (uint64_t)&got, 8, 0) == 0 &&
+         got == base;
+#elif defined(__aarch64__)
+  __asm__ volatile("msr tpidr_el0, %0" ::"r"(w->value));
+#else
+  __asm__ volatile("mv tp, %0" ::"r"(w->value));
+#endif
+  for (int i = 0; i < 20 && good; i++) {
+    sys(CROI_SYS_NANOSLEEP, now_ns() + 200000, 0, 0, 0, 0);
+    good = tls_read() == w->value;
+  }
+  w->ok = good ? 1 : 2;
+  sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
+}
+
+static void tls(const startup_t *s) {
+  tls_worker_t workers[2] = {{0, 0, 0x1111222233334444ull}, {0, 0, 0x5555666677778888ull}};
+  for (int i = 0; i < 2; i++) {
+    uint32_t stack = 0;
+    uint64_t at = 0;
+    CHECK(31, sys(CROI_SYS_VMO_CREATE, STACK_SIZE, 0, (uint64_t)&stack, 0, 0) == 0 &&
+                  sys(CROI_SYS_VMO_MAP, stack, 0, STACK_SIZE, 3, (uint64_t)&at) == 0);
+    sys(CROI_SYS_HANDLE_CLOSE, stack, 0, 0, 0, 0);
+    CHECK(32, sys6(CROI_SYS_THREAD_CREATE, s->process, (uint64_t)"tls", 3, 0, (uint64_t)&workers[i].self, 0) == 0 &&
+                  sys(CROI_SYS_THREAD_START, workers[i].self, (uint64_t)tls_worker, ENTRY_SP(at + STACK_SIZE),
+                      (uint64_t)&workers[i], 0) == 0);
+  }
+  uint64_t base = 0x10000;
+#if defined(__x86_64__)
+  // Only the calling thread's own; canonical addresses only.
+  CHECK(33, sys(CROI_SYS_OBJECT_SET_PROPERTY, workers[0].self, CROI_PROP_REGISTER_FS, (uint64_t)&base, 8, 0) ==
+                ERR_ACCESS_DENIED);
+#else
+  CHECK(33, sys(CROI_SYS_OBJECT_SET_PROPERTY, workers[0].self, CROI_PROP_REGISTER_FS, (uint64_t)&base, 8, 0) ==
+                ERR_NOT_SUPPORTED);
+#endif
+  for (int i = 0; i < 2; i++) {
+    CHECK(34, wait_for(workers[i].self, CROI_SIGNAL_TASK_TERMINATED, 5000000000ull) & CROI_SIGNAL_TASK_TERMINATED);
+    CHECK(35, workers[i].ok == 1);
+    sys(CROI_SYS_HANDLE_CLOSE, workers[i].self, 0, 0, 0, 0);
+  }
+}
+
+// A detached thread's end: unmap its own stack, close its own handle and
+// exit in one call (Zircon's vmar_unmap_handle_close_thread_exit).
+typedef struct {
+  uint32_t vmar, self;
+  uint64_t stack;
+} unmap_exit_t;
+
+static void unmap_exit_worker(uint64_t arg) {
+  const unmap_exit_t *u = (const unmap_exit_t *)arg;
+  sys(CROI_SYS_VMAR_UNMAP_HANDLE_CLOSE_THREAD_EXIT, u->vmar, u->stack, STACK_SIZE, u->self, 0);
+  for (;;) {}  // not reached: the stack is gone
+}
+
+static void unmap_exit(const startup_t *s) {
+  // Errors are vmar_unmap's, and the caller carries on.
+  CHECK(36, sys(CROI_SYS_VMAR_UNMAP_HANDLE_CLOSE_THREAD_EXIT, 0x7FFFFFF0u, 0, 0, 0, 0) == ERR_BAD_HANDLE);
+  unmap_exit_t u = {s->vmar, 0, 0};
+  uint32_t stack = 0, watch = 0;
+  CHECK(37, sys(CROI_SYS_VMO_CREATE, STACK_SIZE, 0, (uint64_t)&stack, 0, 0) == 0 &&
+                sys(CROI_SYS_VMO_MAP, stack, 0, STACK_SIZE, 3, (uint64_t)&u.stack) == 0);
+  sys(CROI_SYS_HANDLE_CLOSE, stack, 0, 0, 0, 0);
+  CHECK(38, sys6(CROI_SYS_THREAD_CREATE, s->process, (uint64_t)"ux", 2, 0, (uint64_t)&u.self, 0) == 0 &&
+                sys(CROI_SYS_HANDLE_DUPLICATE, u.self, RIGHT_SAME, (uint64_t)&watch, 0, 0) == 0 &&
+                sys(CROI_SYS_THREAD_START, u.self, (uint64_t)unmap_exit_worker, ENTRY_SP(u.stack + STACK_SIZE),
+                    (uint64_t)&u, 0) == 0);
+  CHECK(39, (wait_for(watch, CROI_SIGNAL_TASK_TERMINATED, 5000000000ull) & CROI_SIGNAL_TASK_TERMINATED) &&
+                sys(CROI_SYS_HANDLE_CLOSE, u.self, 0, 0, 0, 0) == ERR_BAD_HANDLE &&
+                sys(CROI_SYS_VMAR_PROTECT, s->vmar | (uint64_t)CROI_VM_PERM_READ << 32, u.stack, STACK_SIZE, 0, 0) != 0);
+  sys(CROI_SYS_HANDLE_CLOSE, watch, 0, 0, 0, 0);
+}
+
 static int64_t exceptions(const startup_t *s) {
+  tls(s);
+  unmap_exit(s);
   uint32_t thread = 0, channel = 0, other = 0;
 
   // A process's handler moves the faulting thread on.

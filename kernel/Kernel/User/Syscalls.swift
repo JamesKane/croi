@@ -172,14 +172,41 @@ enum Syscalls {
         }
         let table = Scheduler.current.pointee.handleTable
         guard table != 0 else { return Int64(Status.badState.rawValue) }
+        let result: Int64
         do throws(Status) {
-            return try HandleTable.withBorrowed(table) { (handles: borrowing HandleTable) throws(Status) -> Int64 in
+            result = try HandleTable.withBorrowed(table) { (handles: borrowing HandleTable) throws(Status) -> Int64 in
                 try objectCall(number, a, handles)
             }
         } catch {
             if error == .badHandle { try? Policy.check(UInt32(CROI_POL_BAD_HANDLE)) }  // the result stays BAD_HANDLE
             return Int64(error.rawValue)
         }
+        // vmar_unmap_handle_close_thread_exit, unmapped and closed (1: the
+        // close failed). The thread exits here, where no frame holds a
+        // reference.
+        if number == 75 {
+            if result != 0 { return trapAfterUnmap() }
+            Processes.exitThread(0)
+        }
+        return result
+    }
+
+    /// Zircon's vDSO traps (`__builtin_trap`) when the handle can't be
+    /// closed: an undefined-instruction exception goes to the handlers.
+    /// Resumed, the call returns BAD_HANDLE.
+    private static func trapAfterUnmap() -> Int64 {
+        let me = Scheduler.current
+        let frame = unsafe UserTraps.userFrame(of: me)
+        switch unsafe Exceptions.raise(UInt32(CROI_EXCP_UNDEFINED_INSTRUCTION), frame: frame) {
+        case .resume: break
+        case .exitThread: Processes.exitThread(0)
+        case .unhandled:
+            if me.pointee.object != 0 {
+                let process = ThreadObjectPointer(object: ObjectPointer(address: me.pointee.object)).pointee.process
+                Processes.kill(process: process, code: TaskReturnCode.exceptionKill)
+            }
+        }
+        return Int64(Status.badHandle.rawValue)
     }
 
     private static func objectCall(_ number: UInt64, _ a: InlineArray<6, UInt64>,
@@ -280,6 +307,8 @@ enum Syscalls {
             }
         case 51:  // pmu_configure
             try pmuConfigure(table, handle, a)
+        case 75:
+            return try unmapAndClose(a, table)
         case 60...79:
             try taskCall(number, a, table)
         case 120...129:

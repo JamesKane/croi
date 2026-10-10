@@ -56,6 +56,13 @@ extern const uint8_t croi_userboot_end[];
 static inline uint64_t croi_userboot_address(void) { return (uint64_t)croi_userboot_start; }
 static inline uint64_t croi_userboot_size(void) { return (uint64_t)(croi_userboot_end - croi_userboot_start); }
 
+#if defined(__aarch64__)
+// TPIDR_EL0, the user thread pointer: user code writes it itself, so the
+// scheduler saves and restores it per user thread.
+uint64_t arch_user_tls_read(void);
+void arch_user_tls_write(uint64_t value);
+#endif
+
 #if defined(__x86_64__)
 // SYSCALL setup on this CPU: EFER.SCE, STAR, LSTAR, FMASK.
 void arch_syscall_init(void);

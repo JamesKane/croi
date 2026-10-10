@@ -200,6 +200,8 @@ arch_syscall_init:
     xor     %eax, %eax
     xor     %edx, %edx
     wrmsr
+    mov     $0xc0000100, %ecx       // FS_BASE: 0, as the scheduler assumes
+    wrmsr
     ret
 .size arch_syscall_init, . - arch_syscall_init
 
