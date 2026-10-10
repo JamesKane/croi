@@ -118,6 +118,9 @@ enum Objects {
         case .exception: Exceptions.destroy(object)
         case .interrupt: InterruptObjects.destroyObject(object)
         case .msi: Msis.destroy(object)
+        case .iommu: free(object, as: IommuObject.self)
+        case .bti: Dma.destroyBti(object)
+        case .pmt: Dma.destroyPmt(object)
         case .none: panic("object: destroying an untyped object")
         }
         live.subtract(1, ordering: .relaxed)

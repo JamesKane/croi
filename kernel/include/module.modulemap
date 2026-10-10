@@ -15,6 +15,7 @@ module CroiAbi {
   header "vmo.h"
   header "zbi.h"
   header "interrupt.h"
+  header "dma.h"
   export *
 }
 

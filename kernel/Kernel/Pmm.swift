@@ -172,18 +172,18 @@ let pmmLock = SpinLock()
     /// 2^`alignLog2` bytes (at least page aligned), ending at or below
     /// `limit` (e.g. 4 GiB for a 32-bit DMA engine). Not zeroed.
     mutating func allocateContiguous(_ count: UInt64, alignLog2: Int = 12, _ state: PageState = .alloc,
-                                     limit: UInt64 = .max) -> UInt64? {
-        pmmLock.withLock { allocateContiguousLocked(count, alignLog2: alignLog2, state, limit: limit) }
+                                     floor: UInt64 = 0, limit: UInt64 = .max) -> UInt64? {
+        pmmLock.withLock { allocateContiguousLocked(count, alignLog2: alignLog2, state, floor: floor, limit: limit) }
     }
 
     private mutating func allocateContiguousLocked(_ count: UInt64, alignLog2: Int, _ state: PageState,
-                                                   limit: UInt64) -> UInt64? {
+                                                   floor: UInt64, limit: UInt64) -> UInt64? {
         guard count > 0, alignLog2 < 64 else { return nil }
         let pageSize = KernelLayout.pageSize
         let alignment = max(UInt64(1) << alignLog2, pageSize)
         for a in 0..<arenaCount {
             let arena = arenas[a]
-            var phys = (arena.base + alignment - 1) & ~(alignment - 1)
+            var phys = (max(arena.base, floor) + alignment - 1) & ~(alignment - 1)
             while arena.contains(phys), arena.pageCount - (phys - arena.base) / pageSize >= count,
                   count <= limit / pageSize, phys <= limit - count * pageSize {
                 let first = (phys - arena.base) / pageSize

@@ -103,6 +103,16 @@ enum : uint64_t {
   CROI_SYS_INTERRUPT_SET_AFFINITY = 146,  // (interrupt, uint64_t cpu mask): croi's
   CROI_SYS_MSI_ALLOCATE = 147,       // (MSI resource, count, uint32_t *out)
   CROI_SYS_MSI_CREATE = 148,         // (allocation, options, id, vmo, vmo_offset, uint32_t *out)
+
+  // DMA (K9e): Zircon's calls, values in dma.h.
+  CROI_SYS_IOMMU_CREATE = 150,          // (IOMMU resource, type, desc, desc_size, uint32_t *out)
+  CROI_SYS_BTI_CREATE = 151,            // (iommu, options 0, bti_id, uint32_t *out)
+  CROI_SYS_BTI_PIN = 152,               // (bti | options << 32, vmo | addrs_count << 32, offset, size,
+                                        //  uint64_t *addrs, uint32_t *pmt)
+  CROI_SYS_BTI_RELEASE_QUARANTINE = 153,  // (bti)
+  CROI_SYS_PMT_UNPIN = 154,             // (pmt): the handle is consumed
+  CROI_SYS_VMO_CREATE_CONTIGUOUS = 155, // (bti, size, alignment_log2, uint32_t *out)
+  CROI_SYS_BTI_SET_PROPERTIES = 156,    // (bti, const croi_bti_properties_t *): croi's, narrowing only
 };
 
 enum : uint32_t {  // timer_create options (Zircon's ZX_TIMER_SLACK_*)
@@ -123,6 +133,7 @@ enum : uint32_t {  // timer_create options (Zircon's ZX_TIMER_SLACK_*)
 #include "vmo.h"      // vmo_op_range ops, cache policies, cache_flush options
 #include "zbi.h"      // boot data items (CROI_PA_VMO_BOOTDATA)
 #include "interrupt.h" // interrupt options, port binding, packet type
+#include "dma.h"      // IOMMU types, bti_pin options, BTI info and properties
 
 enum : uint64_t {  // CROI_SYS_TRACE_CONFIGURE ops
   CROI_TRACE_OP_START = 0,   // a: categories, b: pages per CPU, c: mode;

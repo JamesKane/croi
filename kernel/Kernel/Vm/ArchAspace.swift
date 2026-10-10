@@ -17,6 +17,8 @@ enum VmError: Error, Equatable {
     case denied(UInt64)
     /// The address space was torn down (its process died).
     case dead
+    /// Pages of the range are pinned for DMA (K9e).
+    case pinned
 }
 
 /// What a virtual address translates to.

@@ -659,9 +659,41 @@ include/interrupt.h; syscalls 147 msi_allocate, 148 msi_create):
   enabled, so it never fires) read back after create, a move to CPU 1,
   and close. Both are found by scanning bus 0 and skipped when absent,
   and the config registers touched are restored: Todhchai boots this
-  kernel on other machine shapes, with its own edu driver (INTx). KVM timing
-  note: channel_call in m2 reads 1.4-2.8 us when the host is busy
-  building; compare builds interleaved, not one after the other.
+  kernel on other machine shapes, with its own edu driver (INTx). KVM
+  timing note: channel_call in m2 reads 1.4-2.8 us when the host is
+  busy; compare builds interleaved, not one after the other.
+
+DMA, K9e (Kernel/Object/Dma.swift, User/DmaSyscalls.swift, include/dma.h;
+syscalls 150-156; Todhchai item 14 without an IOMMU):
+- Zircon's iommu_create (stub only: one-byte descriptor; INTEL/ARM_SMMU
+  NOT_SUPPORTED), bti_create, bti_pin (bti | options << 32, vmo |
+  addrs_count << 32: eight arguments in six registers; per page,
+  CONTIGUOUS for a contiguous VMO, COMPRESS = pages for the stub; Zircon's
+  rights and option checks), pmt_unpin (consumes the handle),
+  bti_release_quarantine, vmo_create_contiguous; ZX_INFO_BTI (20).
+  Objects: IOMMU 23, BTI 24, PMT 26 (INSPECT only, so its one handle is
+  its only one). Device addresses are physical (no translation).
+- Pinning (`Vmo.pin`/`unpin`, `VmoRecord.pins`): commits the range and
+  records it; decommit refuses pinned pages (VmError.pinned ->
+  BAD_STATE), ZERO zeroes them in place, the cache policy can't change.
+- Quarantine: closing a PMT's handle while pinned (process death too)
+  moves it to its BTI's list (the BTI holds it; it drops its own
+  reference to the BTI); bti_release_quarantine unpins them. A BTI that
+  dies with quarantined PMTs leaves them pinned for good and says so in
+  the debuglog (Zircon's orphan). PMT state changes under the BTI lock.
+- croi's BTI properties (`bti_set_properties`, 156; CROI_INFO_BTI_
+  PROPERTIES 0x10000): address width, window and memory type. Narrowing
+  only (ACCESS_DENIED on a widening), the memory type only while nothing
+  is pinned or quarantined. Pins outside are OUT_OF_RANGE;
+  vmo_create_contiguous allocates inside (`floor`/`limit` through
+  ContiguousPool and the PMM) with the memory type as cache policy
+  (non-coherent: uncached). devmgr narrows before granting the BTI.
+- Creating a no-IOMMU BTI writes a WARNING debuglog record naming the
+  BTI id and the creating process's koid (a recorded trust decision).
+- Boot test mode 12 (`ProcessSelfTest.runDma`): all of the above,
+  including the debuglog record, with windows chosen so the checks don't
+  depend on where pages land. Not covered: quarantine through process
+  death, and a BTI dying with PMTs quarantined.
 
 ACPI (`Kernel/Acpi/`, after Zircon's acpi_lite): `AcpiTables` validates
 RSDP/XSDT and finds tables by signature; `withPhysicalBytes` reads through

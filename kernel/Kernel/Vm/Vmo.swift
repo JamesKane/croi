@@ -41,6 +41,9 @@ struct VmoRecord: ~Copyable {
     var committedPages: UInt64 = 0
     /// The address spaces mapping it, once per mapping (for decommit).
     var mappers = UniqueArray<UInt64>()
+    /// Ranges pinned for DMA (K9e, a PMT each): their pages stay committed
+    /// and in place, and the cache policy stays.
+    var pins = UniqueArray<PinRange>()
 
     var pageCount: Int { Int(size / KernelLayout.pageSize) }
 }
@@ -151,6 +154,23 @@ struct VmoRecord: ~Copyable {
     }
 }
 
+/// A pinned range of a VMO (bytes, page aligned).
+struct PinRange: Equatable {
+    let offset: UInt64
+    let size: UInt64
+}
+
+extension VmoPointer {
+    /// Whether any of [offset, offset+size) is pinned. VMO lock held.
+    func pinnedLocked(_ offset: UInt64, _ size: UInt64) -> Bool {
+        for i in 0..<pointee.pins.count {
+            let pin = pointee.pins[i]
+            if pin.offset < offset + size && offset < pin.offset + pin.size { return true }
+        }
+        return false
+    }
+}
+
 /// The owner of a VMO (the handle; K5 makes it a dispatcher). Mappings hold
 /// their own references, so the memory outlives the handle while mapped.
 struct Vmo: ~Copyable {
@@ -238,15 +258,15 @@ struct Vmo: ~Copyable {
     }
 
     /// Physically contiguous pages, zeroed, aligned to 2^alignLog2 bytes,
-    /// ending at or below `limit` (a device's DMA reach). From the boot
-    /// pool if it can, else from free RAM.
+    /// from `floor` up and ending at or below `limit` (a device's DMA
+    /// reach). From the boot pool if it can, else from free RAM.
     init(contiguous size: UInt64, alignLog2: Int = 12, cache: CachePolicy = .cached,
-         limit: UInt64 = .max, account: MemoryAccountPointer? = nil) throws(VmError) {
+         floor: UInt64 = 0, limit: UInt64 = .max, account: MemoryAccountPointer? = nil) throws(VmError) {
         guard size > 0, size % KernelLayout.pageSize == 0 else { throw .invalidArgument }
         if let account, !account.charge(size) { throw .outOfMemory }
         let count = size / KernelLayout.pageSize
-        guard let base = ContiguousPool.allocate(Int(count), alignLog2: alignLog2, limit: limit)
-                ?? pmm.allocateContiguous(count, alignLog2: alignLog2, .vmo, limit: limit) else {
+        guard let base = ContiguousPool.allocate(Int(count), alignLog2: alignLog2, floor: floor, limit: limit)
+                ?? pmm.allocateContiguous(count, alignLog2: alignLog2, .vmo, floor: floor, limit: limit) else {
             account?.uncharge(size)
             throw .outOfMemory
         }
@@ -306,7 +326,8 @@ struct Vmo: ~Copyable {
         guard case .anonymous = record.pointee.kind else { throw .invalidArgument }
         var freed = UniqueArray<UInt64>()
         var aspaces = UniqueArray<UInt64>()
-        record.pointee.lock.withLock {
+        try record.pointee.lock.withLock { () throws(VmError) in
+            guard !record.pinnedLocked(offset, size) else { throw .pinned }
             let first = Int(offset / KernelLayout.pageSize), count = Int(size / KernelLayout.pageSize)
             for i in first..<(first + count) {
                 let phys = record.pointee.pages.clear(i)
@@ -400,7 +421,8 @@ struct Vmo: ~Copyable {
         while at < end {
             let pageStart = at & ~(page - 1)
             let length = min(end, pageStart + page) - at
-            if case .anonymous = record.pointee.kind, length == page {
+            if case .anonymous = record.pointee.kind, length == page,
+               !record.pointee.lock.withLock({ record.pinnedLocked(pageStart, page) }) {
                 try decommit(offset: pageStart, size: page)
             } else if let phys = record.lookup(at: pageStart) {
                 let address = KernelLayout.physmap(phys) + (at - pageStart)
@@ -421,9 +443,48 @@ struct Vmo: ~Copyable {
         try record.pointee.lock.withLock { () throws(VmError) in
             guard !record.pointee.cachedFirmware || policy == .cached else { throw .denied(0) }
             guard record.pointee.mappers.count == 0 else { throw .alreadyMapped(0) }
+            guard record.pointee.pins.count == 0 else { throw .pinned }
         }
         if size > 0 { try cacheOp(offset: 0, size: size, CROI_CACHE_CLEAN_INVALIDATE) }
         record.pointee.lock.withLock { record.pointee.cache = policy }
+    }
+
+    /// Pins [offset, offset+size) (page aligned) for DMA: commits its pages
+    /// and keeps them until `unpin` with the same range.
+    func pin(offset: UInt64, size: UInt64) throws(VmError) {
+        try checkRange(offset, size)
+        let page = KernelLayout.pageSize
+        while true {
+            var at = offset
+            while at < offset + size {
+                guard record.commit(at: at) != nil else { throw .outOfMemory }
+                at += page
+            }
+            // A decommit may have raced the commits: check under the lock
+            // that pins them.
+            let done = record.pointee.lock.withLock { () -> Bool in
+                if case .anonymous = record.pointee.kind {
+                    var at = offset
+                    while at < offset + size {
+                        guard record.pointee.pages.lookup(Int(at / page)) != 0 else { return false }
+                        at += page
+                    }
+                }
+                record.pointee.pins.append(PinRange(offset: offset, size: size))
+                return true
+            }
+            if done { return }
+        }
+    }
+
+    func unpin(offset: UInt64, size: UInt64) {
+        record.pointee.lock.withLock {
+            for i in 0..<record.pointee.pins.count where record.pointee.pins[i] == PinRange(offset: offset, size: size) {
+                _ = record.pointee.pins.remove(at: i)
+                return
+            }
+            panic("vmo: unpinning a range that isn't pinned")
+        }
     }
 
     private func checkRange(_ offset: UInt64, _ size: UInt64) throws(VmError) {

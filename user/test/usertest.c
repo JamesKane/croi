@@ -1770,6 +1770,168 @@ static int64_t interrupts(const startup_t *s) {
   return result;
 }
 
+// Mode 12 (K9e): DMA through the stub IOMMU. BTIs, pinning (addresses,
+// options, refusals), pinned pages held against decommit and cache policy
+// changes, quarantine, contiguous VMOs, croi's BTI properties, and the
+// debuglog record a no-IOMMU BTI leaves.
+#define ERR_BAD_HANDLE (-11)
+#define ERR_ACCESS_DENIED_ (-30)
+#define ERR_NO_MEMORY (-4)
+static int64_t bti_pin(uint32_t bti, uint32_t options, uint32_t vmo, uint64_t count, uint64_t offset, uint64_t size,
+                       uint64_t *addrs, uint32_t *pmt) {
+  return sys6(CROI_SYS_BTI_PIN, bti | (uint64_t)options << 32, vmo | count << 32, offset, size, (uint64_t)addrs,
+              (uint64_t)pmt);
+}
+
+static croi_info_bti_t bti_info(uint32_t bti) {
+  croi_info_bti_t info = {};
+  CHECK(300, sys(CROI_SYS_OBJECT_GET_INFO, bti, CROI_INFO_BTI, (uint64_t)&info, sizeof info, 0) == 0);
+  return info;
+}
+
+// Whether a debuglog record holds `text`.
+static int log_has(const startup_t *s, const char *text) {
+  uint32_t log = 0;
+  CHECK(301, sys(CROI_SYS_DEBUGLOG_CREATE, s->resource, CROI_LOG_FLAG_READABLE, (uint64_t)&log, 0, 0) == 0);
+  uint8_t record[CROI_LOG_RECORD_MAX];
+  int found = 0;
+  int64_t size;
+  while (!found && (size = sys(CROI_SYS_DEBUGLOG_READ, log, 0, (uint64_t)record, sizeof record, 0)) > 0) {
+    const croi_log_record_t *header = (const croi_log_record_t *)record;
+    const char *data = (const char *)(record + sizeof *header);
+    for (int i = 0; !found && i + 1 <= header->datalen; i++) {
+      int j = 0;
+      while (text[j] && i + j < header->datalen && data[i + j] == text[j]) j++;
+      found = text[j] == 0;
+    }
+  }
+  sys(CROI_SYS_HANDLE_CLOSE, log, 0, 0, 0, 0);
+  return found;
+}
+
+static int64_t dma(const startup_t *s) {
+  uint32_t iommu = 0, bti = 0, tracing = 0, vmo = 0, readonly = 0, pmt = 0, dup = 0;
+  uint8_t desc = 0;
+  CHECK(302, resource_create(s->resource, CROI_RSRC_KIND_SYSTEM, CROI_RSRC_SYSTEM_TRACING_BASE, 1, &tracing) == 0 &&
+                 sys(CROI_SYS_IOMMU_CREATE, tracing, CROI_IOMMU_TYPE_STUB, (uint64_t)&desc, 1, (uint64_t)&iommu) ==
+                     ERR_OUT_OF_RANGE &&
+                 sys(CROI_SYS_IOMMU_CREATE, s->resource, CROI_IOMMU_TYPE_INTEL, (uint64_t)&desc, 1, (uint64_t)&iommu) ==
+                     ERR_NOT_SUPPORTED &&
+                 sys(CROI_SYS_IOMMU_CREATE, s->resource, 9, (uint64_t)&desc, 1, (uint64_t)&iommu) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_IOMMU_CREATE, s->resource, CROI_IOMMU_TYPE_STUB, 0, 0, (uint64_t)&iommu) ==
+                     ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_IOMMU_CREATE, s->resource, CROI_IOMMU_TYPE_STUB, (uint64_t)&desc, 1, (uint64_t)&iommu) ==
+                     0);
+  sys(CROI_SYS_HANDLE_CLOSE, tracing, 0, 0, 0, 0);
+  CHECK(303, sys(CROI_SYS_BTI_CREATE, iommu, 1, 0x1234, (uint64_t)&bti, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_BTI_CREATE, iommu, 0, 0x1234, (uint64_t)&bti, 0) == 0 &&
+                 log_has(s, "no-IOMMU BTI 0x1234"));
+  croi_info_bti_t info = bti_info(bti);
+  CHECK(304, info.minimum_contiguity == PAGE && info.pmo_count == 0 && info.quarantine_count == 0);
+
+  // Per page: addresses page aligned; the pages held against decommit and
+  // cache policy changes; ZERO still works (in place).
+  uint64_t addrs[4] = {0, 0, 0, 0};
+  uint32_t rw = CROI_BTI_PERM_READ | CROI_BTI_PERM_WRITE;
+  CHECK(305, sys(CROI_SYS_VMO_CREATE, 4 * PAGE, 0, (uint64_t)&vmo, 0, 0) == 0 &&
+                 bti_pin(bti, rw, vmo, 3, 0, 4 * PAGE, addrs, &pmt) == ERR_INVALID_ARGS &&
+                 bti_pin(bti, rw, vmo, 4, 1, 4 * PAGE, addrs, &pmt) == ERR_INVALID_ARGS &&
+                 bti_pin(bti, rw | CROI_BTI_CONTIGUOUS, vmo, 1, 0, 4 * PAGE, addrs, &pmt) == ERR_INVALID_ARGS &&
+                 bti_pin(bti, rw | CROI_BTI_CONTIGUOUS | CROI_BTI_COMPRESS, vmo, 4, 0, 4 * PAGE, addrs, &pmt) ==
+                     ERR_INVALID_ARGS &&
+                 bti_pin(bti, 1u << 7, vmo, 4, 0, 4 * PAGE, addrs, &pmt) == ERR_INVALID_ARGS);
+  CHECK(306, sys(CROI_SYS_HANDLE_DUPLICATE, vmo, 1u << 2 | 1u << 5 | 1u << 1, (uint64_t)&readonly, 0, 0) == 0 &&
+                 bti_pin(bti, rw, readonly, 4, 0, 4 * PAGE, addrs, &pmt) == ERR_ACCESS_DENIED_ &&
+                 bti_pin(bti, CROI_BTI_PERM_READ, readonly, 4, 0, 4 * PAGE, addrs, &pmt) == 0 &&
+                 sys(CROI_SYS_PMT_UNPIN, pmt, 0, 0, 0, 0) == 0);
+  sys(CROI_SYS_HANDLE_CLOSE, readonly, 0, 0, 0, 0);
+  uint8_t bytes[16];
+  for (int i = 0; i < 16; i++) bytes[i] = 0x5A;
+  CHECK(307, bti_pin(bti, rw, vmo, 4, 0, 4 * PAGE, addrs, &pmt) == 0 && addrs[0] != 0 && addrs[0] % PAGE == 0 &&
+                 addrs[3] % PAGE == 0 && bti_info(bti).pmo_count == 1 &&
+                 sys(CROI_SYS_VMO_OP_RANGE, vmo, CROI_VMO_OP_DECOMMIT, 0, PAGE, 0) == ERR_BAD_STATE &&
+                 sys(CROI_SYS_VMO_SET_CACHE_POLICY, vmo, CROI_CACHE_POLICY_UNCACHED, 0, 0, 0) == ERR_BAD_STATE &&
+                 sys(CROI_SYS_VMO_WRITE, vmo, (uint64_t)bytes, PAGE, 16, 0) == 0 &&
+                 sys(CROI_SYS_VMO_OP_RANGE, vmo, CROI_VMO_OP_ZERO, 0, 4 * PAGE, 0) == 0 &&
+                 sys(CROI_SYS_VMO_READ, vmo, (uint64_t)bytes, PAGE, 16, 0) == 0 && bytes[0] == 0 && bytes[15] == 0);
+  // The PMT can't be duplicated; unpin consumes its handle and frees the pages.
+  CHECK(308, sys(CROI_SYS_HANDLE_DUPLICATE, pmt, 1u << 31, (uint64_t)&dup, 0, 0) == ERR_ACCESS_DENIED_ &&
+                 sys(CROI_SYS_PMT_UNPIN, pmt, 0, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_HANDLE_CLOSE, pmt, 0, 0, 0, 0) == ERR_BAD_HANDLE && bti_info(bti).pmo_count == 0 &&
+                 sys(CROI_SYS_VMO_OP_RANGE, vmo, CROI_VMO_OP_DECOMMIT, 0, PAGE, 0) == 0);
+  // Closed without unpinning: quarantined until released.
+  CHECK(309, bti_pin(bti, rw, vmo, 1, PAGE, PAGE, addrs, &pmt) == 0 &&
+                 sys(CROI_SYS_HANDLE_CLOSE, pmt, 0, 0, 0, 0) == 0 && bti_info(bti).quarantine_count == 1 &&
+                 bti_info(bti).pmo_count == 0 &&
+                 sys(CROI_SYS_VMO_OP_RANGE, vmo, CROI_VMO_OP_DECOMMIT, PAGE, PAGE, 0) == ERR_BAD_STATE &&
+                 sys(CROI_SYS_BTI_RELEASE_QUARANTINE, bti, 0, 0, 0, 0) == 0 && bti_info(bti).quarantine_count == 0 &&
+                 sys(CROI_SYS_VMO_OP_RANGE, vmo, CROI_VMO_OP_DECOMMIT, PAGE, PAGE, 0) == 0);
+
+  // Contiguous VMOs: one address with CONTIGUOUS, consecutive pages without,
+  // aligned as asked.
+  uint32_t contig = 0;
+  CHECK(310, sys(CROI_SYS_VMO_CREATE_CONTIGUOUS, bti, 0, 0, (uint64_t)&contig, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_VMO_CREATE_CONTIGUOUS, bti, PAGE + 1, 0, (uint64_t)&contig, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_VMO_CREATE_CONTIGUOUS, bti, PAGE, 11, (uint64_t)&contig, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_VMO_CREATE_CONTIGUOUS, bti, 3 * PAGE, 16, (uint64_t)&contig, 0) == 0 &&
+                 bti_pin(bti, rw | CROI_BTI_CONTIGUOUS, contig, 1, 0, 3 * PAGE, addrs, &pmt) == 0 &&
+                 addrs[0] % 0x10000 == 0 && sys(CROI_SYS_PMT_UNPIN, pmt, 0, 0, 0, 0) == 0);
+  uint64_t base = addrs[0];
+  CHECK(311, bti_pin(bti, rw, contig, 3, 0, 3 * PAGE, addrs, &pmt) == 0 && addrs[0] == base &&
+                 addrs[1] == base + PAGE && addrs[2] == base + 2 * PAGE && sys(CROI_SYS_PMT_UNPIN, pmt, 0, 0, 0, 0) == 0);
+
+  // Properties: defaults; only narrowing. The window is exactly the
+  // contiguous VMO's pages, so any other memory is outside it.
+  croi_bti_properties_t p = {};
+  CHECK(312, sys(CROI_SYS_OBJECT_GET_INFO, bti, CROI_INFO_BTI_PROPERTIES, (uint64_t)&p, sizeof p, 0) == 0 &&
+                 p.address_bits == 64 && p.memory_type == CROI_BTI_MEMORY_COHERENT && p.window_size == 0);
+  uint32_t other = 0, inside = 0;
+  CHECK(313, sys(CROI_SYS_VMO_CREATE_CONTIGUOUS, bti, PAGE, 0, (uint64_t)&other, 0) == 0);
+  croi_bti_properties_t narrow = {.address_bits = 40, .memory_type = CROI_BTI_MEMORY_COHERENT,
+                                  .window_base = base, .window_size = 3 * PAGE};
+  croi_bti_properties_t wide = narrow;
+  wide.address_bits = 48;
+  CHECK(314, sys(CROI_SYS_BTI_SET_PROPERTIES, bti, (uint64_t)&narrow, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_BTI_SET_PROPERTIES, bti, (uint64_t)&wide, 0, 0, 0) == ERR_ACCESS_DENIED_ &&
+                 (wide = narrow, wide.window_size = 4 * PAGE,
+                  sys(CROI_SYS_BTI_SET_PROPERTIES, bti, (uint64_t)&wide, 0, 0, 0) == ERR_ACCESS_DENIED_) &&
+                 (wide = narrow, wide.address_bits = 8,
+                  sys(CROI_SYS_BTI_SET_PROPERTIES, bti, (uint64_t)&wide, 0, 0, 0) == ERR_INVALID_ARGS));
+  // Inside pins; outside (another contiguous VMO, an anonymous page) doesn't.
+  CHECK(315, bti_pin(bti, rw, contig, 3, 0, 3 * PAGE, addrs, &pmt) == 0 && sys(CROI_SYS_PMT_UNPIN, pmt, 0, 0, 0, 0) == 0 &&
+                 bti_pin(bti, rw, other, 1, 0, PAGE, addrs, &pmt) == ERR_OUT_OF_RANGE &&
+                 bti_pin(bti, rw, vmo, 1, 0, PAGE, addrs, &pmt) == ERR_OUT_OF_RANGE && bti_info(bti).pmo_count == 0);
+  // Contiguous allocations land inside: the window's pages, freed, are
+  // the only place left.
+  CHECK(316, sys(CROI_SYS_HANDLE_CLOSE, contig, 0, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_VMO_CREATE_CONTIGUOUS, bti, 2 * PAGE, 0, (uint64_t)&inside, 0) == 0 &&
+                 bti_pin(bti, rw | CROI_BTI_CONTIGUOUS, inside, 1, 0, 2 * PAGE, addrs, &pmt) == 0 && addrs[0] >= base &&
+                 addrs[0] + 2 * PAGE <= base + 3 * PAGE);
+  // Memory type: fixed while something is pinned; non-coherent memory is
+  // uncached (vmo_read refuses it).
+  croi_bti_properties_t noncoherent = narrow;
+  noncoherent.memory_type = CROI_BTI_MEMORY_NONCOHERENT;
+  CHECK(317, sys(CROI_SYS_BTI_SET_PROPERTIES, bti, (uint64_t)&noncoherent, 0, 0, 0) == ERR_BAD_STATE &&
+                 sys(CROI_SYS_PMT_UNPIN, pmt, 0, 0, 0, 0) == 0 && sys(CROI_SYS_HANDLE_CLOSE, inside, 0, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_BTI_SET_PROPERTIES, bti, (uint64_t)&noncoherent, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_VMO_CREATE_CONTIGUOUS, bti, PAGE, 0, (uint64_t)&inside, 0) == 0 &&
+                 sys(CROI_SYS_VMO_READ, inside, (uint64_t)bytes, 0, 8, 0) == ERR_BAD_STATE);
+  sys(CROI_SYS_HANDLE_CLOSE, inside, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, other, 0, 0, 0, 0);
+  // Width: 12 bits reach no RAM, so nothing pins and nothing allocates.
+  uint32_t narrow_bti = 0;
+  croi_bti_properties_t tiny = {.address_bits = 12, .memory_type = CROI_BTI_MEMORY_COHERENT};
+  CHECK(318, sys(CROI_SYS_BTI_CREATE, iommu, 0, 0x5678, (uint64_t)&narrow_bti, 0) == 0 &&
+                 sys(CROI_SYS_BTI_SET_PROPERTIES, narrow_bti, (uint64_t)&tiny, 0, 0, 0) == 0 &&
+                 bti_pin(narrow_bti, rw, vmo, 1, 0, PAGE, addrs, &pmt) == ERR_OUT_OF_RANGE &&
+                 sys(CROI_SYS_VMO_CREATE_CONTIGUOUS, narrow_bti, PAGE, 0, (uint64_t)&inside, 0) == ERR_NO_MEMORY &&
+                 sys(CROI_SYS_HANDLE_CLOSE, narrow_bti, 0, 0, 0, 0) == 0);
+  sys(CROI_SYS_HANDLE_CLOSE, vmo, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, bti, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, iommu, 0, 0, 0, 0);
+  return 0x600D;
+}
+
 // Mode 4: something to sample. Three frames deep, spin for `ns`, with a
 // clock syscall every 64 iterations (so some samples land in the kernel
 // and must continue into these frames).
@@ -1810,6 +1972,7 @@ __attribute__((section(".text.start"))) [[noreturn]] void _start(uint64_t mode, 
             : mode == 9 ? exceptions((const startup_t *)handle)
             : mode == 10 ? drivers((const startup_t *)handle)
             : mode == 11 ? interrupts((const startup_t *)handle)
+            : mode == 12 ? dma((const startup_t *)handle)
             : mode >= 0x400 ? child((uint32_t)mode, handle, vdso_base)
                         : objects());
 }

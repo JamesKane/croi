@@ -38,14 +38,14 @@ enum ContiguousPool {
         }
     }
 
-    /// `count` contiguous pool pages aligned to 2^alignLog2, ending at or
-    /// below `limit`; nil if the pool can't.
-    static func allocate(_ count: Int, alignLog2: Int, limit: UInt64) -> UInt64? {
+    /// `count` contiguous pool pages aligned to 2^alignLog2, from `floor`
+    /// up, ending at or below `limit`; nil if the pool can't.
+    static func allocate(_ count: Int, alignLog2: Int, floor: UInt64 = 0, limit: UInt64) -> UInt64? {
         guard pages > 0, count > 0 else { return nil }
         let page = KernelLayout.pageSize
         let alignment = max(UInt64(1) << UInt64(alignLog2), page)
         return lock.withLock { () -> UInt64? in
-            var phys = (base + alignment - 1) & ~(alignment - 1)
+            var phys = (max(base, floor) + alignment - 1) & ~(alignment - 1)
             while contains(phys), Int((base + UInt64(pages) * page - phys) / page) >= count {
                 guard phys + UInt64(count) * page <= limit else { return nil }
                 let first = Int((phys - base) / page)

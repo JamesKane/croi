@@ -110,6 +110,20 @@ extension Syscalls {
                 try put(croi_info_vmar_t(base: v.base, len: v.size), a[2])
                 return
             }
+            if a[1] == UInt64(CROI_INFO_BTI) {
+                guard a[3] >= UInt64(MemoryLayout<croi_info_bti_t>.size) else { throw .bufferTooSmall }
+                try check(a[2], MemoryLayout<croi_info_bti_t>.size)
+                let bti = try table.get(handle, type: .bti, rights: .inspect)
+                try put(Dma.info(bti.object), a[2])
+                return
+            }
+            if a[1] == UInt64(CROI_INFO_BTI_PROPERTIES) {
+                guard a[3] >= UInt64(MemoryLayout<croi_bti_properties_t>.size) else { throw .bufferTooSmall }
+                try check(a[2], MemoryLayout<croi_bti_properties_t>.size)
+                let bti = try table.get(handle, type: .bti, rights: .inspect)
+                try put(Dma.properties(bti.object), a[2])
+                return
+            }
             if a[1] == UInt64(CROI_INFO_MSI) {
                 guard a[3] >= UInt64(MemoryLayout<croi_info_msi_t>.size) else { throw .bufferTooSmall }
                 try check(a[2], MemoryLayout<croi_info_msi_t>.size)

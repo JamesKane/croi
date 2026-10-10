@@ -39,7 +39,7 @@ real-time wake error p99 < 100 µs.
 | 12 | userboot + bootfs | **Done** (K8b) |
 | 18 (core) | ktrace rings, categories, user marks, tick and PMU sampling, per-thread PMU counters | **Done** (K3–K6, see "Trace" below) |
 | 13 | Resources, interrupt objects, MSI | **Partial**: resources and physical VMOs (K9a), interrupt objects (K9c), MSI/MSI-X on amd64 (K9d). The GICv3 ITS and the IMSIC are left |
-| 14 | BTI/PMT and IOMMUs | Todo: a BTI without an IOMMU in K9e, IOMMUs after M3 |
+| 14 | BTI/PMT and IOMMUs | **Partial**: BTI/PMT without an IOMMU, contiguous VMOs, BTI properties (K9e). IOMMUs after M3 |
 | 15–19 | FIFO/counter/stream/socket/clock/debuglog, pager, rings, debug syscalls | After M3, except debuglog (K8a) and exception channels (K7d). Item 17 needs nothing from croi |
 | 20 | Firmware data for user space (ACPI tables and op regions, GOP framebuffer) behind resources | **Done** (K9b) |
 
@@ -445,6 +445,9 @@ pinned DMA without a driver stack. The boot tests add it.
   when those arches boot Todhchai (virtio-pci falls back to INTx there
   meanwhile).
 - **K9e: BTI with no IOMMU, PMTs, contiguous VMOs (item 14, part).**
+  **Done** (2026-10-10): as below, syscalls 150-156. The properties are
+  set with croi's `bti_set_properties`, which only narrows (devmgr sets
+  them, then grants the BTI). Details in CLAUDE.md.
   `iommu_create(resource IOMMU_BASE 8, DUMMY)`, `bti_create(iommu, 0,
   bti_id)`, `bti_pin(bti, options, vmo, offset, size, addrs)` returning a
   PMT, `pmt_unpin`, `bti_release_quarantine`, `vmo_create_contiguous(bti,

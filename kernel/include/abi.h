@@ -15,3 +15,4 @@
 #include "vmo.h"
 #include "zbi.h"
 #include "interrupt.h"
+#include "dma.h"

@@ -606,7 +606,7 @@ extension VmError {
     var status: Status {
         switch self {
         case .outOfMemory, .noSpace: .noMemory
-        case .dead: .badState
+        case .dead, .pinned: .badState
         case .notFound: .notFound
         case .alreadyMapped: .alreadyExists
         case .denied: .accessDenied

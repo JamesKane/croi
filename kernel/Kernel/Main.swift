@@ -290,6 +290,7 @@ func kernel_main_continue() -> Never {
         ProcessSelfTest.runExceptions(console)
         ProcessSelfTest.runDrivers(console)
         ProcessSelfTest.runInterrupts(console)
+        ProcessSelfTest.runDma(console)
         ProgramSelfTest.run(console)
         SelfTestDeadman.done.store(true, ordering: .relaxed)
     } else {

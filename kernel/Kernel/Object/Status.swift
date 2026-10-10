@@ -84,6 +84,9 @@ enum ObjectType: UInt32 {
     case job = 17
     case vmar = 18
     case timer = 22
+    case iommu = 23
+    case bti = 24
+    case pmt = 26
     case profile = 25
     case exception = 29
     case msi = 32

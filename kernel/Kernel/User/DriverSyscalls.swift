@@ -79,7 +79,7 @@ extension Syscalls {
 
     /// A new object's handle written to `address` (the object released if
     /// it can't be added, the handle closed if it can't be written).
-    private static func addAndPut(_ object: ObjectPointer, rights: Rights, _ address: UInt64,
+    static func addAndPut(_ object: ObjectPointer, rights: Rights, _ address: UInt64,
                                   _ table: borrowing HandleTable) throws(Status) {
         let value: UInt32
         do throws(Status) {

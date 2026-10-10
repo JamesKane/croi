@@ -200,6 +200,21 @@ enum ProcessSelfTest {
         #endif
     }
 
+    /// K9e: DMA through the stub IOMMU from user mode (usertest.c mode 12).
+    static func runDma(_ console: Uart) {
+        let before = Counts()  // a PMT left behind would hold its VMO and BTI
+        let exitCode = runInProcess(mode: 12)
+        guard exitCode == 0x600D else {
+            console.write("  dma:    user program failed check ")
+            console.write(decimal: UInt64(bitPattern: exitCode))
+            console.write("\n")
+            panic("DMA self-test: user side")
+        }
+        before.expectUnchanged(console)
+        console.write("  dma:    stub IOMMU BTI (logged), pins per page and contiguous, held against decommit and ")
+        console.write("cache policy, quarantine, contiguous VMOs, properties narrowing only\n")
+    }
+
     /// Live processes, address spaces and objects, to check nothing leaked.
     struct Counts {
         let processes = Processes.live.load(ordering: .relaxed)
