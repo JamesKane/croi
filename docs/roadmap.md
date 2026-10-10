@@ -4,7 +4,8 @@ croi's first consumer is Todhchai (`../todhchai`). Its kernel requirements
 are in `../todhchai/docs/croi-requirements.md` (items 1–19 and extensions
 ext 1–10), and its milestone M2 ("croi reaches user space") was croi's
 first big target, reached on 2026-10-10 (K8c). Its M3 (native tier 0)
-is next: K9. This file orders croi's work so those needs are designed in
+closed the same day on croi's K9; M4 (native desktop v0) is next: K10
+(a draft until Todhchai confirms its order). This file orders croi's work so those needs are designed in
 early, not bolted on later. Reviewed against the requirements on
 2026-10-09 and re-synced on 2026-10-10.
 
@@ -524,6 +525,71 @@ pinned DMA without a driver stack. The boot tests add it.
 
 Todhchai's other M3 budgets (ring submit, futex wake with no sleeper,
 cached reads, live queries, resident memory) are user-space work.
+
+### K10: Todhchai M4, native desktop v0 (draft, 2026-10-10, to confirm with Todhchai)
+
+Todhchai's M3 closed with every budget met on a quiet machine. M4 is the
+native desktop: a compositor on the framebuffer with CPU composition,
+input, audio on virtio-sound then HDA, the SDK's native backend, and
+crash survival (exit: M1's minimal and synth programs run natively and
+meet their numbers; the compositor nests two deep and can be killed).
+K10 is what M4 needs from croi and no more (decided: M5's groundwork,
+hardware bring-up, IOMMUs, the ITS/IMSIC and croi's own carry-overs come
+after). Everything stays in QEMU; as in K9, each step lands as a commit
+Todhchai can consume, with its self-test on all three arches and its
+budget lines (CLAUDE.md "Timing discipline").
+
+- **K10a: counters (item 15, ext).** Zircon's counter object (type 34:
+  `counter_create`, `add`, `read`, `write`; POSITIVE / NON_POSITIVE
+  signals) plus the extension: waitable at a value. `counter_wait(counter,
+  value, deadline)` blocks until the counter reaches `value`, and a
+  port registration delivers one packet when it does, so a compositor's
+  acquire fences and a client's release values (desktop.md: a counter
+  value on the buffer's own timeline) need no polling. These become
+  Vulkan timeline semaphores in M5, so the semantics follow them
+  (monotonic use, 64-bit values). Budget: signal to a waiter on another
+  core running, as port wake.
+- **K10b: the display timeline (ext 1).** A kernel object a display
+  driver advances (`timeline_advance` with the vblank's hardware
+  timestamp, under a display resource), counting vblanks; waitable at a
+  value like a counter and through ports; and a read-only page per
+  timeline (the shared-pages scheme, ext 9: last vblank time, period,
+  count, a synthesized flag) that clients read without a syscall. On the
+  bare GOP framebuffer (no vblank interrupt) the kernel advances it from
+  a timer at the mode's rate, marked synthesized, so M4 runs on it in
+  QEMU. Budget: vblank (or synthetic tick) to the waiting thread running.
+- **K10c: wakeups that carry a deadline (ext 5, ext 10).** An interrupt
+  object, a timeline wait and a counter wait can name a scheduling
+  context: the thread they wake runs on it at once, with its deadline,
+  as `channel_call` donation does (ext 2). Frame intent (stored only
+  today) aligns a deadline thread's periods to a display timeline's
+  vblanks, so the compositor's latch thread and a game's frame thread
+  wake for the frame, not for an independent period. Audio DMA's
+  interrupt to its thread is the same path.
+- **K10d: kernel-only extensions to user space.** Budget overruns to a
+  port (ext 3) for a deadline thread's own profile; CPU reservation for a
+  job (ext 8, gated by a system resource); a thread's trace id through
+  `object_get_info` (Todhchai's ask: joining its user trace with croi's
+  sched and ipc records).
+- **K10e: power control (M4's shutdown < 500 ms).** Zircon's
+  `system_powerctl` under the power system resource: shutdown and reboot.
+  amd64 takes the S5 sleep-type values from user space's AML (Zircon's
+  ACPI_TRANSITION_S_STATE) and writes PM1a/b control (FADT), with the
+  reset register for reboot; arm64 PSCI SYSTEM_OFF / SYSTEM_RESET; rv64
+  SBI SRST. Budget: the call to QEMU exiting.
+- **K10f: an idle system makes no wakeups (M4: 0 per second).** croi's
+  periodic kernel work audited and made event-driven or gated (the SBSA
+  watchdog refresh, the debuglog dumper, the trace sampler's timer,
+  idle polling's re-arming), and a budget line counting each CPU's
+  wakeups over an idle window in the lean boot.
+
+Not in K10 (after M4 unless Todhchai's order says otherwise): VMO
+children for the dynamic linker, FIFO/socket/stream, the pager and debug
+syscalls (M5 and later); GPU memory accounting syscalls (ext 6, with the
+GPU in M5); VT-d and the other IOMMUs; the GICv3 ITS and RISC-V IMSIC;
+the idle governor and frequency floor (ext 11, 12: hardware); rv64
+targeted shootdowns with ASIDs; timer objects cancelled on last close;
+the SMC resource.
 
 ### After M3 (requirements 14–19 and the remaining extensions)
 - IOMMUs: VT-d first, then AMD-Vi, SMMUv3 (Fuchsia reference code) and
