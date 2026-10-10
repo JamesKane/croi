@@ -17,7 +17,8 @@ Reference source: `../fuchsia/zircon/` (port semantics, not C++ structure).
 `docs/roadmap.md` orders croi's work (K1 handoff + cache policy, K2
 interrupts/IPIs/clock/timers, K3 threads + scheduling contexts, K4 VMM
 phase A, K5 objects, K6 syscalls/vDSO/user SIMD, K7 IPC/processes, K8
-userboot) against Todhchai's needs (`../todhchai/docs/croi-requirements.md`).
+userboot, K9 drivers/DMA/budgets for Todhchai's M3, K10 the desktop's
+needs for its M4, a draft) against Todhchai's needs (`../todhchai/docs/croi-requirements.md`).
 Check it before designing a subsystem: several extensions (MSI-capable
 interrupts, IRQ affinity, scheduling contexts, device-local VMOs, shared
 read-only pages) must be designed in from the start.
