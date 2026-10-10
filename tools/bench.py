@@ -57,7 +57,7 @@ RULES = {
     "port.wake_median": (0.25, 300),
     "port.wake_p99": (0.50, 5_000),
     "timer.wake_error_p99": (0.50, 20_000),
-    "process.spawn_to_main": (0.25, 100_000),
+    "process.spawn_to_main": (0.50, 30_000),
     "trace.probe_enabled": (0.25, 5),
     "irq.wait_wake_median": (0.25, 3_000),
     "boot.userboot_start": (0.15, 15_000_000),

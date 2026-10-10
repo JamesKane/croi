@@ -131,10 +131,9 @@ struct M2 {
     }
 
     /// Spawn to main: userboot's clock reading before process_create
-    /// (croi.spawn_ns=) to the first line of main. A target, not a limit:
-    /// 0.8-1 ms under KVM today (K9f), through userboot's loader, not yet
-    /// broken down. Todhchai's own launcher measures 178 µs on croi.
-    static var spawnToMainTarget: UInt64 { 200_000 }
+    /// (croi.spawn_ns=) to the first line of main. KVM: ~50 µs (it was
+    /// 0.8-2 ms while every amd64 page fault waited on a TLB shootdown).
+    static var spawnToMainLimit: UInt64 { 200_000 }
 
     static func measure(resource: UInt32, thread: UInt32, entered: UInt64) throws(Failure) {
         let r = try Bench.run(resource: resource, thread: thread)
@@ -156,8 +155,8 @@ struct M2 {
         budget("port.wake_p99", r.portWakeP99)
         budget("timer.wake_error_p99", r.wakeErrorP99, limit: budgets.wakeErrorP99)
         if let spawned = environmentNumber("croi.spawn_ns="), entered > spawned {
-            print("m2: spawn to main \((entered - spawned) / 1000) us (budget \(spawnToMainTarget / 1000))")
-            budget("process.spawn_to_main", entered - spawned, target: spawnToMainTarget)
+            print("m2: spawn to main \((entered - spawned) / 1000) us (budget \(spawnToMainLimit / 1000))")
+            budget("process.spawn_to_main", entered - spawned, limit: spawnToMainLimit)
         }
         guard croi_timing_is_real(), environmentHas("croi.enforce_budgets=1") else {
             print(missed == 0 ? "m2: budgets met (reported, not enforced)"

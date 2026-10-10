@@ -738,8 +738,10 @@ Boot budgets, K9f (Kernel/Trace/Budgets.swift, BootOptions.swift's
   (~2.1 s).
 - Spawn to main: userboot reads the clock before process_create and puts
   `croi.spawn_ns=<ns>` in the next program's environment; m2 reports
-  `process.spawn_to_main` from the first line of main. KVM: 0.8-1 ms,
-  target 200 µs, not yet broken down (userboot's loader path).
+  `process.spawn_to_main` from the first line of main (limit 200 µs).
+  KVM: ~50 µs (userboot's create + load ~22 µs, thread spawn ~7, to the
+  user entry ~7, to _start ~6, runtime init ~6). It was 0.8-2.4 ms
+  while every amd64 user page fault waited for an all-CPU shootdown.
 - `irq.wait_wake_median` (target 5 µs, a hardware budget; ~12 µs under
   KVM, where the wakeup IPI exits).
 
@@ -783,7 +785,12 @@ device interrupts (K9c), IMSIC/APLIC are only counted. Device interrupts
 stay masked until an interrupt object takes them (K9c). `Ipi.callOthers(fn, arg)` runs a C function on every other
 ready CPU and waits (Zircon's mp_sync_exec); waiters drain their own
 mailbox, so cross-calls can't deadlock. `TlbShootdown.flushOthers` (amd64,
-rv64) ends every ArchAspace map/unmap/protect. SpinLock restores the
+rv64) ends every ArchAspace unmap/protect, and map on rv64 only: amd64
+caches no not-present entries, so filling a hole needs no remote flush
+(K9f: the all-CPU IPI on every user page fault was most of spawn to main,
+and it waits on any CPU writing the console with interrupts masked).
+Every shootdown still goes to every CPU; targeting only the CPUs that
+have a user address space loaded is a follow-up. SpinLock restores the
 caller's interrupt state while spinning, so a CPU waiting on `vmLock`
 still answers the shootdown from the holder. Secondaries idle in
 `arch_idle` with interrupts on; boot ends with "boot complete, idling".

@@ -463,8 +463,9 @@ pinned DMA without a driver stack. The boot tests add it.
 - **K9f: M3's budgets and the rest.** **Done** (2026-10-10), except the
   SMC resource (after M3): `croi.selftest=off`, monotonic time from
   kernel entry (userboot at ~80 ms under KVM with self-tests off),
-  spawn to main reported (0.8-1 ms under KVM against 200 µs: a known
-  gap, not yet broken down), and croi's timing discipline after
+  spawn to main ~50 µs under KVM (200 µs budget; it was 0.8-2.4 ms
+  until amd64 stopped sending an all-CPU TLB shootdown on every map),
+  and croi's timing discipline after
   Todhchai's (CLAUDE.md "Timing discipline", tools/bench.py): budgets
   are reported by the boot and judged by the bench against per-machine
   history; ctest no longer fails on a busy host. Kernel entry to the text console

@@ -83,7 +83,13 @@ struct ArchAspace {
             phys += page
             left -= page
         }
+        #if !arch(x86_64)
+        // amd64 caches no not-present entries (SDM 4.10.2.3, 4.10.3.1), so
+        // filling holes needs no remote flush, and every user page fault
+        // used to wait for every CPU to answer an IPI (K9f: most of spawn
+        // to main). RISC-V without Svvptc may cache invalid entries.
         TlbShootdown.flushOthers(virt &- size, size)
+        #endif
     }
 
     private func mapOne(virt: UInt64, phys: UInt64, level: Int, _ attributes: MapAttributes) throws(VmError) {
