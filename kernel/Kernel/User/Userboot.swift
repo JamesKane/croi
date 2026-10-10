@@ -34,7 +34,7 @@ enum Userboot {
             defer { bootfsObject.release() }
             let (stdout, stdoutRights) = try DebugLogs.create(readable: false)
             defer { stdout.release() }
-            var handles = InlineArray<4, ProgramLoader.StartupHandle>(repeating: ProgramLoader.StartupHandle(
+            var handles = InlineArray<9, ProgramLoader.StartupHandle>(repeating: ProgramLoader.StartupHandle(
                 object: Processes.rootJob, rights: JobObject.defaultRights,
                 info: croi_pa_hnd(UInt32(CROI_PA_JOB_DEFAULT), 0)))
             handles[1] = ProgramLoader.StartupHandle(object: Resources.root, rights: ResourceObject.defaultRights,
@@ -44,10 +44,25 @@ enum Userboot {
                                                      info: croi_pa_hnd(UInt32(CROI_PA_VMO_BOOTFS), 0))
             handles[3] = ProgramLoader.StartupHandle(object: stdout, rights: stdoutRights,
                                                      info: croi_pa_hnd(UInt32(CROI_PA_FD), 1))
+            // Each kind's ranged root, as Zircon's userboot gets them.
+            var count = 4
+            let kinds: InlineArray<5, (UInt32, UInt32)> = [
+                (UInt32(CROI_RSRC_KIND_MMIO), UInt32(CROI_PA_MMIO_RESOURCE)),
+                (UInt32(CROI_RSRC_KIND_IRQ), UInt32(CROI_PA_IRQ_RESOURCE)),
+                (UInt32(CROI_RSRC_KIND_IOPORT), UInt32(CROI_PA_IOPORT_RESOURCE)),
+                (UInt32(CROI_RSRC_KIND_SMC), UInt32(CROI_PA_SMC_RESOURCE)),
+                (UInt32(CROI_RSRC_KIND_SYSTEM), UInt32(CROI_PA_SYSTEM_RESOURCE)),
+            ]
+            for i in 0..<5 where Resources.rangedRoots[Int(kinds[i].0)] != 0 {
+                handles[count] = ProgramLoader.StartupHandle(object: ObjectPointer(address: Resources.rangedRoots[Int(kinds[i].0)]),
+                                                             rights: ResourceObject.defaultRights,
+                                                             info: croi_pa_hnd(kinds[i].1, 0))
+                count += 1
+            }
             let image = unsafe RawSpan(_unsafeStart: UnsafeRawPointer(bitPattern: UInt(croi_userboot_address()))!,
                                        byteCount: Int(croi_userboot_size()))
             let process = try BootOptions.withEnvironment { (environment: Span<UInt8>) throws(Status) -> ObjectPointer in
-                try ProgramLoader.start(image, name: "userboot", job: Processes.rootJob, handles: handles.span,
+                try ProgramLoader.start(image, name: "userboot", job: Processes.rootJob, handles: handles.span.extracting(0..<count),
                                         environment: environment)
             }
             process.release()  // it runs on its own

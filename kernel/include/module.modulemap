@@ -11,6 +11,8 @@ module CroiAbi {
   header "shared.h"
   header "time.h"
   header "profile.h"
+  header "resource.h"
+  header "vmo.h"
   export *
 }
 

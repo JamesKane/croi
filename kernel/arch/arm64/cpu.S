@@ -402,6 +402,44 @@ arch_cache_line:
     ret
 .size arch_cache_line, . - arch_cache_line
 
+// void arch_sync_icache(uint64_t addr, uint64_t size, uint64_t dline, uint64_t iline):
+// new code at [addr, addr+size) visible to instruction fetch on every
+// CPU: clean to the point of unification, invalidate the I-cache lines
+// (ic ivau broadcasts in the inner shareable domain).
+.globl arch_sync_icache
+.type arch_sync_icache, %function
+arch_sync_icache:
+    add     x1, x0, x1                  // end
+    mov     x5, x0
+    sub     x4, x2, #1
+    bic     x0, x0, x4
+1:  dc      cvau, x0
+    add     x0, x0, x2
+    cmp     x0, x1
+    b.lo    1b
+    dsb     ish
+    sub     x4, x3, #1
+    bic     x0, x5, x4
+2:  ic      ivau, x0
+    add     x0, x0, x3
+    cmp     x0, x1
+    b.lo    2b
+    dsb     ish
+    isb
+    ret
+.size arch_sync_icache, . - arch_sync_icache
+
+// uint64_t arch_icache_line(void): 4 << CTR_EL0.IminLine.
+.globl arch_icache_line
+.type arch_icache_line, %function
+arch_icache_line:
+    mrs     x1, ctr_el0
+    and     x1, x1, #0xf
+    mov     x0, #4
+    lsl     x0, x0, x1
+    ret
+.size arch_icache_line, . - arch_icache_line
+
 // uint64_t arch_has_poe(void): ID_AA64MMFR3_EL1.S1POE [19:16] != 0.
 .globl arch_has_poe
 .type arch_has_poe, %function
@@ -422,6 +460,20 @@ arch_user_counter_enable:
     isb
     ret
 .size arch_user_counter_enable, . - arch_user_counter_enable
+
+// void arch_user_cache_enable(uint64_t zicbom): SCTLR_EL1.UCI (bit 26):
+// EL0 may use dc cvau/cvac/civac and ic ivau (the vDSO's cache_flush);
+// UCT (bit 15): EL0 may read CTR_EL0.
+.globl arch_user_cache_enable
+.type arch_user_cache_enable, %function
+arch_user_cache_enable:
+    mrs     x0, sctlr_el1
+    orr     x0, x0, #(1 << 26)
+    orr     x0, x0, #(1 << 15)
+    msr     sctlr_el1, x0
+    isb
+    ret
+.size arch_user_cache_enable, . - arch_user_cache_enable
 
 // --- User extended state (xstate.h) ---------------------------------------
 // Layout: without SVE, q0-q31 then FPSR, FPCR. With SVE (VL bytes): z0-z31

@@ -292,6 +292,7 @@ enum GicV3 {
                 gicrLength = UInt64(e.load(fromByteOffset: 12, as: UInt32.self))
             case 0x0F where e.byteCount >= 16:  // GIC ITS
                 itsBase = e.load(fromByteOffset: 8, as: UInt64.self)
+                RootFilter.recordKernelMmio(itsBase, 0x2_0000)  // control and translation frames
             default: ()
             }
         }

@@ -86,5 +86,8 @@ enum VmoCache {
         #else
         line = arch_cache_line()
         #endif
+        // User cache maintenance (the vDSO's cache_flush) on every CPU.
+        arch_user_cache_enable(line)
+        _ = Ipi.callOthers({ zicbom in arch_user_cache_enable(zicbom) }, line)
     }
 }

@@ -20,3 +20,12 @@ void arch_cache_op(uint64_t addr, uint64_t size, uint32_t op, uint64_t line);
 // The smallest data cache line (amd64 CPUID.1 CLFLUSH size; arm64
 // CTR_EL0.DminLine; rv64 0: the RHCT says, see VmoCache).
 uint64_t arch_cache_line(void);
+
+// The smallest instruction cache line where user code must sync the
+// I-cache by line (arm64 CTR_EL0.IminLine), else 0.
+uint64_t arch_icache_line(void);
+
+// Makes code written at [addr, addr+size) (kernel virtual) visible to
+// instruction fetch: arm64 dc cvau + ic ivau by line (broadcast), rv64
+// fence.i on this hart only, amd64 nothing.
+void arch_sync_icache(uint64_t addr, uint64_t size, uint64_t dline, uint64_t iline);

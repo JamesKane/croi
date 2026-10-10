@@ -126,6 +126,13 @@ struct VmoRecord: ~Copyable {
         }
     }
 
+    /// Its pages are RAM the physmap maps (anything but device memory: a
+    /// physical VMO is RAM only for the kernel's shared read-only pages).
+    var inPhysmap: Bool {
+        if case .physical = pointee.kind { return pointee.sharedReadOnly }
+        return true
+    }
+
     /// The physical page holding byte `offset` if committed (no commit).
     func lookup(at offset: UInt64) -> UInt64? {
         let index = Int(offset / KernelLayout.pageSize)
@@ -250,8 +257,9 @@ struct Vmo: ~Copyable {
         }
     }
 
+    /// Size 0 only for anonymous VMOs (Zircon allows them: nothing to map).
     private static func make(_ kind: VmoRecord.Kind, size: UInt64, cache: CachePolicy) throws(VmError) -> VmoPointer {
-        guard size > 0, size % KernelLayout.pageSize == 0 else { throw .invalidArgument }
+        guard size % KernelLayout.pageSize == 0, size > 0 || kind == .anonymous else { throw .invalidArgument }
         guard let raw = unsafe heap.allocate(size: MemoryLayout<VmoRecord>.size,
                                              alignment: max(16, MemoryLayout<VmoRecord>.alignment)) else {
             throw .outOfMemory
@@ -328,16 +336,72 @@ struct Vmo: ~Copyable {
         record.pointee.account?.uncharge(UInt64(freed.count) * KernelLayout.pageSize)
     }
 
-    /// Cache maintenance over the committed pages of [offset, offset+size)
-    /// (non-coherent DMA). No-op where the platform has no cache ops.
+    /// Cache maintenance over the committed bytes of [offset, offset+size)
+    /// (non-coherent DMA), through the physmap. No-op where the platform
+    /// has no cache ops, and for device memory (physical VMOs outside
+    /// RAM), which the physmap doesn't map and which isn't cached.
     func cacheOp(offset: UInt64, size: UInt64, _ op: UInt32) throws(VmError) {
-        try checkRange(offset, size)
+        guard size > 0, offset <= self.size, size <= self.size - offset else { throw .invalidArgument }
+        guard record.inPhysmap else { return }
+        let page = KernelLayout.pageSize
         var at = offset
         while at < offset + size {
-            if let phys = record.lookup(at: at) {
-                arch_cache_op(KernelLayout.physmap(phys), KernelLayout.pageSize, op, VmoCache.line)
+            let pageStart = at & ~(page - 1)
+            let length = min(offset + size, pageStart + page) - at
+            if let phys = record.lookup(at: pageStart) {
+                arch_cache_op(KernelLayout.physmap(phys) + (at - pageStart), length, op, VmoCache.line)
             }
-            at += KernelLayout.pageSize
+            at += length
+        }
+    }
+
+    /// Code written into [offset, offset+size) becomes visible to
+    /// instruction fetch on every CPU (vmo_op_range's CACHE_SYNC, and
+    /// the program loader after copying code). arm64 by line; rv64 also
+    /// asks the SBI for a fence.i on every other hart.
+    func syncInstructions(offset: UInt64, size: UInt64) throws(VmError) {
+        guard size > 0, offset <= self.size, size <= self.size - offset else { throw .invalidArgument }
+        guard record.inPhysmap else { return }
+        let page = KernelLayout.pageSize
+        let dline = max(VmoCache.line, 16), iline = max(arch_icache_line(), 16)
+        var at = offset
+        while at < offset + size {
+            let pageStart = at & ~(page - 1)
+            let length = min(offset + size, pageStart + page) - at
+            if let phys = record.lookup(at: pageStart) {
+                arch_sync_icache(KernelLayout.physmap(phys) + (at - pageStart), length, dline, iline)
+            }
+            at += length
+        }
+        #if arch(riscv64)
+        _ = arch_sbi_call(0x5246_4E43, 0, 0, ~0, 0)  // RFENCE: remote_fence_i, every hart
+        #endif
+    }
+
+    /// vmo_op_range's ZERO: [offset, offset+size) reads as zero. Whole
+    /// pages of an anonymous VMO are decommitted; the rest is zeroed in
+    /// place (and cleaned out of the cache if the VMO isn't cached, so a
+    /// device sees it). Not for device memory.
+    func zero(offset: UInt64, size: UInt64) throws(VmError) {
+        guard offset <= self.size, size <= self.size - offset else { throw .invalidArgument }
+        guard record.inPhysmap else { throw .denied(0) }
+        let page = KernelLayout.pageSize
+        var at = offset
+        let end = offset + size
+        while at < end {
+            let pageStart = at & ~(page - 1)
+            let length = min(end, pageStart + page) - at
+            if case .anonymous = record.pointee.kind, length == page {
+                try decommit(offset: pageStart, size: page)
+            } else if let phys = record.lookup(at: pageStart) {
+                let address = KernelLayout.physmap(phys) + (at - pageStart)
+                unsafe UnsafeMutableRawPointer(bitPattern: UInt(address))!
+                    .initializeMemory(as: UInt8.self, repeating: 0, count: Int(length))
+                if record.pointee.cache != .cached {
+                    arch_cache_op(address, length, CROI_CACHE_CLEAN_INVALIDATE, VmoCache.line)
+                }
+            }
+            at += length
         }
     }
 
@@ -348,7 +412,7 @@ struct Vmo: ~Copyable {
         try record.pointee.lock.withLock { () throws(VmError) in
             guard record.pointee.mappers.count == 0 else { throw .alreadyMapped(0) }
         }
-        try cacheOp(offset: 0, size: size, CROI_CACHE_CLEAN_INVALIDATE)
+        if size > 0 { try cacheOp(offset: 0, size: size, CROI_CACHE_CLEAN_INVALIDATE) }
         record.pointee.lock.withLock { record.pointee.cache = policy }
     }
 

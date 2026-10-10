@@ -31,6 +31,10 @@ enum : uint64_t {
   CROI_SYS_VMO_WRITE = 42,         // (vmo, const void *buffer, offset, length)
   CROI_SYS_VMO_MAP = 43,           // (vmo, offset, length, rights bits, uint64_t *address); until VMARs (K7)
   CROI_SYS_VMO_GET_SIZE = 44,      // (vmo, uint64_t *size)
+  // VMOs for drivers (K9a): Zircon's calls, values in vmo.h.
+  CROI_SYS_VMO_OP_RANGE = 45,      // (vmo, op, offset, size, buffer, buffer_size)
+  CROI_SYS_VMO_SET_CACHE_POLICY = 46,  // (vmo, policy)
+  CROI_SYS_VMO_CREATE_PHYSICAL = 47,   // (MMIO resource, paddr, size, uint32_t *out)
   CROI_SYS_TRACE_CONFIGURE = 50,   // (resource, op, a, b, c, sample_hz)
   CROI_SYS_PMU_CONFIGURE = 51,     // (resource, op, a, b)
   // Jobs, processes, threads (K7a). Zircon's calls; vmar_* pack the VMAR
@@ -84,6 +88,10 @@ enum : uint64_t {
   CROI_SYS_DEBUGLOG_READ = 112,    // (log, options 0, croi_log_record_t *buffer, length) -> record size
   CROI_SYS_PROFILE_CREATE = 120,     // (resource, options 0, const croi_profile_info_t *, out)
   CROI_SYS_OBJECT_SET_PROFILE = 121, // (thread, profile, options 0, uint32_t *refusal or 0)
+  // Resources and IO ports (K9a): Zircon's calls, values in resource.h.
+  CROI_SYS_RESOURCE_CREATE = 130,  // (parent | options << 32, base, size, name, name_size, uint32_t *out)
+  CROI_SYS_IOPORTS_REQUEST = 131,  // (IOPORT resource, io_addr, len): amd64
+  CROI_SYS_IOPORTS_RELEASE = 132,  // (IOPORT resource, io_addr, len): amd64
 };
 
 enum : uint32_t {  // timer_create options (Zircon's ZX_TIMER_SLACK_*)
@@ -100,6 +108,8 @@ enum : uint32_t {  // timer_create options (Zircon's ZX_TIMER_SLACK_*)
 #include "ipc.h"   // channel signals and limits, call args, handle info, flow ids
 #include "log.h"   // debuglog records, flags, severities
 #include "profile.h"  // profile info, admission refusals
+#include "resource.h" // resource kinds, flags, system bases, croi_info_resource_t
+#include "vmo.h"      // vmo_op_range ops, cache policies, cache_flush options
 
 enum : uint64_t {  // CROI_SYS_TRACE_CONFIGURE ops
   CROI_TRACE_OP_START = 0,   // a: categories, b: pages per CPU, c: mode;

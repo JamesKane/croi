@@ -5,8 +5,9 @@
 .balign 16
 vdso_header:
     .long   0x53445643              // CROI_VDSO_MAGIC
-    .long   1                       // version
+    .long   2                       // version
     .long   croi_vdso_clock_monotonic - vdso_header
     .long   croi_vdso_topology - vdso_header
     .long   croi_vdso_power - vdso_header
     .long   croi_vdso_code_end - vdso_header
+    .long   croi_vdso_cache_flush - vdso_header

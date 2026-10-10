@@ -284,6 +284,7 @@ func kernel_main_continue() -> Never {
         ProcessSelfTest.runIpc(console)
         ProcessSelfTest.runSync(console)
         ProcessSelfTest.runExceptions(console)
+        ProcessSelfTest.runDrivers(console)
         ProgramSelfTest.run(console)
         SelfTestDeadman.done.store(true, ordering: .relaxed)
     } else {

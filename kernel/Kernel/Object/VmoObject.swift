@@ -12,6 +12,11 @@ struct VmoObject: ~Copyable {
         [.basic, .read, .write, .map, .getProperty, .setProperty, .signal]
     }
 
+    /// vmo_create_physical's (Zircon's list: no WAIT, INSPECT or SIGNAL).
+    static var physicalRights: Rights {
+        [.duplicate, .transfer, .read, .write, .execute, .map, .getProperty, .setProperty]
+    }
+
     /// A handle-able object for `vmo` (takes a reference of its own).
     static func wrap(_ vmo: VmoPointer) throws(Status) -> ObjectPointer {
         vmo.retain()
@@ -71,62 +76,12 @@ extension VmoObject {
     var vmo: UInt64 { unsafe UnsafePointer<VmoObject>(bitPattern: UInt(object.address))!.pointee.vmo }
 }
 
-/// A resource (Zircon's ResourceDispatcher): the authority for privileged
-/// operations. croi has the root resource and system resources minted from
-/// it; the tracing one gates `trace_configure` (Todhchai's trace right,
-/// Zircon's ZX_RSRC_SYSTEM_TRACING). MMIO, IRQ and the rest come with
-/// drivers (after M2).
-struct ResourceObject: ~Copyable {
-    enum Kind: Equatable {
-        case root
-        case system(base: UInt64)
-    }
-
-    var header = ObjectHeader(type: .resource)
-    let kind: Kind
-
-    static var tracingBase: UInt64 { 6 }  // ZX_RSRC_SYSTEM_TRACING_BASE
-    static var defaultRights: Rights { [.basic] }
-}
-
-enum Resources {
-    /// The root resource, made at boot (userboot gets a handle in K8).
-    nonisolated(unsafe) private(set) static var root = ObjectPointer(address: 0)
-
-    static func initialize() {
-        guard let object = Objects.allocate(ResourceObject(kind: .root)) else { panic("resource: out of memory") }
-        root = object
-    }
-
-    static func kind(_ object: ObjectPointer) -> ResourceObject.Kind {
-        unsafe UnsafePointer<ResourceObject>(bitPattern: UInt(object.address))!.pointee.kind
-    }
-
-    /// resource_create: only the root resource mints others.
-    static func create(_ table: borrowing HandleTable, parent: UInt32, kind: ResourceObject.Kind) throws(Status) -> UInt32 {
-        let parentRef = try table.get(parent, type: .resource)
-        guard Resources.kind(parentRef.object) == .root else { throw .accessDenied }
-        guard let object = Objects.allocate(ResourceObject(kind: kind)) else { throw .noMemory }
-        return try table.add(object, rights: ResourceObject.defaultRights)
-    }
-
-    /// Whether `handle` is the root resource or the system resource `base`.
-    static func check(_ table: borrowing HandleTable, _ handle: UInt32, system base: UInt64) throws(Status) {
-        let ref = try table.get(handle, type: .resource)
-        switch kind(ref.object) {
-        case .root: return
-        case .system(let b) where b == base: return
-        default: throw .accessDenied
-        }
-    }
-}
-
 /// trace_configure (NeoVectra ADR-0049's call, gated as Zircon gates
 /// ktrace): start, stop, rewind, mark, and the rings as read-only VMOs.
 enum TraceControl {
     static func start(_ table: borrowing HandleTable, _ resource: UInt32, categories: UInt32, pages: Int,
                       mode: UInt32, sampleHz: UInt64) throws(Status) {
-        try Resources.check(table, resource, system: ResourceObject.tracingBase)
+        try Resources.check(table, resource, system: UInt64(CROI_RSRC_SYSTEM_TRACING_BASE))
         guard pages > 0, pages <= 4096, mode == UInt32(CROI_TRACE_ONESHOT) || mode == UInt32(CROI_TRACE_CIRCULAR),
               sampleHz <= Sampler.maxHz else {
             throw .invalidArgs
@@ -140,26 +95,26 @@ enum TraceControl {
     }
 
     static func stop(_ table: borrowing HandleTable, _ resource: UInt32) throws(Status) {
-        try Resources.check(table, resource, system: ResourceObject.tracingBase)
+        try Resources.check(table, resource, system: UInt64(CROI_RSRC_SYSTEM_TRACING_BASE))
         Trace.stop()
     }
 
     /// Stops, and empties the rings.
     static func rewind(_ table: borrowing HandleTable, _ resource: UInt32) throws(Status) {
-        try Resources.check(table, resource, system: ResourceObject.tracingBase)
+        try Resources.check(table, resource, system: UInt64(CROI_RSRC_SYSTEM_TRACING_BASE))
         Trace.rewind()
     }
 
     /// A mark: 16 bytes of the caller's (kind CROI_TK_MARK). User space's
     /// own trace rings (Todhchai) use kinds 0x4000-0x7fff instead.
     static func mark(_ table: borrowing HandleTable, _ resource: UInt32, _ a: UInt64, _ b: UInt64) throws(Status) {
-        try Resources.check(table, resource, system: ResourceObject.tracingBase)
+        try Resources.check(table, resource, system: UInt64(CROI_RSRC_SYSTEM_TRACING_BASE))
         Trace.event(CROI_TRACE_MARK, UInt16(CROI_TK_MARK), a, b)
     }
 
     /// One handle per CPU's ring: read and map, never write.
     static func rings(_ table: borrowing HandleTable, _ resource: UInt32) throws(Status) -> UniqueArray<UInt32> {
-        try Resources.check(table, resource, system: ResourceObject.tracingBase)
+        try Resources.check(table, resource, system: UInt64(CROI_RSRC_SYSTEM_TRACING_BASE))
         var handles = UniqueArray<UInt32>()
         for cpu in 0..<Smp.count {
             guard let vmo = Trace.ringVmo(cpu) else { throw .badState }

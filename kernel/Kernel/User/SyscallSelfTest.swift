@@ -45,7 +45,7 @@ enum SyscallSelfTest {
             do throws(Status) {
                 Resources.root.retain()
                 let root = try handles.add(Resources.root, rights: ResourceObject.defaultRights)
-                resource = try Resources.create(handles, parent: root, kind: .system(base: ResourceObject.tracingBase))
+                resource = try Resources.create(handles, parent: root, system: UInt64(CROI_RSRC_SYSTEM_TRACING_BASE))
                 try handles.close(root)
             } catch {
                 panic("syscall self-test: no tracing resource")

@@ -1229,6 +1229,7 @@ enum Scheduler {
         }
         loadPkru(next.pointee.pkru, me)
         switchUserTls(from: current, to: next, me)
+        if let aspace = next.pointee.aspace { IoPorts.switched(to: aspace, me) }
         setKernelStack(next.pointee.stack.top)
         Sampler.switched(to: next)
         Pmu.switched(from: current, to: next)

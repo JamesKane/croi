@@ -1,5 +1,6 @@
 import CKernel
 import Fmt
+import PageTables
 import Synchronization
 
 /// User mode (K6a): traps and syscalls from user threads, and starting
@@ -311,6 +312,8 @@ enum Syscalls {
             return try unmapAndClose(a, table)
         case 60...79:
             try taskCall(number, a, table)
+        case 45, 46, 47, 130...139:
+            try driverCall(number, a, table)
         case 120...129:
             try Profiles.call(number, a, table)
         case 110...119:
@@ -337,10 +340,10 @@ enum Syscalls {
             try put(croi_pmu_info_t(kind: Pmu.kind, counters: UInt32(Pmu.threadCounters), events: Pmu.events,
                                     sampling: Pmu.canSample ? 1 : 0), a[2])
         case 1:
-            try Resources.check(table, handle, system: ResourceObject.tracingBase)
+            try Resources.check(table, handle, system: UInt64(CROI_RSRC_SYSTEM_TRACING_BASE))
             try Pmu.startSampling(event: UInt32(truncatingIfNeeded: a[2]), period: a[3])
         case 2:
-            try Resources.check(table, handle, system: ResourceObject.tracingBase)
+            try Resources.check(table, handle, system: UInt64(CROI_RSRC_SYSTEM_TRACING_BASE))
             Pmu.stopSampling()
         case 3:
             guard a[2] >= 1, a[2] <= UInt64(CROI_PMU_THREAD_EVENTS) else { throw .invalidArgs }
@@ -411,6 +414,10 @@ enum Syscalls {
                                 length: UInt64, toUser: Bool) throws(Status) {
         let ref = try table.get(handle, type: .vmo, rights: toUser ? .read : .write)
         let vmo = VmoPointer(address: UnsafeVmoObject(ref.object).vmo)
+        // Device memory isn't in the physmap; an uncached VMO's pages
+        // would be read through a cached alias (Zircon: BAD_STATE).
+        guard vmo.inPhysmap else { throw .notSupported }
+        guard vmo.pointee.cache == .cached else { throw .badState }
         guard offset <= vmo.pointee.size, length <= vmo.pointee.size - offset else { throw .outOfRange }
         var done: UInt64 = 0
         while done < length {

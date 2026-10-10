@@ -3,6 +3,7 @@
 // layout and flags; admission refusal reasons are croi's (ext 4).
 #pragma once
 #include <stdint.h>
+#include "resource.h"  // CROI_RSRC_SYSTEM_PROFILE_BASE gates profile_create
 
 enum : uint32_t {
   CROI_PROFILE_INFO_FLAG_PRIORITY = 1u << 0,
@@ -12,9 +13,6 @@ enum : uint32_t {
   CROI_PRIORITY_LOWEST = 0,
   CROI_PRIORITY_DEFAULT = 16,
   CROI_PRIORITY_HIGHEST = 31,
-
-  // The system resource that gates profile_create (or the root resource).
-  CROI_RSRC_SYSTEM_PROFILE_BASE = 10,
 
   // object_set_profile's refusal out-parameter, when admission refuses a
   // deadline profile (status NO_RESOURCES; INVALID_ARGS for parameters).

@@ -9,7 +9,7 @@
 #include <stdint.h>
 
 enum : uint32_t {
-  CROI_TOPOLOGY_PAGE_VERSION = 1,
+  CROI_TOPOLOGY_PAGE_VERSION = 2,
   CROI_POWER_PAGE_VERSION = 1,
   CROI_SHARED_MAX_CPUS = 64,
 };
@@ -30,6 +30,10 @@ typedef struct {
   uint32_t version;
   uint32_t cpu_count;
   croi_topology_cpu_t cpus[CROI_SHARED_MAX_CPUS];
+  // Version 2: the smallest cache lines user cache maintenance steps by
+  // (0: none needed or possible; rv64 without Zicbom is coherent).
+  uint32_t dcache_line;
+  uint32_t icache_line;
 } croi_topology_page_t;
 
 // Ext 9: each CPU's published power hints (K3c: the wake-latency bound and
@@ -58,6 +62,8 @@ typedef struct {
   uint32_t topology;         // const croi_topology_page_t *(void)
   uint32_t power;            // const croi_power_page_t *(void)
   uint32_t code_size;        // bytes of code; the three data pages follow, page aligned
+  // Version 2:
+  uint32_t cache_flush;      // int32_t (const void *addr, uint64_t len, uint32_t options): Zircon's
 } croi_vdso_header_t;
 
 enum : uint32_t { CROI_VDSO_MAGIC = 0x53445643 /* "CVDS" */ };
@@ -65,3 +71,7 @@ enum : uint32_t { CROI_VDSO_MAGIC = 0x53445643 /* "CVDS" */ };
 // User access to the counter, per CPU: arm64 CNTKCTL_EL1.EL0VCTEN, rv64
 // scounteren.TM; amd64 nothing (rdtsc is allowed while CR4.TSD is clear).
 void arch_user_counter_enable(void);
+
+// User cache maintenance (the vDSO's cache_flush), per CPU: arm64
+// SCTLR_EL1.UCI/UCT, rv64 senvcfg.CBCFE when `zicbom`; amd64 nothing.
+void arch_user_cache_enable(uint64_t zicbom);

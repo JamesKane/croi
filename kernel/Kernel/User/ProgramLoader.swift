@@ -81,6 +81,9 @@ enum ProgramLoader {
                 vmo.writeBytes(at: 0, from: UInt64(UInt(bitPattern: bytes.baseAddress!)) + segment.offset,
                                count: segment.filesz)
             }
+            if segment.executable {
+                try vmStatus { () throws(VmError) in try vmo.syncInstructions(offset: 0, size: size) }
+            }
         }
         var rights = VmRights()
         if segment.readable { rights.insert(.read) }

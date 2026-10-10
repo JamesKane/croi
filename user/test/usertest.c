@@ -139,6 +139,17 @@ static int64_t vdso(uint64_t base) {
   CHECK(51, before <= middle && middle <= after);
   const croi_topology_page_t *t = topology();
   CHECK(52, t->version == CROI_TOPOLOGY_PAGE_VERSION && t->cpu_count >= 1 && t->cpus[0].capacity >= 1);
+  // cache_flush (version 2): user cache maintenance is allowed (arm64
+  // SCTLR_EL1.UCI; rv64 senvcfg.CBCFE), so these don't trap.
+  int32_t (*cache_flush)(const void *, uint64_t, uint32_t) =
+      (int32_t (*)(const void *, uint64_t, uint32_t))(base + header->cache_flush);
+  uint8_t lines[512];
+  CHECK(54, header->version >= 2 && (t->dcache_line == 0 || (t->dcache_line & (t->dcache_line - 1)) == 0) &&
+                cache_flush(lines + 3, 300, CROI_CACHE_FLUSH_DATA) == 0 &&
+                cache_flush(lines, sizeof lines, CROI_CACHE_FLUSH_DATA | CROI_CACHE_FLUSH_INVALIDATE) == 0 &&
+                cache_flush(lines, sizeof lines, CROI_CACHE_FLUSH_DATA | CROI_CACHE_FLUSH_INSN) == 0 &&
+                cache_flush(lines, sizeof lines, CROI_CACHE_FLUSH_INVALIDATE) == ERR_INVALID_ARGS &&
+                cache_flush(lines, sizeof lines, 0) == ERR_INVALID_ARGS);
 
   uint64_t t0 = clock();
   for (int i = 0; i < 1000; i++) clock();
@@ -295,6 +306,7 @@ static int64_t pmu(void) {
 typedef struct {
   uint32_t job, process, vmar, code_vmo;
   uint64_t code_size;
+  uint32_t resource, padding;  // the root resource
 } startup_t;
 
 #define CHILD_CODE 0x1000000ull
@@ -1030,6 +1042,161 @@ static int64_t exceptions(const startup_t *s) {
   return 0x600D;
 }
 
+// Mode 10 (K9a): resources, physical VMOs, cache policy, VMO range ops.
+// Per arch: a RAM address, a register page the kernel drives (its UART
+// or HPET), and a harmless device page it doesn't, with a value to read.
+#if defined(__x86_64__)
+#define DRV_RAM 0x200000ull
+#define DRV_KERNEL_MMIO 0xFED00000ull  // HPET (the clock calibrates with it)
+#define DRV_DEVICE 0xE0000000ull       // q35 ECAM (OVMF): bus 0 device 0 is the host bridge
+#define DRV_DEVICE_OFFSET 0
+#define DRV_DEVICE_VALUE(v) (((v) & 0xFFFF) == 0x8086)
+#elif defined(__aarch64__)
+#define DRV_RAM 0x48000000ull
+#define DRV_KERNEL_MMIO 0x09000000ull  // the PL011 console
+#define DRV_DEVICE 0x09010000ull       // PL031 RTC: PeriphID0 is 0x31
+#define DRV_DEVICE_OFFSET 0xFE0
+#define DRV_DEVICE_VALUE(v) (((v) & 0xFF) == 0x31)
+#else
+#define DRV_RAM 0x88000000ull
+#define DRV_KERNEL_MMIO 0x10000000ull  // the 16550 console
+#define DRV_DEVICE 0x101000ull         // goldfish RTC: TIME_LOW counts
+#define DRV_DEVICE_OFFSET 0
+#define DRV_DEVICE_VALUE(v) ((v) != 0)
+#endif
+#define ERR_NOT_FOUND (-25)
+#define ERR_WRONG_TYPE (-12)
+#define PAGE 4096ull
+
+static int64_t resource_create(uint32_t parent, uint32_t options, uint64_t base, uint64_t size, uint32_t *out) {
+  return sys6(CROI_SYS_RESOURCE_CREATE, parent | (uint64_t)options << 32, base, size, (uint64_t)"drv", 3,
+              (uint64_t)out);
+}
+
+#if defined(__x86_64__)
+static void port_worker(uint64_t arg) {
+  (void)arg;
+  __asm__ volatile("outb %%al, $0x80" ::"a"(0));  // released: #GP
+  sys(CROI_SYS_THREAD_EXIT, 1, 0, 0, 0, 0);
+}
+#endif
+
+static int64_t drivers(const startup_t *s) {
+  uint32_t root = s->resource, mmio = 0, other = 0, vmo = 0;
+  // The root filter: RAM and the kernel's own registers.
+  CHECK(210, sys(CROI_SYS_VMO_CREATE_PHYSICAL, root, DRV_RAM, PAGE, (uint64_t)&vmo, 0) == ERR_ACCESS_DENIED &&
+                 resource_create(root, CROI_RSRC_KIND_MMIO, DRV_RAM, PAGE, &mmio) == ERR_ACCESS_DENIED &&
+                 resource_create(root, CROI_RSRC_KIND_MMIO, DRV_KERNEL_MMIO, PAGE, &mmio) == ERR_ACCESS_DENIED);
+  // An exclusive MMIO resource over the device page: overlaps refused
+  // (exclusive or not), no children; info reports it.
+  CHECK(211, resource_create(root, CROI_RSRC_KIND_MMIO | CROI_RSRC_FLAG_EXCLUSIVE, DRV_DEVICE, PAGE, &mmio) == 0);
+  CHECK(212, resource_create(root, CROI_RSRC_KIND_MMIO | CROI_RSRC_FLAG_EXCLUSIVE, DRV_DEVICE, PAGE, &other) ==
+                 ERR_NOT_FOUND &&
+                 resource_create(root, CROI_RSRC_KIND_MMIO, DRV_DEVICE + 8, 8, &other) == ERR_NOT_FOUND &&
+                 resource_create(mmio, CROI_RSRC_KIND_MMIO, DRV_DEVICE, 8, &other) == ERR_INVALID_ARGS);
+  croi_info_resource_t info = {};
+  CHECK(213, sys(CROI_SYS_OBJECT_GET_INFO, mmio, CROI_INFO_RESOURCE, (uint64_t)&info, sizeof info, 0) == 0 &&
+                 info.kind == CROI_RSRC_KIND_MMIO && info.base == DRV_DEVICE && info.size == PAGE &&
+                 (info.flags & CROI_RSRC_FLAG_EXCLUSIVE) && info.name[0] == 'd' && info.name[3] == 0);
+  // A physical VMO through it: other kinds and ranges refused; mapped,
+  // the device answers (uncached by default).
+  uint32_t irq = 0;
+  CHECK(214, resource_create(root, CROI_RSRC_KIND_IRQ, 40, 1, &irq) == 0 &&
+                 sys(CROI_SYS_VMO_CREATE_PHYSICAL, irq, DRV_DEVICE, PAGE, (uint64_t)&vmo, 0) == ERR_WRONG_TYPE &&
+                 sys(CROI_SYS_VMO_CREATE_PHYSICAL, mmio, DRV_DEVICE + PAGE, PAGE, (uint64_t)&vmo, 0) ==
+                     ERR_OUT_OF_RANGE &&
+                 sys(CROI_SYS_VMO_CREATE_PHYSICAL, mmio, DRV_DEVICE + 1, PAGE, (uint64_t)&vmo, 0) == ERR_INVALID_ARGS);
+  CHECK(215, sys(CROI_SYS_VMO_CREATE_PHYSICAL, mmio, DRV_DEVICE, PAGE, (uint64_t)&vmo, 0) == 0);
+  uint64_t at = 0, word = 0;
+  CHECK(216, sys6(CROI_SYS_VMAR_MAP, s->vmar | (uint64_t)CROI_VM_PERM_READ << 32, 0, vmo, 0, PAGE, (uint64_t)&at) == 0);
+  word = *(volatile uint32_t *)(at + DRV_DEVICE_OFFSET);
+  CHECK(217, DRV_DEVICE_VALUE(word));
+  // Device memory: no vmo_read, no policy change while mapped.
+  CHECK(218, sys(CROI_SYS_VMO_READ, vmo, (uint64_t)&word, 0, 8, 0) == ERR_NOT_SUPPORTED &&
+                 sys(CROI_SYS_VMO_SET_CACHE_POLICY, vmo, CROI_CACHE_POLICY_UNCACHED, 0, 0, 0) == ERR_BAD_STATE &&
+                 sys(CROI_SYS_VMO_OP_RANGE, vmo, CROI_VMO_OP_CACHE_CLEAN, 0, PAGE, 0) == 0);
+  sys(CROI_SYS_VMAR_UNMAP, s->vmar, at, PAGE, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, vmo, 0, 0, 0, 0);
+  // Closed, the range is free for anyone again.
+  CHECK(219, sys(CROI_SYS_HANDLE_CLOSE, mmio, 0, 0, 0, 0) == 0 &&
+                 resource_create(root, CROI_RSRC_KIND_MMIO, DRV_DEVICE, PAGE, &mmio) == 0 &&
+                 resource_create(mmio, CROI_RSRC_KIND_MMIO, DRV_DEVICE + 0x100, 0x100, &other) == 0 &&
+                 resource_create(other, CROI_RSRC_KIND_MMIO, DRV_DEVICE, 0x200, &irq) == ERR_ACCESS_DENIED);
+  sys(CROI_SYS_HANDLE_CLOSE, other, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, mmio, 0, 0, 0, 0);
+  // System resources: size 1 inside the system space.
+  CHECK(220, resource_create(root, CROI_RSRC_KIND_SYSTEM, CROI_RSRC_SYSTEM_TRACING_BASE, 1, &other) == 0 &&
+                 resource_create(root, CROI_RSRC_KIND_SYSTEM, CROI_RSRC_SYSTEM_COUNT, 1, &mmio) == ERR_NOT_FOUND &&
+                 resource_create(root, 3, 0, 1, &mmio) == ERR_INVALID_ARGS);  // ROOT can't be minted
+  sys(CROI_SYS_HANDLE_CLOSE, other, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, irq, 0, 0, 0, 0);
+
+  // Cache policy on an anonymous VMO: only unmapped; read/write refused
+  // once uncached; MAP needed; bad values refused.
+  uint32_t anon = 0, readonly = 0;
+  CHECK(221, sys(CROI_SYS_VMO_CREATE, 3 * PAGE, 0, (uint64_t)&anon, 0, 0) == 0 &&
+                 sys(CROI_SYS_VMO_SET_CACHE_POLICY, anon, 7, 0, 0, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_HANDLE_DUPLICATE, anon, 1u << 2 | 1u << 15, (uint64_t)&readonly, 0, 0) == 0 &&
+                 sys(CROI_SYS_VMO_SET_CACHE_POLICY, readonly, CROI_CACHE_POLICY_CACHED, 0, 0, 0) == ERR_ACCESS_DENIED);
+  CHECK(222, sys(CROI_SYS_VMO_SET_CACHE_POLICY, anon, CROI_CACHE_POLICY_WRITE_COMBINING, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_VMO_READ, anon, (uint64_t)&word, 0, 8, 0) == ERR_BAD_STATE &&
+                 sys(CROI_SYS_VMO_SET_CACHE_POLICY, anon, CROI_CACHE_POLICY_CACHED, 0, 0, 0) == 0);
+
+  // Range ops: commit, write, zero part of it, read it back.
+  uint8_t bytes[64];
+  for (int i = 0; i < 64; i++) bytes[i] = 0xAB;
+  CHECK(223, sys(CROI_SYS_VMO_OP_RANGE, anon, CROI_VMO_OP_COMMIT, 100, 2 * PAGE, 0) == 0 &&
+                 sys(CROI_SYS_VMO_WRITE, anon, (uint64_t)bytes, PAGE - 32, 64, 0) == 0 &&
+                 sys(CROI_SYS_VMO_OP_RANGE, anon, CROI_VMO_OP_ZERO, PAGE - 16, 32, 0) == 0 &&
+                 sys(CROI_SYS_VMO_READ, anon, (uint64_t)bytes, PAGE - 32, 64, 0) == 0 &&
+                 bytes[0] == 0xAB && bytes[15] == 0xAB && bytes[16] == 0 && bytes[47] == 0 && bytes[48] == 0xAB);
+  CHECK(224, sys(CROI_SYS_VMO_OP_RANGE, anon, CROI_VMO_OP_ZERO, 0, 3 * PAGE, 0) == 0 &&
+                 sys(CROI_SYS_VMO_READ, anon, (uint64_t)bytes, PAGE - 32, 64, 0) == 0 && bytes[0] == 0 &&
+                 bytes[63] == 0);
+  // Cache ops, decommit, and the refusals.
+  CHECK(225, sys(CROI_SYS_VMO_OP_RANGE, anon, CROI_VMO_OP_CACHE_CLEAN, 8, 100, 0) == 0 &&
+                 sys(CROI_SYS_VMO_OP_RANGE, anon, CROI_VMO_OP_CACHE_CLEAN_INVALIDATE, 0, 3 * PAGE, 0) == 0 &&
+                 sys(CROI_SYS_VMO_OP_RANGE, anon, CROI_VMO_OP_CACHE_SYNC, 0, PAGE, 0) == 0 &&
+                 sys(CROI_SYS_VMO_OP_RANGE, anon, CROI_VMO_OP_DECOMMIT, 0, 3 * PAGE, 0) == 0);
+  CHECK(226, sys(CROI_SYS_VMO_OP_RANGE, anon, CROI_VMO_OP_CACHE_CLEAN, 0, 0, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_VMO_OP_RANGE, anon, CROI_VMO_OP_CACHE_INVALIDATE, 0, PAGE, 0) == ERR_NOT_SUPPORTED &&
+                 sys(CROI_SYS_VMO_OP_RANGE, anon, CROI_VMO_OP_DECOMMIT, 1, PAGE, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_VMO_OP_RANGE, anon, CROI_VMO_OP_COMMIT, 2 * PAGE, 2 * PAGE, 0) == ERR_OUT_OF_RANGE &&
+                 sys(CROI_SYS_VMO_OP_RANGE, anon, 99, 0, PAGE, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_VMO_OP_RANGE, readonly, CROI_VMO_OP_COMMIT, 0, PAGE, 0) == ERR_ACCESS_DENIED &&
+                 sys(CROI_SYS_VMO_OP_RANGE, readonly, CROI_VMO_OP_CACHE_CLEAN, 0, PAGE, 0) == 0);
+  sys(CROI_SYS_HANDLE_CLOSE, readonly, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, anon, 0, 0, 0, 0);
+
+  // amd64 IO ports: allowed after a request, refused again after the
+  // release (a thread's outb then raises a general exception).
+#if defined(__x86_64__)
+  uint32_t ports = 0;
+  CHECK(228, resource_create(root, CROI_RSRC_KIND_IOPORT, 0x80, 1, &ports) == 0 &&
+                 resource_create(root, CROI_RSRC_KIND_IOPORT, 0x20, 2, &other) == ERR_ACCESS_DENIED &&
+                 sys(CROI_SYS_IOPORTS_REQUEST, ports, 0x81, 1, 0, 0) == ERR_OUT_OF_RANGE &&
+                 sys(CROI_SYS_IOPORTS_REQUEST, ports, 0x80, 1, 0, 0) == 0);
+  __asm__ volatile("outb %%al, $0x80" ::"a"(0));
+  CHECK(229, sys(CROI_SYS_IOPORTS_RELEASE, ports, 0x80, 1, 0, 0) == 0);
+  uint32_t channel = exception_channel(s->process);
+  uint32_t worker = start_thread(s, port_worker, 0);
+  handle_exception(channel, s->process, CROI_EXCP_GENERAL, CROI_EXCEPTION_STATE_THREAD_EXIT, 0);
+  CHECK(230, wait_for(worker, CROI_SIGNAL_TASK_TERMINATED, 5000000000ull) & CROI_SIGNAL_TASK_TERMINATED);
+  sys(CROI_SYS_HANDLE_CLOSE, worker, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, channel, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, ports, 0, 0, 0, 0);
+#else
+  CHECK(228, sys(CROI_SYS_IOPORTS_REQUEST, root, 0x80, 1, 0, 0) == ERR_NOT_SUPPORTED);
+#endif
+
+  // Zero-size VMOs exist (Zircon's).
+  uint64_t size = 1;
+  CHECK(227, sys(CROI_SYS_VMO_CREATE, 0, 0, (uint64_t)&anon, 0, 0) == 0 &&
+                 sys(CROI_SYS_VMO_GET_SIZE, anon, (uint64_t)&size, 0, 0, 0) == 0 && size == 0 &&
+                 sys(CROI_SYS_HANDLE_CLOSE, anon, 0, 0, 0, 0) == 0);
+  return 0x600D;
+}
+
 // Mode 4: something to sample. Three frames deep, spin for `ns`, with a
 // clock syscall every 64 iterations (so some samples land in the kernel
 // and must continue into these frames).
@@ -1068,6 +1235,7 @@ __attribute__((section(".text.start"))) [[noreturn]] void _start(uint64_t mode, 
             : mode == 7 ? ipc((const startup_t *)handle)
             : mode == 8 ? sync_objects((const startup_t *)handle)
             : mode == 9 ? exceptions((const startup_t *)handle)
+            : mode == 10 ? drivers((const startup_t *)handle)
             : mode >= 0x400 ? child((uint32_t)mode, handle, vdso_base)
                         : objects());
 }

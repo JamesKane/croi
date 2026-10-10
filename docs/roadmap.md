@@ -355,7 +355,11 @@ Test device: QEMU's `edu` PCI device (all three machines) has INTx, MSI
 and DMA, so the self-tests can cover a real interrupt, an MSI and a
 pinned DMA without a driver stack. The boot tests add it.
 
-- **K9a: resources and the VMO syscalls.** Zircon's resource kinds and
+- **K9a: resources and the VMO syscalls.** **Done** (2026-10-10): as
+  below, plus I-cache sync after the kernel loads code and for
+  CACHE_SYNC (arm64 hardware needed it; QEMU hid it), RESERVED memory
+  ranges allowed under MMIO resources (PCIe ECAM sits in one on q35),
+  and UNCACHED mapped as device memory. Details in CLAUDE.md. Zircon's resource kinds and
   numbers (MMIO 0, IRQ 1, IOPORT 2, SMC 4, SYSTEM 5) with ranges
   (`resource_create(parent, options, base, size, name)`, EXCLUSIVE, a
   child inside its parent's range; root mints all). An MMIO resource

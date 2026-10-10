@@ -316,6 +316,21 @@ arch_cache_line:
     ret
 .size arch_cache_line, . - arch_cache_line
 
+// void arch_sync_icache(addr, size, dline, iline): nothing (coherent).
+.globl arch_sync_icache
+.type arch_sync_icache, @function
+arch_sync_icache:
+    ret
+.size arch_sync_icache, . - arch_sync_icache
+
+// uint64_t arch_icache_line(void): 0, instruction fetch is coherent.
+.globl arch_icache_line
+.type arch_icache_line, @function
+arch_icache_line:
+    xor     %eax, %eax
+    ret
+.size arch_icache_line, . - arch_icache_line
+
 // --- Protection keys (jit.h) ----------------------------------------------
 
 // uint64_t arch_pku_enable(void): CPUID.7.0:ECX[3] PKU -> CR4.PKE (bit 22).
@@ -366,6 +381,14 @@ arch_user_counter_enable:
     mov     %rax, %cr4
     ret
 .size arch_user_counter_enable, . - arch_user_counter_enable
+
+// void arch_user_cache_enable(uint64_t zicbom): nothing to do (clflush is
+// allowed at CPL 3).
+.globl arch_user_cache_enable
+.type arch_user_cache_enable, @function
+arch_user_cache_enable:
+    ret
+.size arch_user_cache_enable, . - arch_user_cache_enable
 
 // --- User extended state (xstate.h) ---------------------------------------
 

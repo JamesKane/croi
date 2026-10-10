@@ -104,13 +104,23 @@ struct Userboot {
         try call("duplicating handles", sys(CROI_SYS_HANDLE_DUPLICATE, UInt64(process), sameRights, address(&processCopy)))
         try call("duplicating handles", sys(CROI_SYS_HANDLE_DUPLICATE, UInt64(thread), sameRights, address(&threadCopy)))
         try call("creating its stdout", sys(CROI_SYS_DEBUGLOG_CREATE, 0, 0, address(&log)))
-        let handles: [UInt32] = [processCopy, threadCopy, vmar, job, resource, bootfs, log]
-        let infos: [UInt32] = [
+        var handles: [UInt32] = [processCopy, threadCopy, vmar, job, resource, bootfs, log]
+        var infos: [UInt32] = [
             croi_pa_hnd(UInt32(CROI_PA_PROC_SELF), 0), croi_pa_hnd(UInt32(CROI_PA_THREAD_SELF), 0),
             croi_pa_hnd(UInt32(CROI_PA_VMAR_ROOT), 0), croi_pa_hnd(UInt32(CROI_PA_JOB_DEFAULT), 0),
             croi_pa_hnd(UInt32(CROI_PA_RESOURCE), 0), croi_pa_hnd(UInt32(CROI_PA_VMO_BOOTFS), 0),
             croi_pa_hnd(UInt32(CROI_PA_FD), 1),
         ]
+        // Each kind's ranged root that the kernel gave (by arch).
+        for type in [CROI_PA_MMIO_RESOURCE, CROI_PA_IRQ_RESOURCE, CROI_PA_IOPORT_RESOURCE, CROI_PA_SMC_RESOURCE,
+                     CROI_PA_SYSTEM_RESOURCE] {
+            let info = croi_pa_hnd(UInt32(type), 0)
+            let ranged = croi_take_startup_handle(info)
+            if ranged != 0 {
+                handles.append(ranged)
+                infos.append(info)
+            }
+        }
         let message = processArgs(infos: infos, name: next)
         var ours: UInt32 = 0
         var theirs: UInt32 = 0

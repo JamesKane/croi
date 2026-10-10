@@ -320,7 +320,7 @@ signals and object types, so the ABI matches):
   memory pressure (ext 6, `MemoryAccount.bindPressurePort`).
 - `VmoObject` (default rights as ZX_DEFAULT_VMO_RIGHTS; `forMapping`
   needs map plus read/write/execute per access). `ResourceObject`: root
-  (made at boot) mints system resources; the tracing one (base 6, as
+  (made at boot) mints system resources; the tracing one (base 14, as
   Zircon) gates `TraceControl` (start, stop, rewind, mark, rings as
   read/map-only VMO handles).
 
@@ -520,6 +520,50 @@ include/profile.h):
   `UserAspace.covers` binary-searches; `ObjectWait.one` returns at once
   if the signals are already set. Channel and port default rights are
   Zircon's (no DUPLICATE; ports no WAIT). -O was worse than -Osize.
+
+Driver support, K9a (Kernel/Object/Resource.swift, User/DriverSyscalls.swift,
+User/IoPorts.swift, include/resource.h, include/vmo.h; Todhchai M3):
+- Resources are Zircon's: kind (MMIO 0, IRQ 1, IOPORT 2 amd64, SMC 4
+  arm64, SYSTEM 5), base, size, flags, name. Size 0 is the kind's ranged
+  root; the root resource (kind ROOT 3, PA_RESOURCE) is every kind's.
+  userboot also gets each kind's ranged root (PA_MMIO_RESOURCE 0x50 ...
+  PA_SYSTEM_RESOURCE 0x54) and passes them on. `resource_create` (130,
+  parent | options << 32) follows Zircon's checks in order (WRITE on the
+  parent; a child inside its parent; EXCLUSIVE only from a ranged root
+  and no children of it; overlaps with an exclusive one NOT_FOUND).
+  `Resources.validate` is Zircon's validate_ranged_resource (non-strict:
+  an MMIO resource grants the pages it touches); `check(system:)` uses
+  it. `RootFilter` is the root filter: RAM and cached-firmware ranges
+  (`PhysicalMap`; RESERVED ranges such as PCIe ECAM are allowed, as in
+  Zircon), device registers the kernel maps (`mapPhysical` with device
+  caching records them; the console UART, the amd64 LAPIC/MSI window,
+  the GIC ITS), and on amd64 the 8259 and console UART ports.
+  ZX_INFO_RESOURCE (18). The tracing base is Zircon's 14.
+- VMOs: `vmo_create_physical` (47; MMIO resource; uncached-device by
+  default), `vmo_set_cache_policy` (46; MAP right; unmapped only, else
+  BAD_STATE; UNCACHED and UNCACHED_DEVICE both map `.device`, so arm64
+  gets Device-nGnRE where Zircon uses nGnRnE for UNCACHED),
+  `vmo_op_range` (45: COMMIT/PREFETCH round out, DECOMMIT aligned, ZERO
+  by bytes, cache CLEAN/CLEAN_INVALIDATE by bytes, CACHE_SYNC syncs the
+  I-cache, CACHE_INVALIDATE NOT_SUPPORTED). vmo_read/write refuse device
+  VMOs (NOT_SUPPORTED) and uncached ones (BAD_STATE). Zero-size
+  anonymous VMOs exist. `Vmo.syncInstructions` (arm64 dc cvau + ic ivau,
+  rv64 fence.i plus SBI remote fence.i) runs after ProgramLoader copies
+  code; user loaders (userboot, Todhchai's) must do the same through
+  `cache_flush` on arm64 hardware (QEMU TCG is coherent).
+- The vDSO header is version 2 with `cache_flush` (Zircon's
+  zx_cache_flush; runtime `croi_cache_flush`); the topology page
+  (version 2) publishes `dcache_line`/`icache_line`. User cache ops are
+  opened on every CPU (`arch_user_cache_enable`: arm64 SCTLR_EL1.UCI and
+  UCT, rv64 senvcfg.CBCFE with Zicbom).
+- amd64 IO ports (131/132): each CPU's TSS carries an 8 KiB I/O bitmap
+  (deny all); a process's bitmap lives on its `UserAspaceRecord` with a
+  never-reused id, copied in at a switch to a user thread when the
+  loaded id differs, and pushed by IPI to every CPU that has it loaded
+  or runs the process when it changes (so a release is immediate).
+- Boot test mode 10 (`ProcessSelfTest.runDrivers`, startup block word 3
+  is the root resource) reads a device register through a physical VMO
+  per arch (q35 ECAM at 0xE0000000, the PL031, the goldfish RTC).
 
 ACPI (`Kernel/Acpi/`, after Zircon's acpi_lite): `AcpiTables` validates
 RSDP/XSDT and finds tables by signature; `withPhysicalBytes` reads through

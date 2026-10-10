@@ -284,6 +284,23 @@ arch_cache_line:
     ret
 .size arch_cache_line, . - arch_cache_line
 
+// void arch_sync_icache(addr, size, dline, iline): fence.i on this hart
+// (others: an SBI remote fence.i, see Vmo.syncInstructions).
+.globl arch_sync_icache
+.type arch_sync_icache, %function
+arch_sync_icache:
+    fence.i
+    ret
+.size arch_sync_icache, . - arch_sync_icache
+
+// uint64_t arch_icache_line(void): 0, fence.i has no line.
+.globl arch_icache_line
+.type arch_icache_line, %function
+arch_icache_line:
+    li      a0, 0
+    ret
+.size arch_icache_line, . - arch_icache_line
+
 // void arch_user_counter_enable(void): scounteren.TM (bit 1): U-mode may
 // read `time` (firmware's mcounteren must allow it too; OpenSBI does).
 .globl arch_user_counter_enable
@@ -292,6 +309,18 @@ arch_user_counter_enable:
     csrsi   scounteren, 2
     ret
 .size arch_user_counter_enable, . - arch_user_counter_enable
+
+// void arch_user_cache_enable(uint64_t zicbom): senvcfg.CBCFE (bit 6):
+// U-mode may use cbo.clean/cbo.flush. Only where every hart has Zicbom
+// (senvcfg exists there; firmware's menvcfg.CBCFE must allow it too).
+.globl arch_user_cache_enable
+.type arch_user_cache_enable, %function
+arch_user_cache_enable:
+    beqz    a0, 1f
+    li      t0, 1 << 6
+    csrs    0x10A, t0               // senvcfg
+1:  ret
+.size arch_user_cache_enable, . - arch_user_cache_enable
 
 // --- User extended state (xstate.h) ---------------------------------------
 // Layout: f0-f31, fcsr (264 bytes); with V (vlenb bytes per register):

@@ -142,6 +142,23 @@ enum ProcessSelfTest {
         console.write("unhandled kill), job policy (deny, kill, inherited, fixed once populated, policy exceptions)\n")
     }
 
+    /// K9a (mode 10): resources (ranges, exclusivity, the root filter,
+    /// info), a physical VMO over a device register read through a
+    /// mapping, cache policy, VMO range ops, zero-size VMOs.
+    static func runDrivers(_ console: Uart) {
+        let before = Counts()
+        let exitCode = runInProcess(mode: 10)
+        guard exitCode == 0x600D else {
+            console.write("  drv:    user program failed check ")
+            console.write(decimal: UInt64(bitPattern: exitCode))
+            console.write("\n")
+            panic("driver self-test: user side")
+        }
+        before.expectUnchanged(console)
+        console.write("  drv:    resources (ranges, exclusive, RAM and kernel MMIO refused, info), physical VMO over ")
+        console.write("a device read through a mapping, cache policy, op_range (commit, zero, decommit, cache ops), IO ports (amd64)\n")
+    }
+
     /// Live processes, address spaces and objects, to check nothing leaked.
     struct Counts {
         let processes = Processes.live.load(ordering: .relaxed)
@@ -204,13 +221,15 @@ enum ProcessSelfTest {
             let root = try Processes.addHandle(vmar, rights: VmarObject.defaultRights, to: process)
             let codeHandle = try Processes.addHandle(codeVmo, rights: VmoObject.defaultRights.union(.execute),
                                                      to: process)
-            var block = InlineArray<3, UInt64>(repeating: 0)
+            let resource = try Processes.addHandle(Resources.root, rights: ResourceObject.defaultRights, to: process)
+            var block = InlineArray<4, UInt64>(repeating: 0)
             block[0] = UInt64(job) | UInt64(me) << 32
             block[1] = UInt64(root) | UInt64(codeHandle) << 32
             block[2] = codeSize
+            block[3] = UInt64(resource)
             var span = block.mutableSpan
             span.withUnsafeMutableBytes { raw in
-                startup.writeBytes(at: 0, from: UInt64(UInt(bitPattern: raw.baseAddress!)), count: 24)
+                startup.writeBytes(at: 0, from: UInt64(UInt(bitPattern: raw.baseAddress!)), count: 32)
             }
             codeVmo.release()
             startupVmo.release()

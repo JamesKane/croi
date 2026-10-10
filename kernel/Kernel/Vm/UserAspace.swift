@@ -80,6 +80,10 @@ struct UserAspaceRecord: ~Copyable {
     var threads = 0
     /// CPUs that have it loaded, one bit each (they need its TLB flushes).
     let activeCpus = Atomic<UInt64>(0)
+    /// amd64: the process's I/O permission bitmap (IoPorts; 8 KiB on the
+    /// heap, under `lock`) and its never-reused id, or 0.
+    var ioBitmap: UInt64 = 0
+    var ioBitmapId: UInt64 = 0
 }
 
 @safe struct UserAspacePointer: Equatable {
@@ -98,6 +102,7 @@ struct UserAspaceRecord: ~Copyable {
     func release() {
         guard pointee.references.subtract(1, ordering: .acquiringAndReleasing).newValue == 0 else { return }
         let raw = unsafe UnsafeMutablePointer<UserAspaceRecord>(bitPattern: UInt(address))!
+        if pointee.ioBitmap != 0 { unsafe heap.free(UnsafeMutableRawPointer(bitPattern: UInt(pointee.ioBitmap))!) }
         unsafe raw.deinitialize(count: 1)
         unsafe heap.free(UnsafeMutableRawPointer(raw))
         UserAspaces.live.subtract(1, ordering: .relaxed)

@@ -105,7 +105,7 @@ enum Objects {
         case .vmo:
             VmoPointer(address: UnsafeVmoObject(object).vmo).release()
             free(object, as: VmoObject.self)
-        case .resource: free(object, as: ResourceObject.self)
+        case .resource: Resources.destroy(object)
         case .job: Processes.destroyJob(object)
         case .process: Processes.destroyProcess(object)
         case .thread: Processes.destroyThread(object)

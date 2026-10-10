@@ -11,3 +11,5 @@
 #include "shared.h"
 #include "time.h"
 #include "profile.h"
+#include "resource.h"
+#include "vmo.h"

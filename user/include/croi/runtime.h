@@ -24,6 +24,10 @@ uint32_t croi_vmar_root_self(void);
 // The vDSO's base address (the third start argument).
 uint64_t croi_vdso_base(void);
 
+// Zircon's zx_cache_flush through the vDSO (options CROI_CACHE_FLUSH_*,
+// vmo.h): 0, or a negative status.
+int32_t croi_cache_flush(const void *addr, uint64_t len, uint32_t options);
+
 // The environment strings from the bootstrap message.
 int croi_environ_count(void);
 const char *croi_environ(int index);

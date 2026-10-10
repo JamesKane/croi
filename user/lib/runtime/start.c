@@ -6,6 +6,8 @@
 
 #include <croi/runtime.h>
 
+#include "shared.h"  // croi_vdso_header_t
+
 #if defined(__x86_64__)
 __asm__(".section .text._start, \"ax\"\n"
         ".globl _start\n"
@@ -111,6 +113,12 @@ uint32_t croi_take_startup_handle(uint32_t info) {
 uint32_t croi_process_self(void) { return process_self; }
 uint32_t croi_vmar_root_self(void) { return vmar_root; }
 uint64_t croi_vdso_base(void) { return vdso; }
+
+int32_t croi_cache_flush(const void *addr, uint64_t len, uint32_t options) {
+  const croi_vdso_header_t *header = (const croi_vdso_header_t *)vdso;
+  if (vdso == 0 || header->version < 2) return -2;  // NOT_SUPPORTED
+  return ((int32_t (*)(const void *, uint64_t, uint32_t))(vdso + header->cache_flush))(addr, len, options);
+}
 int croi_environ_count(void) { return environ_count; }
 const char *croi_environ(int index) { return index >= 0 && index < environ_count ? environ[index] : 0; }
 

@@ -23,6 +23,12 @@ enum : uint32_t {
   CROI_PA_VMO_BOOTFS = 0x1B,
   CROI_PA_FD = 0x30,              // argument: the fd (1: stdout, a debuglog)
   CROI_PA_RESOURCE = 0x3F,        // argument 0: the root resource
+  // Each kind's ranged root (Zircon's; userboot gets them all).
+  CROI_PA_MMIO_RESOURCE = 0x50,
+  CROI_PA_IRQ_RESOURCE = 0x51,
+  CROI_PA_IOPORT_RESOURCE = 0x52,  // amd64
+  CROI_PA_SMC_RESOURCE = 0x53,     // arm64
+  CROI_PA_SYSTEM_RESOURCE = 0x54,
   CROI_PA_USER0 = 0xF0,
 };
 

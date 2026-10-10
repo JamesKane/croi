@@ -3,6 +3,7 @@
 // (zircon/syscalls/log.h).
 #pragma once
 #include <stdint.h>
+#include "resource.h"  // CROI_RSRC_SYSTEM_DEBUGLOG_BASE gates readable debuglogs
 
 enum : uint32_t {
   CROI_LOG_RECORD_MAX = 256,      // a whole record, header included
@@ -19,8 +20,6 @@ enum : uint32_t {
   CROI_LOG_WARNING = 0x40,
   CROI_LOG_ERROR = 0x50,
   CROI_LOG_FATAL = 0x60,
-  // The system resource that gates readable debuglogs.
-  CROI_RSRC_SYSTEM_DEBUGLOG_BASE = 12,
 };
 
 // zx_log_record_t: what debuglog_read copies out (header, then datalen

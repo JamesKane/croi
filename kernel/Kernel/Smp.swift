@@ -338,9 +338,10 @@ enum CpuStacks {
         croi_user_protection = arch_user_protection_enable() != 0 ? 1 : 0
         arch_user_counter_enable()
         #if arch(x86_64)
-        // GDT (8 entries) and TSS (104 bytes), never freed.
+        // GDT (8 entries) and TSS (104 bytes plus the I/O bitmap and its
+        // terminating byte: IoPorts), never freed.
         guard let gdt = unsafe heap.allocate(size: 64, alignment: 16),
-              let tss = unsafe heap.allocate(size: 104, alignment: 16)
+              let tss = unsafe heap.allocate(size: 104 + 8192 + 1, alignment: 16)
         else { panic("cpu: no memory for GDT/TSS") }
         unsafe arch_install_cpu_descriptors(gdt, tss, stack.top)
         unsafe record.pointee.arch.tss = UInt64(UInt(bitPattern: tss))

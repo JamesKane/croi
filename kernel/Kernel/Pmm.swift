@@ -327,16 +327,23 @@ let pmmLock = SpinLock()
 }
 
 /// Physical ranges physical VMOs may never cover (Todhchai's RAM deny
-/// list): every memory-map range that is RAM or firmware's, kept after the
-/// handoff is gone. MMIO, the framebuffer and holes in the map are allowed.
+/// list; Zircon's root filter): every memory-map range that is RAM or
+/// firmware memory the physmap maps cached, kept after the handoff is
+/// gone. MMIO, the framebuffer, RESERVED ranges (firmware's "never
+/// touch": PCIe ECAM, flash; the kernel doesn't) and holes are allowed.
+/// K9b decides how ACPI NVS and runtime ranges may be mapped.
 enum PhysicalMap {
     nonisolated(unsafe) private static var denied = InlineArray<64, (UInt64, UInt64)>(repeating: (0, 0))
     nonisolated(unsafe) private(set) static var deniedCount = 0
+    /// The end of the highest range of any type.
+    nonisolated(unsafe) private(set) static var highestEnd: UInt64 = 0
 
     static func record(_ boot: borrowing BootAllocator) {
         for i in 0..<boot.rangeCount {
             let r = boot.range(i)
-            guard r.type != CROI_MEM_MMIO, r.type != CROI_MEM_FRAMEBUFFER, r.size > 0 else { continue }
+            highestEnd = max(highestEnd, r.base + r.size)
+            guard r.type != CROI_MEM_MMIO, r.type != CROI_MEM_FRAMEBUFFER, r.type != CROI_MEM_RESERVED,
+                  r.size > 0 else { continue }
             if deniedCount > 0, denied[deniedCount - 1].1 == r.base {
                 denied[deniedCount - 1].1 = r.base + r.size  // merge with the previous range
             } else if deniedCount < 64 {
@@ -346,13 +353,6 @@ enum PhysicalMap {
                 denied[63].1 = max(denied[63].1, r.base + r.size)  // be conservative, never permissive
             }
         }
-    }
-
-    /// The end of the highest range (a physical address above it is a hole).
-    static var highestEnd: UInt64 {
-        var end: UInt64 = 0
-        for i in 0..<deniedCount { end = max(end, denied[i].1) }
-        return end
     }
 
     /// Whether [base, base+size) touches RAM or firmware memory.

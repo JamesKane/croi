@@ -315,10 +315,12 @@ ist_stack_top:
 
 #define GDT_SIZE    (8 * 8)         // 6 segments + the 16-byte TSS descriptor
 #define TSS_SIZE    104
+#define IOPB_SIZE   8192                // one bit per port; a trailing 0xFF byte follows
 
 // void arch_install_cpu_descriptors(void *gdt, void *tss, uint64_t ist1_top)
 // This CPU's own GDT (a copy of the boot one) and TSS, with IST1 (NMI,
-// #DF, #MC) on its own stack. gdt: GDT_SIZE bytes, tss: TSS_SIZE bytes.
+// #DF, #MC) on its own stack. gdt: GDT_SIZE bytes, tss: TSS_SIZE +
+// IOPB_SIZE + 1 bytes (8297).
 .section .text.arch_install_cpu_descriptors, "ax", @progbits
 .globl arch_install_cpu_descriptors
 .type arch_install_cpu_descriptors, @function
@@ -331,18 +333,22 @@ arch_install_cpu_descriptors:
     rep movsb
     pop     %rsi
     pop     %rdi
-    // TSS: zeroed, IST1, no I/O bitmap.
+    // TSS: zeroed, IST1, then an I/O permission bitmap denying every
+    // port (IoPorts loads a process's into it at a switch).
     push    %rdi
     mov     %rsi, %rdi
     xor     %eax, %eax
     mov     $TSS_SIZE, %ecx
     rep stosb
+    mov     $0xff, %eax
+    mov     $(IOPB_SIZE + 1), %ecx
+    rep stosb
     pop     %rdi
     mov     %rdx, 36(%rsi)          // IST1
-    movw    $TSS_SIZE, 102(%rsi)    // I/O map base: none
-    // TSS descriptor at 0x30.
+    movw    $TSS_SIZE, 102(%rsi)    // I/O map base: right after the TSS
+    // TSS descriptor at 0x30 (limit covers the bitmap and its 0xFF byte).
     mov     %rsi, %rax
-    mov     $(TSS_SIZE - 1), %rdx
+    mov     $(TSS_SIZE + IOPB_SIZE), %rdx
     mov     %rax, %rcx
     and     $0xffffff, %rcx
     shl     $16, %rcx

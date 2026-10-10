@@ -210,7 +210,7 @@ extension Syscalls {
         base >= regionBase && size <= regionSize && base - regionBase <= regionSize - size
     }
 
-    private static func vm<R>(_ body: () throws(VmError) -> R) throws(Status) -> R {
+    static func vm<R>(_ body: () throws(VmError) -> R) throws(Status) -> R {
         try vmStatus(body)
     }
 
