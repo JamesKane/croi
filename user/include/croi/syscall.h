@@ -58,6 +58,21 @@ enum : uint64_t {
   CROI_SYS_OBJECT_SIGNAL_PEER = 85,  // (handle, clear, set)
   CROI_SYS_OBJECT_GET_INFO = 86,   // (handle, topic, buffer, buffer_size)
   CROI_SYS_TEST_PROFILE = 6,       // (op) boot self-test only
+  // Futexes and timers (K7c): Zircon's.
+  CROI_SYS_FUTEX_WAIT = 90,        // (uint32_t *value, current, new_owner thread handle, deadline)
+  CROI_SYS_FUTEX_WAKE = 91,        // (uint32_t *value, count)
+  CROI_SYS_FUTEX_REQUEUE = 92,     // (uint32_t *value, wake_count, current, uint32_t *target, requeue_count, owner)
+  CROI_SYS_FUTEX_WAKE_SINGLE_OWNER = 93,  // (uint32_t *value)
+  CROI_SYS_FUTEX_GET_OWNER = 94,   // (uint32_t *value, uint64_t *koid)
+  CROI_SYS_TIMER_CREATE = 95,      // (options: CROI_TIMER_SLACK_*, clock_id 0, out)
+  CROI_SYS_TIMER_SET = 96,         // (timer, deadline, slack)
+  CROI_SYS_TIMER_CANCEL = 97,      // (timer)
+};
+
+enum : uint32_t {  // timer_create options (Zircon's ZX_TIMER_SLACK_*)
+  CROI_TIMER_SLACK_CENTER = 0,
+  CROI_TIMER_SLACK_EARLY = 1,
+  CROI_TIMER_SLACK_LATE = 2,
 };
 
 // A new process's first thread starts with arg1 (a handle in the process)

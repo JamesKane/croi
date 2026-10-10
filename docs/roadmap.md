@@ -260,8 +260,10 @@ kill. **K7b done**: channels (handle transfer,
 calls with kernel txids, peer closed), eventpairs, object_get_info, the
 `ipc` trace category with flow ids shared by call and reply
 (`croi_flow_id` in ipc.h), and IPC deadline donation (ext 2) through
-owned call queues. Next: K7c (futex with owner, timers), K7d (exceptions,
-job policy).
+owned call queues. **K7c done**: futexes (wait/wake/requeue,
+owners with inheritance, wake_single_owner, get_owner) and timer objects
+with slack (zero for deadline profiles). Next: K7d (exceptions, job
+policy).
 
 - Channel, event, eventpair, port, timer (absolute deadline plus slack), and
   futex with an owner for PI.

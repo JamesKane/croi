@@ -233,6 +233,8 @@ enum Syscalls {
             try taskCall(number, a, table)
         case 80...89:
             try ipcCall(number, a, table)
+        case 90...99:
+            try syncCall(number, a, table)
         default:
             throw .notSupported
         }
@@ -370,6 +372,19 @@ enum UserCopy {
     @unsafe static func from(_ destination: UnsafeMutableRawPointer, _ source: UInt64, _ length: UInt64) -> Int32 {
         guard length == 0 || UserLayout.contains(source, length) else { return -1 }
         return unsafe arch_copy_from_user(destination, source, length)
+    }
+
+    /// A 32-bit user word, without paging anything in (interrupts must be
+    /// masked, e.g. under the scheduler lock): nil if it isn't resident or
+    /// isn't readable.
+    static func wordNoPageIn(_ address: UInt64) -> UInt32? {
+        guard UserLayout.contains(address, 4) else { return nil }
+        let percpu = unsafe UnsafeMutablePointer<PerCpu>(bitPattern: UInt(arch_percpu()))!
+        unsafe percpu.pointee.noPageIn = true
+        var value: UInt32 = 0
+        let result = withUnsafeMutableBytes(of: &value) { unsafe arch_copy_from_user($0.baseAddress!, address, 4) }
+        unsafe percpu.pointee.noPageIn = false
+        return result == 0 ? value : nil
     }
 
     @unsafe static func to(_ destination: UInt64, _ source: UnsafeRawPointer, _ length: UInt64) -> Int32 {

@@ -617,6 +617,29 @@ enum Scheduler {
         return true
     }
 
+    /// Wakes the first waiter on `queue` and returns it. Lock held.
+    static func wakeFirst(_ queue: QueuePointer) -> ThreadPointer? {
+        guard let thread = queue.pointee.head else { return nil }
+        _ = wakeOne(queue)
+        return thread
+    }
+
+    /// Moves up to `count` waiters from `from` to `to` (futex requeue),
+    /// keeping their timeouts; both owners' inherited profiles follow.
+    /// Lock held.
+    static func moveWaiters(from: QueuePointer, to: QueuePointer, count: Int) -> Int {
+        var moved = 0
+        while moved < count, let thread = from.pointee.pop() {
+            thread.pointee.queueKey = thread.pointee.effective.waitKey
+            to.pointee.push(thread)
+            thread.pointee.waitQueue = to
+            moved += 1
+        }
+        if let owner = from.pointee.owner { updateEffectiveProfile(owner) }
+        if let owner = to.pointee.owner { updateEffectiveProfile(owner) }
+        return moved
+    }
+
     /// Gives up every queue the running thread owns (a user thread exiting
     /// mid-call: its callers keep waiting, without lending to it).
     static func dropOwnership() {

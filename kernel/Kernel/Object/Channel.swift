@@ -125,6 +125,8 @@ struct CallRecord: ~Copyable {
     var state = State.pending
     var reply: UInt64 = 0
     let flow: UInt64
+    /// The caller's trace id (DONATE records name it).
+    let callerTraceId: UInt32
     let references = Atomic<Int>(1)
 }
 
@@ -138,7 +140,9 @@ struct CallRecord: ~Copyable {
 
     static func allocate(txid: UInt32, flow: UInt64) -> CallRecordPointer? {
         guard let raw = unsafe heap.allocate(size: MemoryLayout<CallRecord>.size, alignment: 16) else { return nil }
-        unsafe raw.bindMemory(to: CallRecord.self, capacity: 1).initialize(to: CallRecord(txid: txid, flow: flow))
+        let caller = Scheduler.current.pointee.traceId
+        unsafe raw.bindMemory(to: CallRecord.self, capacity: 1)
+            .initialize(to: CallRecord(txid: txid, flow: flow, callerTraceId: caller))
         return CallRecordPointer(address: UInt64(UInt(bitPattern: raw)))
     }
 
@@ -363,11 +367,10 @@ enum Channels {
             let call = CallRecordPointer(address: message.pointee.call)
             Scheduler.locked {
                 guard call.pointee.state == .pending else { return }
-                let reader = Scheduler.current
-                let caller = call.pointee.queue.pointee.head
-                if Scheduler.setOwner(call.pointee.queue, reader), let caller {
+                // The caller may not have blocked yet: it lends once it does.
+                if Scheduler.setOwner(call.pointee.queue, Scheduler.current) {
                     Trace.event(CROI_TRACE_IPC, UInt16(CROI_TK_DONATE), call.pointee.flow,
-                                UInt64(caller.pointee.traceId))
+                                UInt64(call.pointee.callerTraceId))
                 }
             }
         }

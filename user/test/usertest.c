@@ -464,10 +464,13 @@ static void server(uint64_t channel) {
       continue;
     }
     if (actual[0] == 8 && buffer[1] == 0x74697571) break;  // "quit"
-    // Work for 1 ms, then look: the caller lends its profile once it has
-    // blocked on the call, which can be just after we read it.
-    uint64_t until = now_ns() + 1000000;
+    // Work for 1 ms, then look, giving it up to 50 ms: the caller lends its
+    // profile once it has blocked on the call, which can be just after we
+    // read it (or, under emulation, rather later).
+    uint64_t until = now_ns() + 1000000, give_up = now_ns() + 50000000;
     while (now_ns() < until) {
+    }
+    while (sys(CROI_SYS_TEST_PROFILE, 0, 0, 0, 0, 0) != 1 && now_ns() < give_up) {
     }
     uint32_t reply[3] = {buffer[0], buffer[1] + 1, (uint32_t)sys(CROI_SYS_TEST_PROFILE, 0, 0, 0, 0, 0)};
     chan_write((uint32_t)channel, reply, sizeof reply, 0, 0);
@@ -596,6 +599,119 @@ static int64_t ipc(const startup_t *s) {
   return 0x600D;
 }
 
+// Mode 8: futexes and timers (K7c), as a process. Waiter threads report
+// through slots on our stack: [0] the futex word's address, [1] the
+// result, [2] done.
+static void futex_waiter(uint64_t arg) {
+  volatile uint64_t *slot = (volatile uint64_t *)arg;
+  slot[1] = (uint64_t)sys(CROI_SYS_FUTEX_WAIT, slot[0], 0, 0, now_ns() + 3000000000ull, 0);
+  slot[2] = 1;
+  sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
+}
+
+// The owner in the inheritance check: once it sees itself on a deadline
+// profile (lent by the waiter), it records that and its koid as the
+// futex's owner reports it, and wakes the waiter. slot: [0] word address,
+// [1] seen deadline, [2] owner koid, [3] done.
+static void futex_owner(uint64_t arg) {
+  volatile uint64_t *slot = (volatile uint64_t *)arg;
+  uint64_t give_up = now_ns() + 2000000000ull;
+  while (now_ns() < give_up && sys(CROI_SYS_TEST_PROFILE, 0, 0, 0, 0, 0) != 1) {
+  }
+  slot[1] = (uint64_t)sys(CROI_SYS_TEST_PROFILE, 0, 0, 0, 0, 0);
+  uint64_t koid = 0;
+  sys(CROI_SYS_FUTEX_GET_OWNER, slot[0], (uint64_t)&koid, 0, 0, 0);
+  slot[2] = koid;
+  sys(CROI_SYS_FUTEX_WAKE, slot[0], 1, 0, 0, 0);
+  slot[3] = 1;
+  sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
+}
+
+static uint64_t koid_of(uint32_t handle) {
+  croi_info_handle_basic_t info = {};
+  sys(CROI_SYS_OBJECT_GET_INFO, handle, CROI_INFO_HANDLE_BASIC, (uint64_t)&info, sizeof info, 0);
+  return info.koid;
+}
+
+static void join(uint32_t thread) {
+  wait_for(thread, CROI_SIGNAL_TASK_TERMINATED, 3000000000ull);
+  sys(CROI_SYS_HANDLE_CLOSE, thread, 0, 0, 0, 0);
+}
+
+static int64_t sync_objects(const startup_t *s) {
+  volatile uint32_t words[4] = {0, 0, 0, 0};
+  uint64_t a = (uint64_t)&words[0], b = (uint64_t)&words[1], c = (uint64_t)&words[2];
+  CHECK(150, sys(CROI_SYS_FUTEX_WAIT, a, 1, 0, now_ns() + 1000000000ull, 0) == ERR_BAD_STATE);
+  CHECK(151, sys(CROI_SYS_FUTEX_WAIT, a, 0, 0, now_ns(), 0) == ERR_TIMED_OUT);
+  CHECK(152, sys(CROI_SYS_FUTEX_WAIT, a + 1, 0, 0, now_ns(), 0) == ERR_INVALID_ARGS);
+  CHECK(153, sys(CROI_SYS_FUTEX_WAKE, a, 10, 0, 0, 0) == 0);  // nobody waiting
+
+  // Inheritance: we wait on a deadline profile with a fair thread as the
+  // futex's owner; it must run on our deadline until it wakes us.
+  volatile uint64_t owner_slot[4] = {a, 0, 0, 0};
+  uint32_t owner = start_thread(s, futex_owner, (uint64_t)owner_slot);
+  CHECK(154, sys(CROI_SYS_TEST_PROFILE, 1, 0, 0, 0, 0) == 0);
+  CHECK(155, sys(CROI_SYS_FUTEX_WAIT, a, 0, owner, now_ns() + 3000000000ull, 0) == 0);
+  CHECK(156, sys(CROI_SYS_TEST_PROFILE, 2, 0, 0, 0, 0) == 0);
+  wait_for(owner, CROI_SIGNAL_TASK_TERMINATED, 3000000000ull);
+  CHECK(157, owner_slot[3] == 1 && owner_slot[1] == 1);  // it ran on our deadline
+  CHECK(158, owner_slot[2] == koid_of(owner));          // and was the futex's owner
+  sys(CROI_SYS_HANDLE_CLOSE, owner, 0, 0, 0, 0);
+  uint64_t koid = 1;
+  CHECK(159, sys(CROI_SYS_FUTEX_GET_OWNER, a, (uint64_t)&koid, 0, 0, 0) == 0 && koid == 0);  // wake cleared it
+
+  // Requeue: two waiters on a, moved to b, woken there.
+  volatile uint64_t w1[3] = {a, 99, 0}, w2[3] = {a, 99, 0};
+  uint32_t t1 = start_thread(s, futex_waiter, (uint64_t)w1), t2 = start_thread(s, futex_waiter, (uint64_t)w2);
+  sys(CROI_SYS_NANOSLEEP, now_ns() + 5000000, 0, 0, 0, 0);
+  CHECK(160, sys6(CROI_SYS_FUTEX_REQUEUE, a, 0, 0, b, 2, 0) == 0);
+  CHECK(161, sys(CROI_SYS_FUTEX_WAKE, a, 10, 0, 0, 0) == 0 && w1[2] == 0 && w2[2] == 0);  // nobody left on a
+  CHECK(162, sys(CROI_SYS_FUTEX_WAKE, b, 2, 0, 0, 0) == 0);
+  join(t1);
+  join(t2);
+  CHECK(163, w1[2] == 1 && w2[2] == 1 && w1[1] == 0 && w2[1] == 0);
+
+  // wake_single_owner: one waiter wakes and owns the futex.
+  volatile uint64_t w3[3] = {c, 99, 0}, w4[3] = {c, 99, 0};
+  uint32_t t3 = start_thread(s, futex_waiter, (uint64_t)w3), t4 = start_thread(s, futex_waiter, (uint64_t)w4);
+  sys(CROI_SYS_NANOSLEEP, now_ns() + 5000000, 0, 0, 0, 0);
+  CHECK(164, sys(CROI_SYS_FUTEX_WAKE_SINGLE_OWNER, c, 0, 0, 0, 0) == 0);
+  sys(CROI_SYS_NANOSLEEP, now_ns() + 2000000, 0, 0, 0, 0);
+  CHECK(165, (w3[2] == 1) != (w4[2] == 1));
+  uint32_t woke = w3[2] == 1 ? t3 : t4;
+  koid = 0;
+  CHECK(166, sys(CROI_SYS_FUTEX_GET_OWNER, c, (uint64_t)&koid, 0, 0, 0) == 0 &&
+                 (koid == koid_of(woke) || koid == 0));  // 0 once the woken thread has exited
+  CHECK(167, sys(CROI_SYS_FUTEX_WAKE, c, 1, 0, 0, 0) == 0);
+  join(t3);
+  join(t4);
+  CHECK(168, w3[1] == 0 && w4[1] == 0);
+
+  // Timers.
+  uint32_t timer = 0;
+  CHECK(170, sys(CROI_SYS_TIMER_CREATE, CROI_TIMER_SLACK_LATE, 0, (uint64_t)&timer, 0, 0) == 0);
+  uint64_t deadline = now_ns() + 5000000;
+  CHECK(171, sys(CROI_SYS_TIMER_SET, timer, deadline, 0, 0, 0) == 0);
+  CHECK(172, (wait_for(timer, SIGNALED, 2000000000ull) & SIGNALED) && now_ns() >= deadline);
+  CHECK(173, sys(CROI_SYS_TIMER_SET, timer, now_ns() + 50000000, 0, 0, 0) == 0 &&
+                 !(wait_for(timer, SIGNALED, 0) & SIGNALED));  // a set clears SIGNALED
+  CHECK(174, sys(CROI_SYS_TIMER_CANCEL, timer, 0, 0, 0, 0) == 0 &&
+                 !(wait_for(timer, SIGNALED, 100000000) & SIGNALED));
+  CHECK(175, sys(CROI_SYS_TIMER_SET, timer, 1, 0, 0, 0) == 0 &&
+                 (wait_for(timer, SIGNALED, 1000000000) & SIGNALED));  // already due
+  // A deadline profile gets zero slack: half a second of late slack ignored.
+  CHECK(176, sys(CROI_SYS_TEST_PROFILE, 1, 0, 0, 0, 0) == 0);
+  deadline = now_ns() + 5000000;
+  CHECK(177, sys(CROI_SYS_TIMER_SET, timer, deadline, 500000000, 0, 0) == 0);
+  CHECK(178, (wait_for(timer, SIGNALED, 2000000000ull) & SIGNALED) && now_ns() < deadline + 200000000);
+  CHECK(179, sys(CROI_SYS_TEST_PROFILE, 2, 0, 0, 0, 0) == 0);
+  // Closing an armed timer: it fires later, harmlessly.
+  CHECK(180, sys(CROI_SYS_TIMER_SET, timer, now_ns() + 20000000, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_HANDLE_CLOSE, timer, 0, 0, 0, 0) == 0);
+  sys(CROI_SYS_NANOSLEEP, now_ns() + 60000000, 0, 0, 0, 0);
+  return 0x600D;
+}
+
 // Mode 4: something to sample. Three frames deep, spin for `ns`, with a
 // clock syscall every 64 iterations (so some samples land in the kernel
 // and must continue into these frames).
@@ -632,6 +748,7 @@ __attribute__((section(".text.start"))) [[noreturn]] void _start(uint64_t mode, 
             : mode == 5 ? pmu()
             : mode == 6 ? processes((const startup_t *)handle)
             : mode == 7 ? ipc((const startup_t *)handle)
+            : mode == 8 ? sync_objects((const startup_t *)handle)
             : mode >= 0x400 ? child((uint32_t)mode, handle, vdso_base)
                         : objects());
 }

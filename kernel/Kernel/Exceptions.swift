@@ -41,7 +41,8 @@ func arch_exception(_ frame: UnsafeMutablePointer<arch_exception_frame_t>) {
         // access) is final; retrying the present page would loop.
         // So is any fault in interrupt context (a sampler reading user
         // frames): it must not take locks or sleep to page memory in.
-        let inInterrupt = unsafe UnsafeMutablePointer<PerCpu>(bitPattern: UInt(arch_percpu()))!.pointee.interruptFrame != 0
+        let percpu = unsafe UnsafeMutablePointer<PerCpu>(bitPattern: UInt(arch_percpu()))!
+        let inInterrupt = unsafe percpu.pointee.interruptFrame != 0 || percpu.pointee.noPageIn
         guard unsafe !ExceptionFrame.userAccessBlocked(frame.pointee), !inInterrupt else {
             Trace.event(CROI_TRACE_VM, UInt16(CROI_TK_FAULT), fault.address, fault.write ? CROI_VM_FAULT_WRITE : 0)
             unsafe ExceptionFrame.setProgramCounter(&frame.pointee, recovery)

@@ -281,6 +281,7 @@ func kernel_main_continue() -> Never {
         PmuSelfTest.run(console)
         ProcessSelfTest.run(console)
         ProcessSelfTest.runIpc(console)
+        ProcessSelfTest.runSync(console)
         SelfTestDeadman.done.store(true, ordering: .relaxed)
     } else {
         console.write("  cpus:   no ACPI tables; boot cpu only\n")

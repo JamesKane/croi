@@ -49,6 +49,8 @@ enum : uint16_t {
   CROI_TK_CHANNEL_WRITE = 80,  // a: flow id (ipc.h); b: bytes | handles << 32
   CROI_TK_CHANNEL_READ = 81,   // a: flow id; b: bytes | handles << 32
   CROI_TK_DONATE = 82,         // thread: the server; a: flow id; b: the caller's trace id
+  CROI_TK_FUTEX_WAIT = 96,     // a: user address; b: the owner's trace id (0: none)
+  CROI_TK_FUTEX_WAKE = 97,     // a: user address; b: threads woken
   CROI_TK_MARK = 112,      // a, b: 16 bytes of the marker's choosing
 };
 

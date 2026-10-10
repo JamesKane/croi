@@ -375,6 +375,24 @@ in User/IpcSyscalls.swift):
 - Test-only syscall 6 (`TestHooks.profile`): bind to / report a deadline
   context a self-test provides, until profiles are objects.
 
+Futexes and timers (K7c, Kernel/Object/Futex.swift, TimerObject.swift,
+syscalls 90-97 in User/SyncSyscalls.swift):
+- Futexes keyed by (address space, user address) in a 256-bucket table
+  under the scheduler lock, which is the futex lock: a wait reads the
+  word with `UserCopy.wordNoPageIn` (PerCpu.noPageIn: a fault goes to
+  recovery; the wait drops the lock, pages it in and retries), compares
+  and blocks under it. Records are allocated outside the lock and retire
+  when no waiter refers to them (`users`: a woken waiter hasn't run yet
+  when its waker returns), the queue is empty and nobody owns them;
+  `Thread.futex` follows a waiter through requeue. Owners use K7b's
+  `setOwner` (a cycle leaves the futex unowned); wake clears the owner,
+  wake_single_owner hands it to the woken thread. `futex` trace records.
+- Timer objects (22): set arms a per-CPU kernel timer holding a reference
+  (generation numbers ignore stale callbacks; cancel IPIs the arming
+  CPU); slack windows as Zircon's center/early/late; zero slack for a
+  thread on a deadline profile. Not yet: cancel on last handle close; the
+  kernel timer queue's 32-entry limit (NO_RESOURCES).
+
 ACPI (`Kernel/Acpi/`, after Zircon's acpi_lite): `AcpiTables` validates
 RSDP/XSDT and finds tables by signature; `withPhysicalBytes` reads through
 the physmap or a temporary mapping. `Madt.forEachCpu` yields local APIC /

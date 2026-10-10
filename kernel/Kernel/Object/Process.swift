@@ -354,7 +354,16 @@ enum Processes {
         }
         object.retain()  // the scheduler thread's
         do throws(VmError) {
-            _ = try Scheduler.spawn("user", extendedState: true, userThreadEntry, object.address)  // detached
+            let handle = try Scheduler.spawn("user", extendedState: true, userThreadEntry, object.address)
+            // Linked now, not when it first runs: from here on it can be
+            // named as a futex owner or killed. (It may already have run
+            // and exited: then it stays unlinked.)
+            object.header.lock.withLock {
+                if thread.pointee.state == .running, thread.pointee.thread == 0 {
+                    thread.pointee.thread = handle.thread.address
+                }
+            }
+            _ = consume handle  // detached
         } catch {
             object.header.lock.withLock { thread.pointee.state = .dead }
             object.updateSignals(clear: 0, set: Signals.taskTerminated)

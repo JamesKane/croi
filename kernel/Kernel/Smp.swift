@@ -31,6 +31,9 @@ struct PerCpu: ~Copyable {
     /// The frame of the interrupt this CPU is handling, or 0 (samplers read
     /// it; user memory isn't paged in while it is set).
     var interruptFrame: UInt64 = 0
+    /// A user access that must not page memory in (futex reads under the
+    /// scheduler lock): a fault goes straight to recovery.
+    var noPageIn = false
     /// Generation of this CPU's live sampling timer, or 0 (Sampler).
     var samplerArmed: UInt64 = 0
     var samplerTimer: UInt32 = 0

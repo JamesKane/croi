@@ -79,4 +79,5 @@ enum ObjectType: UInt32 {
     case eventpair = 16
     case job = 17
     case vmar = 18
+    case timer = 22
 }

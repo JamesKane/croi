@@ -87,6 +87,8 @@ struct Thread: ~Copyable {
     /// interruptible waits end at once. Blocked in one now.
     var killPending = false
     var interruptible = false
+    /// The futex record it waits on (moved by requeue), or 0.
+    var futex: UInt64 = 0
     /// Its name in trace records: task << 12 | thread; kernel threads are
     /// task 0, idle threads 0.
     var traceId: UInt32 = 0

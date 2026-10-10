@@ -112,6 +112,7 @@ enum Objects {
         case .vmar: Processes.destroyVmar(object)
         case .channel: Channels.destroy(object)
         case .eventpair: Channels.destroyEventPair(object)
+        case .timer: free(object, as: TimerObject.self)
         case .none: panic("object: destroying an untyped object")
         }
         live.subtract(1, ordering: .relaxed)
