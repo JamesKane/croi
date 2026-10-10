@@ -22,6 +22,7 @@ add_library(kernel-swift OBJECT
   Kernel/User/TaskSyscalls.swift
   Kernel/User/IpcSyscalls.swift
   Kernel/User/SyncSyscalls.swift
+  Kernel/User/ExceptionSyscalls.swift
   Kernel/User/Vdso.swift
   Kernel/User/VdsoSelfTest.swift
   Kernel/User/FpSelfTest.swift
@@ -36,6 +37,7 @@ add_library(kernel-swift OBJECT
   Kernel/Object/Channel.swift
   Kernel/Object/Futex.swift
   Kernel/Object/TimerObject.swift
+  Kernel/Object/Exception.swift
   Kernel/Object/ProcessSelfTest.swift
   Kernel/Object/VmoObject.swift
   Kernel/Object/ObjectSelfTest.swift

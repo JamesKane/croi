@@ -17,6 +17,7 @@ enum Status: Int32, Error, Equatable {
     case peerClosed = -24
     case notFound = -25
     case alreadyExists = -26
+    case alreadyBound = -27
     case accessDenied = -30
 }
 
@@ -80,4 +81,5 @@ enum ObjectType: UInt32 {
     case job = 17
     case vmar = 18
     case timer = 22
+    case exception = 29
 }

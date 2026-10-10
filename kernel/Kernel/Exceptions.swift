@@ -80,6 +80,16 @@ func arch_exception(_ frame: UnsafeMutablePointer<arch_exception_frame_t>) {
 enum ExceptionFrame {
     #if arch(x86_64)
     static func isBreakpoint(_ f: arch_exception_frame_t) -> Bool { f.vector == 3 }
+    /// A user exception's Zircon type (K7d).
+    static func exceptionType(_ f: arch_exception_frame_t) -> UInt32 {
+        switch f.vector {
+        case 14: UInt32(CROI_EXCP_FATAL_PAGE_FAULT)
+        case 6: UInt32(CROI_EXCP_UNDEFINED_INSTRUCTION)
+        case 3: UInt32(CROI_EXCP_SW_BREAKPOINT)
+        case 17: UInt32(CROI_EXCP_UNALIGNED_ACCESS)
+        default: UInt32(CROI_EXCP_GENERAL)
+        }
+    }
     static func pageFault(_ f: arch_exception_frame_t) -> PageFault? {
         guard f.vector == 14 else { return nil }  // #PF: CR2 and the error code
         return PageFault(address: arch_read_cr2(), write: f.error_code & 2 != 0, execute: f.error_code & 16 != 0,
@@ -172,6 +182,16 @@ enum ExceptionFrame {
     static func exceptionClass(_ f: arch_exception_frame_t) -> UInt64 { (f.esr >> 26) & 0x3F }
 
     /// Synchronous exception from the current EL (SP_ELx) with EC = BRK.
+    /// A user exception's Zircon type (K7d), from ESR_EL1's class.
+    static func exceptionType(_ f: arch_exception_frame_t) -> UInt32 {
+        switch (f.esr >> 26) & 0x3F {
+        case 0x20, 0x24: UInt32(CROI_EXCP_FATAL_PAGE_FAULT)       // instruction / data abort, lower EL
+        case 0x00: UInt32(CROI_EXCP_UNDEFINED_INSTRUCTION)
+        case 0x3C: UInt32(CROI_EXCP_SW_BREAKPOINT)                // BRK
+        case 0x22, 0x26: UInt32(CROI_EXCP_UNALIGNED_ACCESS)       // PC / SP alignment
+        default: UInt32(CROI_EXCP_GENERAL)
+        }
+    }
     static func isBreakpoint(_ f: arch_exception_frame_t) -> Bool {
         f.slot == 4 && exceptionClass(f) == 0x3C
     }
@@ -277,6 +297,16 @@ enum ExceptionFrame {
 
     #elseif arch(riscv64)
     static func isBreakpoint(_ f: arch_exception_frame_t) -> Bool { f.scause == 3 && f.overflow == 0 }
+    /// A user exception's Zircon type (K7d), from scause.
+    static func exceptionType(_ f: arch_exception_frame_t) -> UInt32 {
+        switch f.scause {
+        case 12, 13, 15: UInt32(CROI_EXCP_FATAL_PAGE_FAULT)
+        case 2: UInt32(CROI_EXCP_UNDEFINED_INSTRUCTION)
+        case 3: UInt32(CROI_EXCP_SW_BREAKPOINT)
+        case 0, 4, 6: UInt32(CROI_EXCP_UNALIGNED_ACCESS)
+        default: UInt32(CROI_EXCP_GENERAL)
+        }
+    }
     static func pageFault(_ f: arch_exception_frame_t) -> PageFault? {
         guard f.overflow == 0, f.scause == 12 || f.scause == 13 || f.scause == 15 else { return nil }
         return PageFault(address: f.stval, write: f.scause == 15, execute: f.scause == 12)

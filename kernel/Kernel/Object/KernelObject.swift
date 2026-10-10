@@ -113,6 +113,7 @@ enum Objects {
         case .channel: Channels.destroy(object)
         case .eventpair: Channels.destroyEventPair(object)
         case .timer: free(object, as: TimerObject.self)
+        case .exception: Exceptions.destroy(object)
         case .none: panic("object: destroying an untyped object")
         }
         live.subtract(1, ordering: .relaxed)

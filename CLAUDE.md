@@ -341,7 +341,7 @@ Processes (K7a, Kernel/Object/Process.swift, include/task.h, syscalls
   waits: object/port waits, nanosleep: `block(interruptible: true)`) end
   with `.interrupted`, a running thread is preempted, and every return to
   user mode (`UserTraps.leaving`) exits a marked thread. Return codes
-  -1024 (killed) and -1025 (exception). Kernel-only waits stay
+  -1024 (killed), -1026 (policy) and -1028 (exception), Zircon's. Kernel-only waits stay
   uninterruptible.
 - VMARs wrap K4 regions (`UserAspace.withView`); `vmar_map` and friends
   pack handle | options << 32 into one register (six argument
@@ -387,11 +387,39 @@ syscalls 90-97 in User/SyncSyscalls.swift):
   `Thread.futex` follows a waiter through requeue. Owners use K7b's
   `setOwner` (a cycle leaves the futex unowned); wake clears the owner,
   wake_single_owner hands it to the woken thread. `futex` trace records.
+- Out-pointer checks (`Syscalls.check`) ask the address space whether
+  writable mappings cover the range (`UserAspace.covers`): nothing is
+  read or written, so any size works and a concurrent user write isn't
+  clobbered; the copy out still recovers from faults.
 - Timer objects (22): set arms a per-CPU kernel timer holding a reference
   (generation numbers ignore stale callbacks; cancel IPIs the arming
   CPU); slack windows as Zircon's center/early/late; zero slack for a
   thread on a deadline profile. Not yet: cancel on last handle close; the
   kernel timer queue's 32-entry limit (NO_RESOURCES).
+
+Exceptions and job policy (K7d, Kernel/Object/Exception.swift, task.h,
+syscalls 100-107 in User/ExceptionSyscalls.swift):
+- A user fault or exception (`UserTraps.offer`, typed per arch by
+  `ExceptionFrame.exceptionType`) is offered to the thread's, process's,
+  then each job's exception channel up the tree. The kernel keeps its
+  end of each (`task_create_exception_channel`; ALREADY_BOUND while the
+  user end is open); a message is croi_exception_info_t plus a handle to
+  an exception object (29). The faulting thread waits (interruptibly)
+  until the object's last reference goes, then: HANDLED resumes it with
+  whatever `thread_write_state` put in its frame (`ThreadObject.
+  exceptionFrame`, general registers only while in an exception),
+  THREAD_EXIT ends it, TRY_NEXT moves on; unhandled kills the process
+  (-1028). amd64 #BP's IDT gate is DPL 3 so a user int3 is a breakpoint.
+- Job policy (`Policy`): an action per ZX_POL condition in each job,
+  copied to child jobs at creation, settable only while the job has no
+  children (ABSOLUTE refuses conflicts, RELATIVE skips them; NEW_ANY
+  expands to every NEW_*). Creation syscalls check NEW_*; a BAD_HANDLE
+  result checks BAD_HANDLE. KILL marks the process killed and lets the
+  syscall unwind (Swift frames hold references) before the thread exits
+  on its way out; *_EXCEPTION raise POLICY_ERROR first.
+- Not yet: debugger channels, exception reports with fault details,
+  SError delivery to the faulting process, user TLS registers in the
+  thread state.
 
 ACPI (`Kernel/Acpi/`, after Zircon's acpi_lite): `AcpiTables` validates
 RSDP/XSDT and finds tables by signature; `withPhysicalBytes` reads through

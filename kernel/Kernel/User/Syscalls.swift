@@ -33,11 +33,41 @@ enum UserTraps {
                 leaving()
                 return
             }
+            if unsafe offer(frame) { return }
             unsafe killed("page fault", frame.pointee)
             die(killedByFault)
         }
+        if unsafe offer(frame) { return }
         unsafe killed("exception", frame.pointee)
         die(killedByException)
+    }
+
+    /// Offers a fault or exception to the thread's exception handlers (K7d):
+    /// true if one handled it and the thread goes back to user mode
+    /// (perhaps where the handler moved it).
+    private static func offer(_ frame: UnsafeMutablePointer<arch_exception_frame_t>) -> Bool {
+        let type = unsafe ExceptionFrame.exceptionType(frame.pointee)
+        arch_interrupts_enable()
+        let disposition = unsafe Exceptions.raise(type, frame: frame)
+        _ = arch_interrupts_save()
+        switch disposition {
+        case .resume:
+            leaving()
+            return true
+        case .exitThread:
+            arch_interrupts_enable()
+            Processes.exitThread(0)
+        case .unhandled:
+            return false
+        }
+    }
+
+    /// A user thread's registers while it is in the kernel: the frame at
+    /// the top of its kernel stack.
+    static func userFrame(of thread: ThreadPointer) -> UnsafeMutablePointer<arch_exception_frame_t> {
+        let top = thread.pointee.stack.top
+        return unsafe UnsafeMutablePointer<arch_exception_frame_t>(
+            bitPattern: UInt(top) - UInt(MemoryLayout<arch_exception_frame_t>.stride))!
     }
 
     /// On every way back to user mode: a killed thread exits instead.
@@ -147,6 +177,7 @@ enum Syscalls {
                 try objectCall(number, a, handles)
             }
         } catch {
+            if error == .badHandle { try? Policy.check(UInt32(CROI_POL_BAD_HANDLE)) }  // the result stays BAD_HANDLE
             return Int64(error.rawValue)
         }
     }
@@ -179,9 +210,11 @@ enum Syscalls {
             try Observers.waitAsync(table, handle, port: UInt32(truncatingIfNeeded: a[1]), key: a[2],
                                     signals: UInt32(truncatingIfNeeded: a[3]), options: UInt32(truncatingIfNeeded: a[4]))
         case 30:  // event_create
+            try Policy.check(UInt32(CROI_POL_NEW_EVENT))
             try check(a[1], MemoryLayout<UInt32>.size)
             try put(try table.add(try EventObject.create(), rights: EventObject.defaultRights), a[1])
         case 31:  // port_create
+            try Policy.check(UInt32(CROI_POL_NEW_PORT))
             try check(a[1], MemoryLayout<UInt32>.size)
             try put(try table.add(try Ports.create(), rights: PortObject.defaultRights), a[1])
         case 32:  // port_queue
@@ -193,6 +226,7 @@ enum Syscalls {
         case 34:  // port_cancel
             try Ports.cancel(table, port: handle, source: UInt32(truncatingIfNeeded: a[1]), key: a[2])
         case 40:  // vmo_create
+            try Policy.check(UInt32(CROI_POL_NEW_VMO))
             try check(a[2], MemoryLayout<UInt32>.size)
             try put(try table.add(try VmoObject.create(size: a[0]), rights: VmoObject.defaultRights), a[2])
         case 41:  // vmo_read
@@ -231,6 +265,8 @@ enum Syscalls {
             try pmuConfigure(table, handle, a)
         case 60...79:
             try taskCall(number, a, table)
+        case 100...109:
+            try exceptionCall(number, a, table)
         case 80...89:
             try ipcCall(number, a, table)
         case 90...99:
@@ -287,17 +323,16 @@ enum Syscalls {
 
     /// Checks an out-pointer is writable before doing anything (so a bad
     /// pointer doesn't leave a handle created that nobody can close).
+    /// Checks an out-pointer is writable user memory before acting, so a
+    /// bad pointer fails the call before it changes anything (the copy
+    /// out still recovers from faults). Asks the address space's mappings:
+    /// nothing is read or written, so any size works.
     static func check(_ address: UInt64, _ size: Int) throws(Status) {
-        guard UserLayout.contains(address & ~(KernelLayout.pageSize - 1), KernelLayout.pageSize) else {
+        guard size > 0 else { return }
+        guard let aspace = Scheduler.current.pointee.aspace,
+              UserAspace.borrowing(aspace).covers(address, size: UInt64(size), rights: .write) else {
             throw .invalidArgs
         }
-        guard size <= 64 else { panic("syscalls: out-parameter larger than the probe") }
-        var probe = InlineArray<64, UInt8>(repeating: 0)
-        var span = probe.mutableSpan
-        let read = span.withUnsafeMutableBufferPointer { unsafe UserCopy.from($0.baseAddress!, address, UInt64(size)) }
-        guard read == 0 else { throw .invalidArgs }
-        let written = probe.span.withUnsafeBufferPointer { unsafe UserCopy.to(address, $0.baseAddress!, UInt64(size)) }
-        guard written == 0 else { throw .invalidArgs }
     }
 
     private static func getPacket(_ address: UInt64) throws(Status) -> PortPacket {

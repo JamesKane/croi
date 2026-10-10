@@ -67,6 +67,15 @@ enum : uint64_t {
   CROI_SYS_TIMER_CREATE = 95,      // (options: CROI_TIMER_SLACK_*, clock_id 0, out)
   CROI_SYS_TIMER_SET = 96,         // (timer, deadline, slack)
   CROI_SYS_TIMER_CANCEL = 97,      // (timer)
+  // Exceptions and job policy (K7d): Zircon's.
+  CROI_SYS_TASK_CREATE_EXCEPTION_CHANNEL = 100,  // (task, options, out)
+  CROI_SYS_EXCEPTION_GET_THREAD = 101,   // (exception, out)
+  CROI_SYS_EXCEPTION_GET_PROCESS = 102,  // (exception, out)
+  CROI_SYS_OBJECT_GET_PROPERTY = 103,    // (handle, property, value, size)
+  CROI_SYS_OBJECT_SET_PROPERTY = 104,    // (handle, property, value, size)
+  CROI_SYS_THREAD_READ_STATE = 105,      // (thread, kind, buffer, size): while in an exception
+  CROI_SYS_THREAD_WRITE_STATE = 106,     // (thread, kind, buffer, size)
+  CROI_SYS_JOB_SET_POLICY = 107,         // (job, options, topic 0, croi_policy_basic_t *, count)
 };
 
 enum : uint32_t {  // timer_create options (Zircon's ZX_TIMER_SLACK_*)

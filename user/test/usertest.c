@@ -318,8 +318,8 @@ static int64_t return_code(uint32_t process) {
   return info.return_code;
 }
 
-static uint32_t spawn_child(const startup_t *s, uint32_t job, uint64_t submode) {
-  uint32_t process = 0, vmar = 0, thread = 0, stack = 0, self = 0;
+static uint32_t make_child(const startup_t *s, uint32_t job, uint32_t *thread_out) {
+  uint32_t process = 0, vmar = 0, thread = 0, stack = 0;
   uint64_t at = 0;
   CHECK(80, sys6(CROI_SYS_PROCESS_CREATE, job, (uint64_t)"child", 5, 0, (uint64_t)&process, (uint64_t)&vmar) == 0);
   uint64_t code = vmar | (uint64_t)(CROI_VM_PERM_READ | CROI_VM_PERM_EXECUTE | CROI_VM_SPECIFIC) << 32;
@@ -331,11 +331,23 @@ static uint32_t spawn_child(const startup_t *s, uint32_t job, uint64_t submode) 
   sys(CROI_SYS_HANDLE_CLOSE, stack, 0, 0, 0, 0);
   sys(CROI_SYS_HANDLE_CLOSE, vmar, 0, 0, 0, 0);
   CHECK(84, sys6(CROI_SYS_THREAD_CREATE, process, (uint64_t)"main", 4, 0, (uint64_t)&thread, 0) == 0);
+  *thread_out = thread;
+  return process;
+}
+
+static void start_child(uint32_t process, uint32_t thread, uint64_t submode) {
+  uint32_t self = 0;
   CHECK(85, sys(CROI_SYS_HANDLE_DUPLICATE, process, RIGHT_SAME, (uint64_t)&self, 0, 0) == 0);
   CHECK(86, sys6(CROI_SYS_PROCESS_START, process, thread, CHILD_CODE, CHILD_STACK + STACK_SIZE, self, submode) == 0);
   CHECK(79, sys6(CROI_SYS_PROCESS_START, process, thread, CHILD_CODE, CHILD_STACK + STACK_SIZE, 0, submode) ==
                 ERR_BAD_STATE);  // only once
   sys(CROI_SYS_HANDLE_CLOSE, thread, 0, 0, 0, 0);
+}
+
+static uint32_t spawn_child(const startup_t *s, uint32_t job, uint64_t submode) {
+  uint32_t thread = 0;
+  uint32_t process = make_child(s, job, &thread);
+  start_child(process, thread, submode);
   return process;
 }
 
@@ -368,8 +380,38 @@ static int64_t child(uint32_t self, uint64_t submode, uint64_t vdso) {
     sys(CROI_SYS_NANOSLEEP, now_ns() + 3000000, 0, 0, 0, 0);
     return sys(CROI_SYS_PROCESS_EXIT, 7, 0, 0, 0, 0);
   }
+  case 5:  // fault, for a handler to move us (to recovered)
+    *(volatile uint64_t *)0x10 = 1;
+    return 96;
+  case 6: {  // under a job policy: channels denied, bad handles kill
+    uint32_t a = 0, b = 0;
+    if (sys(CROI_SYS_CHANNEL_CREATE, 0, (uint64_t)&a, (uint64_t)&b, 0, 0) != ERR_ACCESS_DENIED) return 55;
+    sys(CROI_SYS_HANDLE_CLOSE, 0x12340003, 0, 0, 0, 0);
+    return 56;  // survived the kill
+  }
+  case 7:  // a breakpoint
+#if defined(__x86_64__)
+    __asm__ volatile("int3");
+#elif defined(__aarch64__)
+    __asm__ volatile("brk #0");
+#elif defined(__riscv)
+    __asm__ volatile("ebreak");
+#endif
+    return 95;
+  case 8: {  // NEW_EVENT is DENY_EXCEPTION: a handler sees it, the call is denied
+    uint32_t event = 0;
+    return sys(CROI_SYS_PROCESS_EXIT, sys(CROI_SYS_EVENT_CREATE, 0, (uint64_t)&event, 0, 0, 0) == ERR_ACCESS_DENIED ? 60 : 61,
+               0, 0, 0, 0);
+  }
   }
   return 97;
+}
+
+// Where a handler moves a faulting child: exits with value + 1.
+__attribute__((noinline)) static void recovered(uint64_t value) {
+  sys(CROI_SYS_PROCESS_EXIT, value + 1, 0, 0, 0, 0);
+  for (;;) {
+  }
 }
 
 static int64_t processes(const startup_t *s) {
@@ -712,6 +754,153 @@ static int64_t sync_objects(const startup_t *s) {
   return 0x600D;
 }
 
+// Mode 9: exceptions and job policy (K7d), as a process.
+#define ERR_ALREADY_BOUND (-27)
+#define ERR_ALREADY_EXISTS (-26)
+
+// Takes one exception from `channel`: checks its type and process, and
+// either passes it on (state < 0: TRY_NEXT), or sets `state` (moving the
+// thread to recovered(value) when HANDLED).
+static void handle_exception(uint32_t channel, uint32_t process, uint32_t type, int state, uint64_t value) {
+  croi_exception_info_t info = {};
+  uint32_t exception = 0, actual[2] = {0, 0};
+  CHECK(185, wait_for(channel, CROI_SIGNAL_READABLE, 5000000000ull) & CROI_SIGNAL_READABLE);
+  CHECK(186, chan_read(channel, &info, &exception, sizeof info, 1, actual) == 0 && actual[0] == sizeof info &&
+                 actual[1] == 1);
+  CHECK(187, info.type == type && info.pid == koid_of(process));
+  if (state < 0) {
+    sys(CROI_SYS_HANDLE_CLOSE, exception, 0, 0, 0, 0);
+    return;
+  }
+  if (state == CROI_EXCEPTION_STATE_HANDLED) {
+    uint32_t thread = 0;
+    croi_thread_state_general_regs_t regs;
+    CHECK(188, sys(CROI_SYS_EXCEPTION_GET_THREAD, exception, (uint64_t)&thread, 0, 0, 0) == 0 &&
+                   sys(CROI_SYS_THREAD_READ_STATE, thread, CROI_THREAD_STATE_GENERAL_REGS, (uint64_t)&regs, sizeof regs, 0) == 0);
+#if defined(__x86_64__)
+    regs.rip = (uint64_t)recovered;
+    regs.rdi = value;
+    regs.rsp = (regs.rsp & ~15ull) - 8;
+#elif defined(__aarch64__)
+    regs.pc = (uint64_t)recovered;
+    regs.r[0] = value;
+    regs.sp &= ~15ull;
+#elif defined(__riscv)
+    regs.pc = (uint64_t)recovered;
+    regs.x[9] = value;  // a0
+    regs.x[1] &= ~15ull;  // sp
+#endif
+    CHECK(189, sys(CROI_SYS_THREAD_WRITE_STATE, thread, CROI_THREAD_STATE_GENERAL_REGS, (uint64_t)&regs, sizeof regs, 0) == 0);
+    sys(CROI_SYS_HANDLE_CLOSE, thread, 0, 0, 0, 0);
+  }
+  uint32_t value32 = (uint32_t)state;
+  CHECK(184, sys(CROI_SYS_OBJECT_SET_PROPERTY, exception, CROI_PROP_EXCEPTION_STATE, (uint64_t)&value32, 4, 0) == 0);
+  sys(CROI_SYS_HANDLE_CLOSE, exception, 0, 0, 0, 0);
+}
+
+static uint32_t exception_channel(uint32_t task) {
+  uint32_t channel = 0;
+  CHECK(183, sys(CROI_SYS_TASK_CREATE_EXCEPTION_CHANNEL, task, 0, (uint64_t)&channel, 0, 0) == 0);
+  return channel;
+}
+
+static int64_t finished(uint32_t process) {
+  CHECK(182, wait_for(process, CROI_SIGNAL_TASK_TERMINATED, 5000000000ull) & CROI_SIGNAL_TASK_TERMINATED);
+  int64_t code = return_code(process);
+  sys(CROI_SYS_HANDLE_CLOSE, process, 0, 0, 0, 0);
+  return code;
+}
+
+static int64_t exceptions(const startup_t *s) {
+  uint32_t thread = 0, channel = 0, other = 0;
+
+  // A process's handler moves the faulting thread on.
+  uint32_t process = make_child(s, s->job, &thread);
+  channel = exception_channel(process);
+  CHECK(190, sys(CROI_SYS_TASK_CREATE_EXCEPTION_CHANNEL, process, 0, (uint64_t)&other, 0, 0) == ERR_ALREADY_BOUND);
+  start_child(process, thread, 5);
+  handle_exception(channel, process, CROI_EXCP_FATAL_PAGE_FAULT, CROI_EXCEPTION_STATE_HANDLED, 77);
+  CHECK(191, finished(process) == 78);
+  sys(CROI_SYS_HANDLE_CLOSE, channel, 0, 0, 0, 0);
+
+  // Order: the process's channel passes it on, the job's takes it.
+  uint32_t job = 0;
+  CHECK(192, sys(CROI_SYS_JOB_CREATE, s->job, 0, (uint64_t)&job, 0, 0) == 0);
+  uint32_t job_channel = exception_channel(job);
+  process = make_child(s, job, &thread);
+  channel = exception_channel(process);
+  start_child(process, thread, 5);
+  handle_exception(channel, process, CROI_EXCP_FATAL_PAGE_FAULT, -1, 0);
+  handle_exception(job_channel, process, CROI_EXCP_FATAL_PAGE_FAULT, CROI_EXCEPTION_STATE_HANDLED, 80);
+  CHECK(193, finished(process) == 81);
+  sys(CROI_SYS_HANDLE_CLOSE, channel, 0, 0, 0, 0);
+
+  // A breakpoint; then THREAD_EXIT (its only thread: the process ends, 0).
+  process = make_child(s, job, &thread);
+  channel = exception_channel(process);
+  start_child(process, thread, 7);
+  handle_exception(channel, process, CROI_EXCP_SW_BREAKPOINT, CROI_EXCEPTION_STATE_HANDLED, 90);
+  CHECK(194, finished(process) == 91);
+  sys(CROI_SYS_HANDLE_CLOSE, channel, 0, 0, 0, 0);
+  process = make_child(s, job, &thread);
+  channel = exception_channel(process);
+  start_child(process, thread, 5);
+  handle_exception(channel, process, CROI_EXCP_FATAL_PAGE_FAULT, -1, 0);  // process: next
+  handle_exception(job_channel, process, CROI_EXCP_FATAL_PAGE_FAULT, CROI_EXCEPTION_STATE_THREAD_EXIT, 0);
+  CHECK(195, finished(process) == 0);
+  sys(CROI_SYS_HANDLE_CLOSE, channel, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, job_channel, 0, 0, 0, 0);
+
+  // No handler listening (its channel closed): the exception kills.
+  process = make_child(s, job, &thread);
+  channel = exception_channel(process);
+  sys(CROI_SYS_HANDLE_CLOSE, channel, 0, 0, 0, 0);
+  start_child(process, thread, 5);
+  CHECK(196, finished(process) == CROI_TASK_RETCODE_EXCEPTION_KILL);
+  sys(CROI_SYS_HANDLE_CLOSE, job, 0, 0, 0, 0);
+
+  // Job policy: channels denied, a bad handle kills; inherited by a child
+  // job; fixed once the job has children; ABSOLUTE conflicts refused.
+  uint32_t strict = 0, inner = 0;
+  CHECK(197, sys(CROI_SYS_JOB_CREATE, s->job, 0, (uint64_t)&strict, 0, 0) == 0);
+  croi_policy_basic_t policy[2] = {{CROI_POL_NEW_CHANNEL, CROI_POL_ACTION_DENY},
+                                   {CROI_POL_BAD_HANDLE, CROI_POL_ACTION_KILL}};
+  CHECK(198, sys(CROI_SYS_JOB_SET_POLICY, strict, CROI_JOB_POL_ABSOLUTE, 0, (uint64_t)policy, 2) == 0);
+  croi_policy_basic_t conflict = {CROI_POL_NEW_CHANNEL, CROI_POL_ACTION_KILL};
+  CHECK(199, sys(CROI_SYS_JOB_SET_POLICY, strict, CROI_JOB_POL_ABSOLUTE, 0, (uint64_t)&conflict, 1) == ERR_ALREADY_EXISTS &&
+                 sys(CROI_SYS_JOB_SET_POLICY, strict, CROI_JOB_POL_RELATIVE, 0, (uint64_t)&conflict, 1) == 0);
+  CHECK(200, sys(CROI_SYS_JOB_CREATE, strict, 0, (uint64_t)&inner, 0, 0) == 0);
+  CHECK(201, sys(CROI_SYS_JOB_SET_POLICY, strict, CROI_JOB_POL_RELATIVE, 0, (uint64_t)policy, 2) == ERR_BAD_STATE);
+  process = spawn_child(s, strict, 6);
+  CHECK(202, finished(process) == CROI_TASK_RETCODE_POLICY_KILL);
+  process = spawn_child(s, inner, 6);
+  CHECK(203, finished(process) == CROI_TASK_RETCODE_POLICY_KILL);
+  sys(CROI_SYS_HANDLE_CLOSE, inner, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, strict, 0, 0, 0, 0);
+
+  // DENY_EXCEPTION: a POLICY_ERROR exception, then the call is denied.
+  uint32_t watched = 0;
+  CHECK(204, sys(CROI_SYS_JOB_CREATE, s->job, 0, (uint64_t)&watched, 0, 0) == 0);
+  croi_policy_basic_t events = {CROI_POL_NEW_EVENT, CROI_POL_ACTION_DENY_EXCEPTION};
+  CHECK(205, sys(CROI_SYS_JOB_SET_POLICY, watched, CROI_JOB_POL_ABSOLUTE, 0, (uint64_t)&events, 1) == 0);
+  job_channel = exception_channel(watched);
+  process = spawn_child(s, watched, 8);
+  uint32_t resume = CROI_EXCEPTION_STATE_HANDLED;
+  {
+    croi_exception_info_t info = {};
+    uint32_t exception = 0, actual[2] = {0, 0};
+    CHECK(206, (wait_for(job_channel, CROI_SIGNAL_READABLE, 5000000000ull) & CROI_SIGNAL_READABLE) &&
+                   chan_read(job_channel, &info, &exception, sizeof info, 1, actual) == 0 &&
+                   info.type == CROI_EXCP_POLICY_ERROR);
+    sys(CROI_SYS_OBJECT_SET_PROPERTY, exception, CROI_PROP_EXCEPTION_STATE, (uint64_t)&resume, 4, 0);
+    sys(CROI_SYS_HANDLE_CLOSE, exception, 0, 0, 0, 0);
+  }
+  CHECK(207, finished(process) == 60);
+  sys(CROI_SYS_HANDLE_CLOSE, job_channel, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, watched, 0, 0, 0, 0);
+  return 0x600D;
+}
+
 // Mode 4: something to sample. Three frames deep, spin for `ns`, with a
 // clock syscall every 64 iterations (so some samples land in the kernel
 // and must continue into these frames).
@@ -749,6 +938,7 @@ __attribute__((section(".text.start"))) [[noreturn]] void _start(uint64_t mode, 
             : mode == 6 ? processes((const startup_t *)handle)
             : mode == 7 ? ipc((const startup_t *)handle)
             : mode == 8 ? sync_objects((const startup_t *)handle)
+            : mode == 9 ? exceptions((const startup_t *)handle)
             : mode >= 0x400 ? child((uint32_t)mode, handle, vdso_base)
                         : objects());
 }

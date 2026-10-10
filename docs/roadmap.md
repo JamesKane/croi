@@ -262,8 +262,10 @@ calls with kernel txids, peer closed), eventpairs, object_get_info, the
 (`croi_flow_id` in ipc.h), and IPC deadline donation (ext 2) through
 owned call queues. **K7c done**: futexes (wait/wake/requeue,
 owners with inheritance, wake_single_owner, get_owner) and timer objects
-with slack (zero for deadline profiles). Next: K7d (exceptions, job
-policy).
+with slack (zero for deadline profiles). **K7d done**: exception channels (thread,
+process, job chain; HANDLED with rewritten registers, TRY_NEXT,
+THREAD_EXIT) and job policy (deny, kill, exceptions, inheritance).
+**K7 is complete.** Next: K8 (userboot and bootfs).
 
 - Channel, event, eventpair, port, timer (absolute deadline plus slack), and
   futex with an owner for PI.

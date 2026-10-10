@@ -16,6 +16,7 @@ extension Syscalls {
             let job = try Processes.createJob(parent: parent.object)
             try put(try table.add(job, rights: JobObject.defaultRights), a[2])
         case 61:  // process_create(job, name, name_len, options, out_process, out_vmar)
+            try Policy.check(UInt32(CROI_POL_NEW_PROCESS))
             guard a[3] == 0 else { throw .invalidArgs }
             try checkName(a[1], a[2])
             try check(a[4], 4)

@@ -125,6 +125,23 @@ enum ProcessSelfTest {
         _ = consume context
     }
 
+    /// K7d (mode 9): exception channels (process, then job; HANDLED with
+    /// registers rewritten, TRY_NEXT, THREAD_EXIT, none listening) and job
+    /// policy (deny, kill, inheritance, fixed once populated, exceptions).
+    static func runExceptions(_ console: Uart) {
+        let before = Counts()
+        let exitCode = runInProcess(mode: 9)
+        guard exitCode == 0x600D else {
+            console.write("  excp:   user program failed check ")
+            console.write(decimal: UInt64(bitPattern: exitCode))
+            console.write("\n")
+            panic("exception self-test: user side")
+        }
+        before.expectUnchanged(console)
+        console.write("  excp:   exception channels (process then job, registers rewritten, try-next, thread exit, ")
+        console.write("unhandled kill), job policy (deny, kill, inherited, fixed once populated, policy exceptions)\n")
+    }
+
     /// Live processes, address spaces and objects, to check nothing leaked.
     struct Counts {
         let processes = Processes.live.load(ordering: .relaxed)

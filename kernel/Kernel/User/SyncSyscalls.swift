@@ -21,6 +21,7 @@ extension Syscalls {
             try check(a[1], 8)
             try put(try Futexes.owner(a[0]), a[1])
         case 95:  // timer_create(options, clock_id, out)
+            try Policy.check(UInt32(CROI_POL_NEW_TIMER))
             guard a[1] == 0 else { throw .invalidArgs }  // ZX_CLOCK_MONOTONIC
             try check(a[2], 4)
             let timer = try TimerObjects.create(slackPolicy: UInt32(truncatingIfNeeded: a[0]))

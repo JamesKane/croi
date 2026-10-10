@@ -309,6 +309,22 @@ struct UserAspace: ~Copyable {
         try unmap(base, size: size)
     }
 
+    /// Whether mappings with at least `rights` cover all of
+    /// [base, base+size) (syscalls check out-pointers before acting).
+    func covers(_ base: UInt64, size: UInt64, rights: VmRights) -> Bool {
+        guard size > 0, UserLayout.contains(base, size) else { return false }
+        return record.pointee.lock.withLock { () -> Bool in
+            guard !record.pointee.dead else { return false }
+            var covered: UInt64 = 0
+            for i in 0..<record.pointee.mappings.count where record.pointee.mappings[i].overlaps(base, size) {
+                let m = record.pointee.mappings[i]
+                guard m.rights.isSuperset(of: rights) else { return false }
+                covered += min(m.base + m.size, base + size) - max(m.base, base)
+            }
+            return covered == size
+        }
+    }
+
     /// Changes the rights of everything mapped in [base, base+size), which
     /// must be mapped throughout; mappings are split at the edges.
     func protect(_ base: UInt64, size: UInt64, rights: VmRights) throws(VmError) {
@@ -618,6 +634,13 @@ extension UserAspace {
 /// A running thread's own address space, borrowed for a syscall.
 struct BorrowedAspace {
     let record: UserAspacePointer
+
+    func covers(_ base: UInt64, size: UInt64, rights: VmRights) -> Bool {
+        let view = UserAspace.view(record)
+        let result = view.covers(base, size: size, rights: rights)
+        view.forget()
+        return result
+    }
 
     /// `UserAspace.map` in the root region (vmo_map, until VMARs).
     func mapKeeping(_ vmo: borrowing Vmo, offset: UInt64, size: UInt64, rights: VmRights) throws(VmError) -> UInt64 {

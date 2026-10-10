@@ -10,6 +10,7 @@ extension Syscalls {
         let handle = UInt32(truncatingIfNeeded: a[0])
         switch number {
         case 80:  // channel_create(options, out0, out1)
+            try Policy.check(UInt32(CROI_POL_NEW_CHANNEL))
             guard a[0] == 0 else { throw .invalidArgs }
             try check(a[1], 4)
             try check(a[2], 4)
@@ -67,6 +68,7 @@ extension Syscalls {
             }
             try deliver(reply, to: table, bytes: args.rd_bytes, handles: args.rd_handles)
         case 84:  // eventpair_create(options, out0, out1)
+            try Policy.check(UInt32(CROI_POL_NEW_EVENTPAIR))
             guard a[0] == 0 else { throw .invalidArgs }
             try check(a[1], 4)
             try check(a[2], 4)

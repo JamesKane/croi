@@ -25,6 +25,10 @@ struct JobObject: ~Copyable {
     /// Child processes and jobs (not retained: each removes itself).
     var children = UniqueArray<UInt64>()
     var dead = false
+    /// The kernel's end of its exception channel (retained), or 0.
+    var exceptionChannel: UInt64 = 0
+    /// Job policy: an action per condition (CROI_POL_*), from the parent.
+    var policy = InlineArray<16, UInt8>(repeating: 0)
 
     static var defaultRights: Rights {
         [.basic, .read, .write, .getProperty, .setProperty, .getPolicy, .setPolicy, .enumerate, .destroy, .signal,
@@ -63,6 +67,8 @@ struct ProcessObject: ~Copyable {
     var returnCode: Int64 = 0
     /// Trace records name its threads task << 12 | index.
     let taskId: UInt32
+    /// The kernel's end of its exception channel (retained), or 0.
+    var exceptionChannel: UInt64 = 0
 
     static var defaultRights: Rights {
         [.basic, .read, .write, .getProperty, .setProperty, .enumerate, .destroy, .signal, .manageProcess,
@@ -97,6 +103,11 @@ struct ThreadObject: ~Copyable {
     var sp: UInt64 = 0
     var arg0: UInt64 = 0
     var arg1: UInt64 = 0
+    /// The kernel's end of its exception channel (retained), or 0.
+    var exceptionChannel: UInt64 = 0
+    /// Its user registers while it waits in an exception (an
+    /// arch_exception_frame_t), for thread_read_state/write_state; else 0.
+    var exceptionFrame: UInt64 = 0
 
     static var defaultRights: Rights {
         [.basic, .read, .write, .getProperty, .setProperty, .destroy, .signal, .manageThread]
@@ -149,7 +160,8 @@ struct VmarObject: ~Copyable {
 /// Return codes of processes the kernel ended (Zircon's).
 enum TaskReturnCode {
     static var syscallKill: Int64 { -1024 }
-    static var exceptionKill: Int64 { -1025 }
+    static var policyKill: Int64 { -1026 }
+    static var exceptionKill: Int64 { -1028 }
 }
 
 // MARK: Operations
@@ -173,6 +185,8 @@ enum Processes {
             parent.release()
             throw .noMemory
         }
+        let inherited = parent.header.lock.withLock { parentJob.pointee.policy }
+        JobPointer(object: job).pointee.policy = inherited
         let added = parent.header.lock.withLock { () -> Bool in
             guard !parentJob.pointee.dead else { return false }
             parentJob.pointee.children.append(job.address)
@@ -188,6 +202,7 @@ enum Processes {
     /// The job's record is going (Objects.destroy).
     static func destroyJob(_ object: ObjectPointer) {
         let job = JobPointer(object: object)
+        Exceptions.releaseChannel(job.pointee.exceptionChannel)
         if let parent = job.pointee.parent {
             removeChild(object, from: parent)
             parent.release()
@@ -276,11 +291,15 @@ enum Processes {
         let process = ProcessPointer(object: object)
         var handles: HandleTable? = nil
         var aspace: UserAspace? = nil
+        var channel: UInt64 = 0
         object.header.lock.withLock {
             process.pointee.state = .dead
             handles = process.pointee.handles.take()
             aspace = process.pointee.aspace.take()
+            channel = process.pointee.exceptionChannel
+            process.pointee.exceptionChannel = 0
         }
+        Exceptions.releaseChannel(channel)
         _ = handles.take()  // closes every handle
         if let record = aspace?.record {
             // Threads that exited before the last one may not have left yet
@@ -319,6 +338,7 @@ enum Processes {
 
     static func destroyThread(_ object: ObjectPointer) {
         let thread = ThreadObjectPointer(object: object)
+        Exceptions.releaseChannel(thread.pointee.exceptionChannel)
         let process = thread.pointee.process
         process.header.lock.withLock {
             let p = ProcessPointer(object: process)

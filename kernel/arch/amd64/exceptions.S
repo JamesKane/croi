@@ -209,7 +209,8 @@ arch_syscall_init:
 .type arch_init_exceptions, @function
 arch_init_exceptions:
     // IDT: 256 interrupt gates (present, DPL 0, type 0xE) to the stubs.
-    // NMI (2), #DF (8) and #MC (18) switch to IST1.
+    // NMI (2), #DF (8) and #MC (18) switch to IST1. #BP (3) is DPL 3, so
+    // a user int3 is a breakpoint exception rather than a #GP (K7d).
     lea     idt(%rip), %rdi
     lea     isr_stubs(%rip), %rsi
     xor     %ecx, %ecx
@@ -227,7 +228,10 @@ arch_init_exceptions:
     or      %r8b, %dl
     movb    %dl, 4(%rdi)            // IST index
     movb    $0x8e, 5(%rdi)
-    shr     $16, %rax
+    cmp     $3, %ecx
+    jne     2f
+    movb    $0xee, 5(%rdi)          // DPL 3
+2:  shr     $16, %rax
     movw    %ax, 6(%rdi)            // offset 31:16
     shr     $16, %rax
     movl    %eax, 8(%rdi)           // offset 63:32

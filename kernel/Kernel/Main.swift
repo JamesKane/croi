@@ -282,6 +282,7 @@ func kernel_main_continue() -> Never {
         ProcessSelfTest.run(console)
         ProcessSelfTest.runIpc(console)
         ProcessSelfTest.runSync(console)
+        ProcessSelfTest.runExceptions(console)
         SelfTestDeadman.done.store(true, ordering: .relaxed)
     } else {
         console.write("  cpus:   no ACPI tables; boot cpu only\n")
