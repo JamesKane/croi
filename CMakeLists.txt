@@ -96,6 +96,19 @@ if(CROI_ARCH STREQUAL amd64 AND EXISTS /dev/kvm)
   set_tests_properties(boot-smoke-kvm PROPERTIES TIMEOUT 120)
 endif()
 
+# Self-tests off, as Todhchai boots (K9f): user space must still come up.
+set(_esp_lean ${CMAKE_BINARY_DIR}/esp-lean)
+file(CONFIGURE OUTPUT ${CMAKE_BINARY_DIR}/cmdline-lean
+     CONTENT "${CROI_CMDLINE} userboot.next=${CROI_USERBOOT_NEXT} croi.selftest=off\n")
+add_custom_target(esp-lean ALL
+  COMMAND ${CMAKE_COMMAND} -E copy_directory ${CROI_ESP_DIR} ${_esp_lean}
+  COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_BINARY_DIR}/cmdline-lean ${_esp_lean}/croi/cmdline
+  DEPENDS esp)
+add_test(NAME boot-lean
+  COMMAND ${CROI_QEMU} --test "${CROI_BOOT_DONE}"
+          ${CROI_ARCH} ${_esp_lean} ${CMAKE_BINARY_DIR}/qemu-lean ${CROI_EDK2_DIR})
+set_tests_properties(boot-lean PROPERTIES TIMEOUT 120)
+
 if(CROI_ARCH STREQUAL arm64)
   # The DBG2 console path (QEMU's SPCR can't be turned off): an ESP whose
   # command line makes the loader try DBG2 first.

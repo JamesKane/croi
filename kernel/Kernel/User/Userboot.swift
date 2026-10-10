@@ -12,6 +12,17 @@ import Fmt
 /// `userboot.next=` in bootfs and starts it.
 enum Userboot {
     static func start(_ console: Uart) {
+        // Kernel entry to user space (monotonic time starts at entry):
+        // Todhchai's console budget, 100 ms, holds with self-tests off.
+        let now = Clock.now()
+        console.write("  boot:   userboot starting ")
+        console.write(decimal: now / 1_000_000)
+        console.write(" ms after kernel entry\n")
+        if SelfTests.enabled {
+            Budgets.report(console, "boot.userboot_start_selftests", now)
+        } else {
+            Budgets.report(console, "boot.userboot_start", now, target: 100_000_000)
+        }
         guard bootHandoff.bootfs != 0, bootHandoff.bootfs_size != 0 else {
             console.write("  userboot: no bootfs, not starting user space\n")
             return

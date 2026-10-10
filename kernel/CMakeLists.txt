@@ -70,6 +70,7 @@ add_library(kernel-swift OBJECT
   Kernel/Sched/DeadlineSelfTest.swift
   Kernel/SpinLock.swift
   Kernel/Trace/Trace.swift
+  Kernel/Trace/Budgets.swift
   Kernel/Trace/Sampler.swift
   Kernel/Trace/Pmu.swift
   Kernel/Trace/PmuSelfTest.swift

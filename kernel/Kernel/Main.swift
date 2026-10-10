@@ -20,6 +20,7 @@ private var archName: StaticString {
 /// arch start code on the boot stack, still on the loader's page tables.
 @c @implementation
 func kernel_main(_ handoffAddress: UInt64) -> Never {
+    Clock.markEntry()  // monotonic time counts from here
     // The boot page tables identity map RAM, so the handoff is readable at
     // its physical address. Nothing to report to if it's bad: just stop.
     guard handoffAddress != 0 else { arch_halt() }
@@ -96,6 +97,7 @@ func kernel_main(_ handoffAddress: UInt64) -> Never {
     }
     reportMemory(allocator, to: console)
     BootOptions.capture(handoff)  // before the handoff memory is reclaimed
+    SelfTests.configure()
     BootData.build(handoff, &allocator)
     console.write("  boot:   cmdline \"")
     BootOptions.write(to: console)
@@ -103,7 +105,7 @@ func kernel_main(_ handoffAddress: UInt64) -> Never {
     console.write(decimal: handoff.bootfs_size)
     console.write(" bytes at ")
     console.write(hex: handoff.bootfs)
-    console.write("\n")
+    console.write(SelfTests.enabled ? "\n" : "; self-tests off (croi.selftest=off)\n")
 
     // The PMM takes over all RAM; then the loader's handoff data and boot
     // page tables are released. `handoff` (a copy) stays usable.
@@ -112,7 +114,7 @@ func kernel_main(_ handoffAddress: UInt64) -> Never {
     } catch {
         panic(error == .tooManyArenas ? "pmm: too many arenas" : "pmm: no memory for page arrays")
     }
-    pmmSelfTest()
+    if SelfTests.enabled { pmmSelfTest() }
     let reclaimed = pmm.endHandoff(allocator)
     console.write("  pmm:    ")
     console.write(decimal: (pmm.totalPages * KernelLayout.pageSize) >> 20)
@@ -124,12 +126,14 @@ func kernel_main(_ handoffAddress: UInt64) -> Never {
     console.write(decimal: reclaimed)
     console.write(" handoff pages reclaimed)\n")
 
-    heapSelfTest()
-    swiftAllocationSelfTest()
-    refSelfTest()
-    spinLockSelfTest()
-    console.write("  heap:   slabs + large pages; UniqueBox, UniqueArray and Ref allocate and free\n")
-    console.write("  locks:  spinlocks mask interrupts, nest, release on throw; pmm and heap locked\n")
+    if SelfTests.enabled {
+        heapSelfTest()
+        swiftAllocationSelfTest()
+        refSelfTest()
+        spinLockSelfTest()
+        console.write("  heap:   slabs + large pages; UniqueBox, UniqueArray and Ref allocate and free\n")
+        console.write("  locks:  spinlocks mask interrupts, nest, release on throw; pmm and heap locked\n")
+    }
 
     // Leave the boot stack (in .bss, unguarded) for a guarded KernelStack.
     kernelAspace.adopt(rootLow: tables.rootLow, rootHigh: tables.rootHigh)
@@ -162,14 +166,14 @@ func kernel_main_continue() -> Never {
     if let acpi { RiscvIsa.writeBootIsa(acpi, to: console) }
     console.write(PageTableFormat.svpbmt ? " (Svpbmt in use)\n" : " (no Svpbmt: PMAs decide memory types)\n")
     #endif
-    vmSelfTest()
-    console.write("  vm:     kernel aspace at ")
-    console.write(hex: KernelLayout.dynamicBase)
-    console.write("; guards, protect, large-page split, table reclaim\n")
-
-    framebufferSelfTest(console)
-
-    kernelStackSelfTest()
+    if SelfTests.enabled {
+        vmSelfTest()
+        console.write("  vm:     kernel aspace at ")
+        console.write(hex: KernelLayout.dynamicBase)
+        console.write("; guards, protect, large-page split, table reclaim\n")
+        framebufferSelfTest(console)
+        kernelStackSelfTest()
+    }
     console.write("  stacks: boot thread on a guarded stack at ")
     console.write(hex: bootThreadStack.base)
     console.write("\n")
@@ -213,18 +217,20 @@ func kernel_main_continue() -> Never {
         console.write(" online (boot cpu ")
         console.write(hex: bootHardwareId)
         console.write(")\n")
-        guard SmpSelfTest.run() else { panic("smp self-test: identity or lock contention") }
-        console.write("  smp:    per-CPU identity ok; ")
-        console.write(decimal: UInt64(online * SmpSelfTest.iterations))
-        console.write(" contended lock increments, none lost\n")
-        ipiSelfTest(expecting: online - 1, console)
-        timeSelfTest(others: online - 1, console)
-        cpuStacksSelfTest(console)
-        ppttSelfTest()
-        watchdogSelfTest()
-        #if arch(arm64)
-        sErrorSelfTest()
-        #endif
+        if SelfTests.enabled {
+            guard SmpSelfTest.run() else { panic("smp self-test: identity or lock contention") }
+            console.write("  smp:    per-CPU identity ok; ")
+            console.write(decimal: UInt64(online * SmpSelfTest.iterations))
+            console.write(" contended lock increments, none lost\n")
+            ipiSelfTest(expecting: online - 1, console)
+            timeSelfTest(others: online - 1, console)
+            cpuStacksSelfTest(console)
+            ppttSelfTest()
+            watchdogSelfTest()
+            #if arch(arm64)
+            sErrorSelfTest()
+            #endif
+        }
         console.write("  wdog:   ")
         if BootOptions.has("croi.watchdog=off") {
             console.write("off (croi.watchdog=off)\n")
@@ -254,7 +260,7 @@ func kernel_main_continue() -> Never {
         Jit.initialize()
         VmoCache.initialize(acpi)
         ExtendedState.initialize(acpi)
-        ExtendedStateSelfTest.run(console)
+        if SelfTests.enabled { ExtendedStateSelfTest.run(console) }
 
         // From here on the boot code is the "bootstrap" thread.
         unsafe Scheduler.initializeBootCpu(stack: UnsafePointer<PerCpu>(bitPattern: UInt(Smp.records[0]))!.pointee.stack)
@@ -263,40 +269,50 @@ func kernel_main_continue() -> Never {
         DebugLog.initialize()
         SharedPages.initialize()
         Vdso.initialize()
-        SelfTestDeadman.arm()
-        SchedulerSelfTest.run(console)
-        ExtendedStateSelfTest.threads()
-        MutexSelfTest.run(console)
-        DeadlineSelfTest.run(console)
-        TraceSelfTest.run(console)
-        AspaceSelfTest.run(console)
-        VmoSelfTest.run(console)
-        RegionSelfTest.run(console)
-        PhysicalSelfTest.run(console)
-        AccountSelfTest.run(console)
-        JitSelfTest.run(console)
-        ObjectSelfTest.run(console)
-        PortSelfTest.run(console)
-        ResourceSelfTest.run(console)
-        UserSelfTest.run(console)
-        SyscallSelfTest.run(console)
-        VdsoSelfTest.run(console)
-        FpSelfTest.run(console)
-        SamplerSelfTest.run(console)
-        PmuSelfTest.run(console)
-        ProcessSelfTest.run(console)
-        ProcessSelfTest.runIpc(console)
-        ProcessSelfTest.runSync(console)
-        ProcessSelfTest.runExceptions(console)
-        ProcessSelfTest.runDrivers(console)
-        ProcessSelfTest.runInterrupts(console)
-        ProcessSelfTest.runDma(console)
-        ProgramSelfTest.run(console)
-        SelfTestDeadman.done.store(true, ordering: .relaxed)
+        if SelfTests.enabled { runSelfTests(console) }
     } else {
         console.write("  cpus:   no ACPI tables; boot cpu only\n")
     }
+    finishBoot(console)
+}
 
+/// The self-test suite that needs the scheduler and objects (skipped with
+/// croi.selftest=off).
+private func runSelfTests(_ console: Uart) {
+    SelfTestDeadman.arm()
+    SchedulerSelfTest.run(console)
+    ExtendedStateSelfTest.threads()
+    MutexSelfTest.run(console)
+    DeadlineSelfTest.run(console)
+    TraceSelfTest.run(console)
+    AspaceSelfTest.run(console)
+    VmoSelfTest.run(console)
+    RegionSelfTest.run(console)
+    PhysicalSelfTest.run(console)
+    AccountSelfTest.run(console)
+    JitSelfTest.run(console)
+    ObjectSelfTest.run(console)
+    PortSelfTest.run(console)
+    ResourceSelfTest.run(console)
+    UserSelfTest.run(console)
+    SyscallSelfTest.run(console)
+    VdsoSelfTest.run(console)
+    FpSelfTest.run(console)
+    SamplerSelfTest.run(console)
+    PmuSelfTest.run(console)
+    ProcessSelfTest.run(console)
+    ProcessSelfTest.runIpc(console)
+    ProcessSelfTest.runSync(console)
+    ProcessSelfTest.runExceptions(console)
+    ProcessSelfTest.runDrivers(console)
+    ProcessSelfTest.runInterrupts(console)
+    ProcessSelfTest.runDma(console)
+    ProgramSelfTest.run(console)
+    SelfTestDeadman.done.store(true, ordering: .relaxed)
+}
+
+/// The end of boot: a last check, then user space.
+private func finishBoot(_ console: Uart) -> Never {
     // Exception round trip: take a breakpoint and resume after it.
     arch_breakpoint()
     guard breakpointsHandled == 1 else { panic("breakpoint did not round-trip") }

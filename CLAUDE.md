@@ -36,6 +36,34 @@ One CMake/Ninja tree per arch, `build/<arch>/`. Toolchain is pinned by
 QEMU uses the edk2 firmware in `/usr/share/edk2` (`-DCROI_EDK2_DIR=` to
 override); `build/<arch>/esp/` is served to it as a FAT drive.
 
+## Timing discipline (after Todhchai's docs/performance.md)
+
+Tests judge correctness; timings are judged by the bench, against this
+machine's history:
+
+    tools/bench.py                      # 5 KVM boots x (full, lean): report
+    tools/bench.py --record             # on a committed tree, quiet machine
+    tools/bench.py --compare <commit>   # this tree vs a commit, interleaved
+
+- Every budget is a `budget name=... value=... unit=... [limit=...]
+  [target=...]` line (kernel `Budgets.report`, m2). Limits fail a boot
+  only with `croi.enforce_budgets=1` on the command line and real timing
+  (`-DCROI_CMDLINE=`, on a quiet machine); otherwise they are reported.
+- The bench takes medians, judges each against the median of the last 5
+  recorded runs in `bench/history/<host>.tsv` (a rise past both the
+  rule's fraction and its floor regresses; RULES in tools/bench.py), and
+  writes `bench/out/report.md` with every boot's console in
+  `bench/out/logs/`. Advisory here (this is a shared machine: other
+  agents, QEMU sessions, Todhchai's builds); `--enforce` only on a quiet,
+  dedicated one. `--record` refuses a busy machine (load above a quarter
+  of the CPUs), a dirty tree, or a regression without `--accept`.
+- A regression is fixed or accepted in the open (roadmap), never
+  silently; a limit is never loosened in the change that would fail it.
+- Before calling something a regression, compare interleaved
+  (`--compare`): sequential runs on this machine mostly measure the
+  machine (K9d: channel_call read 1.4-2.2 us for unchanged code, even
+  at low load average).
+
 ## Layout
 
 - `boot/`     UEFI loader. Linked as an ELF static PIE, converted to PE32+
@@ -503,9 +531,10 @@ include/profile.h):
 - `bin/m2` is userboot.next (CROI_USERBOOT_NEXT): channel pair, a VMO
   passed across, a port wait with a deadline timer, debuglog output; then
   it measures the budgets from the trace (user marks via TRACE_OP_RINGS, 4:
-  each CPU's ring as a read/map-only VMO) and enforces them when
-  `croi_timing_is_real()` (user/lib/runtime/timing.c: CPUID hypervisor
-  signature isn't TCG), i.e. in `boot-smoke-kvm`. KVM: null 32-36 ns,
+  each CPU's ring as a read/map-only VMO) and reports them as `budget`
+  lines (K9f: enforced only with `croi.enforce_budgets=1` where
+  `croi_timing_is_real()`, user/lib/runtime/timing.c; see "Timing
+  discipline"). KVM: null 32-36 ns,
   channel_call ~1.4 µs (target 1 µs, enforced against 1.6 µs for now),
   port wake median ~1.75 µs (p99 noisy, not enforced), wake error p99
   27-46 µs. Measure wake error with `Sys.now()` directly: converting trace
@@ -695,6 +724,25 @@ syscalls 150-156; Todhchai item 14 without an IOMMU):
   depend on where pages land. Not covered: quarantine through process
   death, and a BTI dying with PMTs quarantined.
 
+Boot budgets, K9f (Kernel/Trace/Budgets.swift, BootOptions.swift's
+`SelfTests`, tools/bench.py):
+- `croi.selftest=off` skips the self-test suite (early PMM/heap/VM/SMP
+  tests, the framebuffer pattern, everything after the scheduler is up;
+  the APs skip their lock-contention run). Todhchai boots with it;
+  croi's ctest keeps it on, and `boot-lean` (every arch) boots with it.
+- Monotonic time counts from kernel entry (`Clock.markEntry`, the first
+  line of kernel_main; the counter there is the clock's base), so a
+  timestamp is time since entry. `Userboot.start` reports
+  `boot.userboot_start` (KVM, self-tests off: ~80 ms, target 100 ms for
+  Todhchai's first console frame) or `boot.userboot_start_selftests`
+  (~2.1 s).
+- Spawn to main: userboot reads the clock before process_create and puts
+  `croi.spawn_ns=<ns>` in the next program's environment; m2 reports
+  `process.spawn_to_main` from the first line of main. KVM: 0.8-1 ms,
+  target 200 µs, not yet broken down (userboot's loader path).
+- `irq.wait_wake_median` (target 5 µs, a hardware budget; ~12 µs under
+  KVM, where the wakeup IPI exits).
+
 ACPI (`Kernel/Acpi/`, after Zircon's acpi_lite): `AcpiTables` validates
 RSDP/XSDT and finds tables by signature; `withPhysicalBytes` reads through
 the physmap or a temporary mapping. `Madt.forEachCpu` yields local APIC /
@@ -860,10 +908,10 @@ initialize lazily and would add a guard) is one relaxed load and a branch;
 arguments are evaluated only when on. `stop()` clears the mask and waits
 for each CPU's `traceWriting` flag (seq_cst on both sides, no IPI).
 Categories now: `sched` (switch, wake with the waker, block, preempt with a
-reason, migrate, overrun) and `irq` (enter/exit). The self-test enforces
-an enabled event < 30 ns only when not emulated (CPUID hypervisor
-signature isn't TCG): `boot-smoke-kvm` (amd64, when /dev/kvm exists) runs
-it, ~19 ns today. amd64 `arch_percpu` is a %gs-relative load of the
+reason, migrate, overrun) and `irq` (enter/exit). The self-test reports
+an enabled event's cost (budget `trace.probe_enabled`, limit 30 ns,
+enforced as "Timing discipline" says; `Budgets.timingIsReal` is the
+CPUID check), ~18 ns under KVM. amd64 `arch_percpu` is a %gs-relative load of the
 record's `self` field (CROI_PERCPU_SELF), not rdmsr; GS points at a
 zeroed dummy record until a CPU has its own.
 

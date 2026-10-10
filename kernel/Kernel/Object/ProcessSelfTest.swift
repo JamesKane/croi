@@ -192,6 +192,8 @@ enum ProcessSelfTest {
         console.write(" by port and by wait, on CPU 1), wait wake ")
         console.write(decimal: Syscalls.reported.load(ordering: .relaxed) / 1000)
         console.write(" us median\n")
+        // Todhchai's budget is for hardware: under KVM the wakeup IPI exits.
+        Budgets.report(console, "irq.wait_wake_median", Syscalls.reported.load(ordering: .relaxed), target: 5_000)
         #if arch(x86_64)
         console.write("  msi:    allocations and info; where present, edu's MSI by port and by wait and a virtio ")
         console.write("MSI-X table's entries programmed, masked, moved to CPU 1, cleared\n")

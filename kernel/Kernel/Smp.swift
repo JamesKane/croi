@@ -194,7 +194,7 @@ func kernel_ap_main(_ percpu: UInt64) -> Never {
     if unsafe Cpu.current == record.pointee.number && hardwareOk {
         results |= SmpSelfTest.identity
     }
-    SmpSelfTest.contend()
+    if SelfTests.enabled { SmpSelfTest.contend() }
     results |= SmpSelfTest.contended
     unsafe record.pointee.checkedIn.store(results, ordering: .releasing)
 

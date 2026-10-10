@@ -1,6 +1,15 @@
 import CHandoff
 import Fmt
 
+/// Whether boot runs the self-test suite (K9f): on unless the command line
+/// says `croi.selftest=off`, which Todhchai's boots do (the suite takes
+/// most of a boot). croi's own tests keep it on.
+enum SelfTests {
+    nonisolated(unsafe) private(set) static var enabled = true
+
+    static func configure() { enabled = !BootOptions.has("croi.selftest=off") }
+}
+
 /// The kernel command line (`\croi\cmdline`), copied out of the handoff
 /// before the PMM reclaims it. ASCII; at most `capacity` bytes are kept.
 enum BootOptions {

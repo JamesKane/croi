@@ -70,6 +70,9 @@ struct Userboot {
 
         var process: UInt32 = 0
         var vmar: UInt32 = 0
+        // Spawn to main (Todhchai's 200 µs budget) starts here; the program
+        // gets the time as croi.spawn_ns= in its environment.
+        let spawned = UInt64(bitPattern: sys(UInt64(CROI_SYS_CLOCK_MONOTONIC)))
         try call("creating its process", next.span.withUnsafeBytes { name in
             sys(CROI_SYS_PROCESS_CREATE, UInt64(job), UInt64(UInt(bitPattern: name.baseAddress)), UInt64(name.count), 0,
                 address(&process), address(&vmar))
@@ -123,7 +126,7 @@ struct Userboot {
                 infos.append(info)
             }
         }
-        let message = processArgs(infos: infos, name: next)
+        let message = processArgs(infos: infos, name: next, spawned: spawned)
         var ours: UInt32 = 0
         var theirs: UInt32 = 0
         try call("creating its bootstrap channel", sys(CROI_SYS_CHANNEL_CREATE, 0, address(&ours), address(&theirs)))
@@ -180,7 +183,7 @@ struct Userboot {
 
     /// The processargs message (processargs.h): header, handle infos,
     /// argv[0] (the program's bootfs name), then userboot's environment.
-    static func processArgs(infos: [UInt32], name: [UInt8]) -> [UInt8] {
+    static func processArgs(infos: [UInt32], name: [UInt8], spawned: UInt64) -> [UInt8] {
         let header = MemoryLayout<croi_proc_args_t>.size
         var environment: [UInt8] = []
         for i in 0..<croi_environ_count() {
@@ -189,6 +192,9 @@ struct Userboot {
             for j in 0..<length { environment.append(unsafe UInt8(bitPattern: entry[j])) }
             environment.append(0)
         }
+        environment.append(contentsOf: bytes("croi.spawn_ns="))
+        environment.append(contentsOf: decimal(spawned))
+        environment.append(0)
         var args = croi_proc_args_t()
         args.protocol = UInt32(CROI_PROCARGS_PROTOCOL)
         args.version = UInt32(CROI_PROCARGS_VERSION)
@@ -196,7 +202,7 @@ struct Userboot {
         args.args_off = UInt32(header + 4 * infos.count)
         args.args_num = 1
         args.environ_off = args.args_off + UInt32(name.count + 1)
-        args.environ_num = UInt32(croi_environ_count())
+        args.environ_num = UInt32(croi_environ_count()) + 1
         var message: [UInt8] = []
         withUnsafeBytes(of: &args) { raw in
             for i in 0..<raw.count { message.append(unsafe raw[i]) }
@@ -208,6 +214,17 @@ struct Userboot {
         message.append(0)
         message.append(contentsOf: environment)
         return message
+    }
+
+    /// `value` in decimal ASCII.
+    static func decimal(_ value: UInt64) -> [UInt8] {
+        var digits: [UInt8] = []
+        var v = value
+        repeat {
+            digits.append(UInt8(ascii: "0") + UInt8(v % 10))
+            v /= 10
+        } while v != 0
+        return digits.reversed()
     }
 
     /// The rest of the environment string that starts with `prefix`.

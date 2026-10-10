@@ -2,8 +2,10 @@ import _Volatile
 import CKernel
 import PageTables
 
-/// The monotonic clock: nanoseconds since `initialize`, from each arch's
-/// free-running counter (amd64 TSC, arm64 CNTVCT_EL0, rv64 `time`).
+/// The monotonic clock: nanoseconds since kernel entry (K9f: so boot
+/// budgets, such as entry to the first console frame, read straight off
+/// it), from each arch's free-running counter (amd64 TSC, arm64
+/// CNTVCT_EL0, rv64 `time`).
 ///
 /// The conversion lives in a croi_time_page_t (time.h) so user space can
 /// read the clock without a syscall once K6 maps the page; the kernel uses
@@ -12,11 +14,16 @@ enum Clock {
     nonisolated(unsafe) private(set) static var frequency: UInt64 = 0
     nonisolated(unsafe) private(set) static var source: StaticString = "none"
     nonisolated(unsafe) private static var base: UInt64 = 0
+    /// The counter at kernel entry, the clock's zero.
+    nonisolated(unsafe) private static var entry: UInt64 = 0
     nonisolated(unsafe) private static var mult: UInt64 = 0
     /// Physical address of the time page (for mapping into user space).
     nonisolated(unsafe) private(set) static var timePage: UInt64 = 0
 
-    /// Finds the counter frequency and starts the clock at 0. Interrupts
+    /// Notes the counter at kernel entry (the first thing kernel_main does).
+    static func markEntry() { entry = arch_counter_read() }
+
+    /// Finds the counter frequency; the clock reads 0 at kernel entry. Interrupts
     /// should be masked (calibration on amd64 times a short interval).
     static func initialize(_ acpi: AcpiTables) -> Bool {
         let kind: UInt32
@@ -35,7 +42,7 @@ enum Clock {
         #endif
         guard frequency > 0, frequency < 1 << 40 else { return false }
         mult = (1_000_000_000 << 32) / frequency
-        base = arch_counter_read()
+        base = entry != 0 ? entry : arch_counter_read()
 
         guard let page = pmm.allocatePage(.wired) else { return false }
         timePage = page

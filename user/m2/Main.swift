@@ -4,8 +4,10 @@ import CroiRuntime
 /// It checks what userboot handed on, then: creates a channel pair, passes
 /// a VMO across it, waits on a port with a deadline timer, and prints over
 /// debuglog. Then it measures the kernel and IPC budgets (Todhchai
-/// performance.md §2) from croi's trace, and enforces them where timing is
-/// real (KVM or hardware; under TCG it only reports).
+/// performance.md §2) from croi's trace and prints each as a `budget`
+/// line (kernel/Kernel/Trace/Budgets.swift's format) for tools/bench.py.
+/// Limits fail it only where timing is real (KVM or hardware) and the
+/// command line says croi.enforce_budgets=1 (a quiet machine).
 @main
 struct M2 {
     static var budgets: (nullSyscall: UInt64, channelCall: UInt64, portWake: UInt64, wakeErrorP99: UInt64) {
@@ -19,10 +21,11 @@ struct M2 {
     static var channelCallCeiling: UInt64 { 1_600 }
 
     static func main() {
+        let entered = Sys.now()
         do throws(Failure) {
             let (resource, thread) = try startup()
             try exitTest()
-            try measure(resource: resource, thread: thread)
+            try measure(resource: resource, thread: thread, entered: entered)
         } catch {
             Sys.say("m2: ")
             Sys.say(error.what)
@@ -127,23 +130,76 @@ struct M2 {
         print("m2: exit test passed")
     }
 
-    static func measure(resource: UInt32, thread: UInt32) throws(Failure) {
+    /// Spawn to main: userboot's clock reading before process_create
+    /// (croi.spawn_ns=) to the first line of main. A target, not a limit:
+    /// 0.8-1 ms under KVM today (K9f), through userboot's loader, not yet
+    /// broken down. Todhchai's own launcher measures 178 µs on croi.
+    static var spawnToMainTarget: UInt64 { 200_000 }
+
+    static func measure(resource: UInt32, thread: UInt32, entered: UInt64) throws(Failure) {
         let r = try Bench.run(resource: resource, thread: thread)
-        let real = croi_timing_is_real()
         print("m2: null syscall \(r.nullSyscall) ns (budget \(budgets.nullSyscall))")
-        print("m2: channel_call round trip, one core, deadline donation: \(r.channelCall) ns (budget \(budgets.channelCall), enforced \(channelCallCeiling))")
+        print("m2: channel_call round trip, one core, deadline donation: \(r.channelCall) ns (budget \(budgets.channelCall), ceiling \(channelCallCeiling))")
         print("m2: port wake from another core: median \(r.portWakeMedian) ns, p99 \(r.portWakeP99) ns (budget \(budgets.portWake))")
         print("m2: wake error, real-time intent: p99 \(r.wakeErrorP99 / 1000) us (budget \(budgets.wakeErrorP99 / 1000))")
-        guard real else {
-            print("m2: budgets reported, not enforced (emulated)")
+        var missed = 0
+        func budget(_ name: String, _ value: UInt64, limit: UInt64? = nil, target: UInt64? = nil) {
+            var line = "m2: budget name=\(name) value=\(value) unit=ns"
+            if let limit { line += " limit=\(limit)" }
+            if let target { line += " target=\(target)" }
+            print(line)
+            if let limit, value >= limit { missed += 1 }
+        }
+        budget("syscall.null", r.nullSyscall, limit: budgets.nullSyscall)
+        budget("ipc.channel_call", r.channelCall, limit: channelCallCeiling, target: budgets.channelCall)
+        budget("port.wake_median", r.portWakeMedian, limit: budgets.portWake)
+        budget("port.wake_p99", r.portWakeP99)
+        budget("timer.wake_error_p99", r.wakeErrorP99, limit: budgets.wakeErrorP99)
+        if let spawned = environmentNumber("croi.spawn_ns="), entered > spawned {
+            print("m2: spawn to main \((entered - spawned) / 1000) us (budget \(spawnToMainTarget / 1000))")
+            budget("process.spawn_to_main", entered - spawned, target: spawnToMainTarget)
+        }
+        guard croi_timing_is_real(), environmentHas("croi.enforce_budgets=1") else {
+            print(missed == 0 ? "m2: budgets met (reported, not enforced)"
+                              : "m2: \(missed) budget(s) over (reported, not enforced: see tools/bench.py)")
             return
         }
-        var missed = 0
-        if r.nullSyscall >= budgets.nullSyscall { missed += 1 }
-        if r.channelCall >= channelCallCeiling { missed += 1 }
-        if r.portWakeMedian >= budgets.portWake { missed += 1 }
-        if r.wakeErrorP99 >= budgets.wakeErrorP99 { missed += 1 }
         guard missed == 0 else { throw Failure(what: "meeting the budgets", status: Int64(missed)) }
         print(r.channelCall < budgets.channelCall ? "m2: budgets met" : "m2: budgets met, channel_call above target")
+    }
+
+    /// Whether the environment (the kernel command line) has `word`.
+    static func environmentHas(_ word: StaticString) -> Bool {
+        for i in 0..<croi_environ_count() {
+            guard let entry = unsafe croi_environ(i), unsafe strlen(entry) == word.utf8CodeUnitCount else { continue }
+            var same = true
+            for j in 0..<word.utf8CodeUnitCount where unsafe UInt8(bitPattern: entry[j]) != word.utf8Start[j] {
+                same = false
+            }
+            if same { return true }
+        }
+        return false
+    }
+
+    /// The decimal number after `prefix` in an environment string.
+    static func environmentNumber(_ prefix: StaticString) -> UInt64? {
+        for i in 0..<croi_environ_count() {
+            guard let entry = unsafe croi_environ(i) else { continue }
+            let length = unsafe strlen(entry)
+            guard length > prefix.utf8CodeUnitCount else { continue }
+            var same = true
+            for j in 0..<prefix.utf8CodeUnitCount where unsafe UInt8(bitPattern: entry[j]) != prefix.utf8Start[j] {
+                same = false
+            }
+            guard same else { continue }
+            var value: UInt64 = 0
+            for j in prefix.utf8CodeUnitCount..<length {
+                let digit = unsafe UInt8(bitPattern: entry[j]) &- UInt8(ascii: "0")
+                guard digit < 10 else { return nil }
+                value = value * 10 + UInt64(digit)
+            }
+            return value
+        }
+        return nil
     }
 }

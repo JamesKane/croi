@@ -460,7 +460,14 @@ pinned DMA without a driver stack. The boot tests add it.
   recorded trust decision: a debuglog record names the process and BTI
   id. VT-d (first, for the reference machine), AMD-Vi, SMMUv3 and the
   RISC-V IOMMU follow after M3.
-- **K9f: M3's budgets and the rest.** Kernel entry to the text console
+- **K9f: M3's budgets and the rest.** **Done** (2026-10-10), except the
+  SMC resource (after M3): `croi.selftest=off`, monotonic time from
+  kernel entry (userboot at ~80 ms under KVM with self-tests off),
+  spawn to main reported (0.8-1 ms under KVM against 200 µs: a known
+  gap, not yet broken down), and croi's timing discipline after
+  Todhchai's (CLAUDE.md "Timing discipline", tools/bench.py): budgets
+  are reported by the boot and judged by the bench against per-machine
+  history; ctest no longer fails on a busy host. Kernel entry to the text console
   < 100 ms: today every boot runs the whole self-test suite first, so a
   `croi.selftest=` option (off for Todhchai boots, on in croi's tests)
   and a trace mark at userboot start. Spawn to `main` < 200 µs: Todhchai

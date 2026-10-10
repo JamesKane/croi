@@ -21,7 +21,7 @@ enum TraceSelfTest {
         console.write(" ps, on ")
         console.write(decimal: enabled)
         console.write(" ns")
-        console.write(enforcesCost ? " (budget 30 ns enforced)" : " (emulated: budget not enforced)")
+        console.write(Budgets.enforced ? " (budget 30 ns enforced)" : " (budget 30 ns reported)")
         console.write("; ping-pong traced: ")
         console.write(decimal: UInt64(wakes))
         console.write(" wakes, ")
@@ -29,6 +29,7 @@ enum TraceSelfTest {
         console.write(" switches, ")
         console.write(decimal: UInt64(irqs))
         console.write(" irqs; oneshot drops counted, stop stops\n")
+        Budgets.report(console, "trace.probe_enabled", enabled, limit: 30)
     }
 
     // MARK: Cost
@@ -53,26 +54,13 @@ enum TraceSelfTest {
             enabled = min(enabled, (Clock.now() - began) / events)
         }
         Trace.stop()
-        if enforcesCost, enabled >= 30 {
+        if Budgets.enforced, enabled >= 30 {
             console.write("  trace:  enabled probe costs ")
             console.write(decimal: enabled)
             console.write(" ns\n")
             panic("trace self-test: enabled probe over 30 ns")
         }
         return (disabled, enabled)
-    }
-
-    /// Timing means something on hardware or under KVM, not under TCG.
-    static var enforcesCost: Bool {
-        #if arch(x86_64)
-        var regs = InlineArray<4, UInt32>(repeating: 0)
-        var span = regs.mutableSpan
-        span.withUnsafeMutableBufferPointer { unsafe arch_cpuid(0x4000_0000, 0, $0.baseAddress!) }
-        // "TCGTCGTCGTCG" in EBX, ECX, EDX.
-        return !(regs[1] == 0x5447_4354 && regs[2] == 0x4354_4743 && regs[3] == 0x4743_5447)
-        #else
-        return false  // only QEMU's TCG runs these today
-        #endif
     }
 
     // MARK: Contents
