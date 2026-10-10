@@ -160,9 +160,8 @@ enum Ports {
                     record = next
                     return
                 }
-                if Scheduler.block(on: port.pointee.waiters, deadline: deadline) == .timedOut, port.pointee.queued == 0 {
-                    return
-                }
+                let result = Scheduler.block(on: port.pointee.waiters, deadline: deadline, interruptible: true)
+                if result == .interrupted || (result == .timedOut && port.pointee.queued == 0) { return }
             }
         }
         guard let record else { throw .timedOut }

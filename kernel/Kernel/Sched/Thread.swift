@@ -5,7 +5,7 @@ import CKernel
 /// creation every field is protected by the scheduler lock.
 struct Thread: ~Copyable {
     enum State { case ready, running, blocked, dead }
-    enum WaitResult { case woken, timedOut }
+    enum WaitResult { case woken, timedOut, interrupted }
     /// A thread's code. Its return value is the exit code `join` returns.
     typealias Entry = @convention(c) (UInt64) -> Int
 
@@ -81,6 +81,12 @@ struct Thread: ~Copyable {
     var extendedState: UInt64 = 0
     /// Per-thread PMU counters (Pmu.ThreadCounters on the heap), or 0.
     var pmu: UInt64 = 0
+    /// The thread object it runs (K7: a reference it holds), or 0.
+    var object: UInt64 = 0
+    /// Killed (task_kill): it exits on its way back to user mode, and its
+    /// interruptible waits end at once. Blocked in one now.
+    var killPending = false
+    var interruptible = false
     /// Its name in trace records: task << 12 | thread; kernel threads are
     /// task 0, idle threads 0.
     var traceId: UInt32 = 0

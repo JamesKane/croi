@@ -321,6 +321,34 @@ signals and object types, so the ABI matches):
   Zircon) gates `TraceControl` (start, stop, rewind, mark, rings as
   read/map-only VMO handles).
 
+Processes (K7a, Kernel/Object/Process.swift, include/task.h, syscalls
+60-74 in User/TaskSyscalls.swift):
+- Job (17), process (1), thread (2) and VMAR (18) objects, Zircon's
+  rights and TERMINATED signal. A root job at boot. A process owns its
+  `UserAspace` (the vDSO mapped at creation) and `HandleTable`; threads'
+  syscalls use the process's table. Its first thread gets the transferred
+  handle, arg2 and the vDSO base in the first three argument registers
+  (`arch_enter_user` takes three); a C entry on amd64 needs a call-aligned
+  stack (crt-style stub, or start sp at top - 8).
+- Each user scheduler thread holds a reference to its thread object
+  (`Thread.object`), which holds the process. The last running thread
+  tears the process down from its own context: `setAspace(nil)`, close
+  every handle (so a process holding its own handle still dies), wait
+  until earlier exiters have left the address space, destroy it. A
+  process whose threads never ran is torn down by its last reference.
+- Kill (`task_kill`, process_exit, a fault until K7d's exceptions):
+  `Scheduler.interrupt` marks the thread; interruptible waits (syscall
+  waits: object/port waits, nanosleep: `block(interruptible: true)`) end
+  with `.interrupted`, a running thread is preempted, and every return to
+  user mode (`UserTraps.leaving`) exits a marked thread. Return codes
+  -1024 (killed) and -1025 (exception). Kernel-only waits stay
+  uninterruptible.
+- VMARs wrap K4 regions (`UserAspace.withView`); `vmar_map` and friends
+  pack handle | options << 32 into one register (six argument
+  registers). A dead address space refuses operations under its lock
+  (`VmError.dead`). User code has `croi_syscall6`.
+- Lock order: job -> process -> thread object -> scheduler.
+
 ACPI (`Kernel/Acpi/`, after Zircon's acpi_lite): `AcpiTables` validates
 RSDP/XSDT and finds tables by signature; `withPhysicalBytes` reads through
 the physmap or a temporary mapping. `Madt.forEachCpu` yields local APIC /

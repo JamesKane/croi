@@ -12,6 +12,8 @@
 #define ERR_INVALID_ARGS (-10)
 #define ERR_TIMED_OUT (-21)
 #define ERR_ACCESS_DENIED (-30)
+#define ERR_BAD_STATE (-20)
+#define RIGHT_SAME (1u << 31)
 #define SIGNALED (1u << 3)
 #define USER_SIGNAL_0 (1u << 24)
 #define RIGHT_READ (1u << 2)
@@ -24,8 +26,12 @@ static inline int64_t sys(uint64_t n, uint64_t a, uint64_t b, uint64_t c, uint64
   return croi_syscall(n, a, b, c, d, e);
 }
 
+static inline int64_t sys6(uint64_t n, uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e, uint64_t f) {
+  return croi_syscall6(n, a, b, c, d, e, f);
+}
+
 [[noreturn]] static void exit_with(int64_t code) {
-  sys(CROI_SYS_THREAD_EXIT, (uint64_t)code, 0, 0, 0, 0);
+  sys(CROI_SYS_PROCESS_EXIT, (uint64_t)code, 0, 0, 0, 0);
   for (;;) {
   }
 }
@@ -269,6 +275,157 @@ static int64_t pmu(void) {
   return 0x600D;
 }
 
+// Mode 6: processes (K7a). The kernel starts this program as a process and
+// passes a startup block (handles it put in our table). We create children
+// running this program: each gets its own process handle (as a transferred
+// handle, so a process holding itself must still be torn down), runs one
+// submode and ends; we check how. Then a job kill and VMARs.
+typedef struct {
+  uint32_t job, process, vmar, code_vmo;
+  uint64_t code_size;
+} startup_t;
+
+#define CHILD_CODE 0x1000000ull
+#define CHILD_STACK 0x2000000ull
+#define STACK_SIZE 16384ull
+#define ROOT_VMAR_BASE 0x200000ull
+// A thread entered at a C function: on amd64 it expects to have been called.
+#if defined(__x86_64__)
+#define ENTRY_SP(top) ((top) - 8)
+#else
+#define ENTRY_SP(top) (top)
+#endif
+
+static uint64_t now_ns(void) { return (uint64_t)sys(CROI_SYS_CLOCK_MONOTONIC, 0, 0, 0, 0, 0); }
+
+static uint32_t wait_terminated(uint32_t handle) {
+  uint32_t observed = 0;
+  sys(CROI_SYS_OBJECT_WAIT_ONE, handle, CROI_SIGNAL_TASK_TERMINATED, now_ns() + 5000000000ull, (uint64_t)&observed,
+      0);
+  return observed;
+}
+
+static int64_t return_code(uint32_t process) {
+  croi_process_info_t info = {};
+  if (sys(CROI_SYS_PROCESS_INFO, process, (uint64_t)&info, 0, 0, 0) != 0) return 0x7777;
+  if ((info.flags & (CROI_PROCESS_INFO_STARTED | CROI_PROCESS_INFO_EXITED)) !=
+      (CROI_PROCESS_INFO_STARTED | CROI_PROCESS_INFO_EXITED))
+    return 0x7778;
+  return info.return_code;
+}
+
+static uint32_t spawn_child(const startup_t *s, uint32_t job, uint64_t submode) {
+  uint32_t process = 0, vmar = 0, thread = 0, stack = 0, self = 0;
+  uint64_t at = 0;
+  CHECK(80, sys6(CROI_SYS_PROCESS_CREATE, job, (uint64_t)"child", 5, 0, (uint64_t)&process, (uint64_t)&vmar) == 0);
+  uint64_t code = vmar | (uint64_t)(CROI_VM_PERM_READ | CROI_VM_PERM_EXECUTE | CROI_VM_SPECIFIC) << 32;
+  CHECK(81, sys6(CROI_SYS_VMAR_MAP, code, CHILD_CODE - ROOT_VMAR_BASE, s->code_vmo, 0, s->code_size, (uint64_t)&at)
+                    == 0 && at == CHILD_CODE);
+  CHECK(82, sys(CROI_SYS_VMO_CREATE, STACK_SIZE, 0, (uint64_t)&stack, 0, 0) == 0);
+  uint64_t data = vmar | (uint64_t)(CROI_VM_PERM_READ | CROI_VM_PERM_WRITE | CROI_VM_SPECIFIC) << 32;
+  CHECK(83, sys6(CROI_SYS_VMAR_MAP, data, CHILD_STACK - ROOT_VMAR_BASE, stack, 0, STACK_SIZE, (uint64_t)&at) == 0);
+  sys(CROI_SYS_HANDLE_CLOSE, stack, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, vmar, 0, 0, 0, 0);
+  CHECK(84, sys6(CROI_SYS_THREAD_CREATE, process, (uint64_t)"main", 4, 0, (uint64_t)&thread, 0) == 0);
+  CHECK(85, sys(CROI_SYS_HANDLE_DUPLICATE, process, RIGHT_SAME, (uint64_t)&self, 0, 0) == 0);
+  CHECK(86, sys6(CROI_SYS_PROCESS_START, process, thread, CHILD_CODE, CHILD_STACK + STACK_SIZE, self, submode) == 0);
+  CHECK(79, sys6(CROI_SYS_PROCESS_START, process, thread, CHILD_CODE, CHILD_STACK + STACK_SIZE, 0, submode) ==
+                ERR_BAD_STATE);  // only once
+  sys(CROI_SYS_HANDLE_CLOSE, thread, 0, 0, 0, 0);
+  return process;
+}
+
+static void blocker(uint64_t event) {
+  uint32_t observed = 0;
+  sys(CROI_SYS_OBJECT_WAIT_ONE, event, SIGNALED, ~0ull, (uint64_t)&observed, 0);  // until killed
+  sys(CROI_SYS_THREAD_EXIT, 1, 0, 0, 0, 0);
+}
+
+// A child: `self` is its own process handle, `submode` what to do.
+static int64_t child(uint32_t self, uint64_t submode, uint64_t vdso) {
+  switch (submode) {
+  case 1:  // exit with a code, having found the vDSO
+    return sys(CROI_SYS_PROCESS_EXIT, ((const croi_vdso_header_t *)vdso)->magic == CROI_VDSO_MAGIC ? 42 : 99, 0,
+               0, 0, 0);
+  case 2:  // spin until killed
+    for (;;) {
+    }
+  case 3:  // fault: the exception kills the process
+    *(volatile uint64_t *)0x10 = 1;
+    return 98;
+  case 4: {  // a second thread blocked in a wait; process_exit ends it too
+    uint32_t event = 0, thread = 0, stack = 0;
+    uint64_t at = 0;
+    if (sys(CROI_SYS_EVENT_CREATE, 0, (uint64_t)&event, 0, 0, 0) != 0) return 90;
+    if (sys(CROI_SYS_VMO_CREATE, STACK_SIZE, 0, (uint64_t)&stack, 0, 0) != 0) return 91;
+    if (sys(CROI_SYS_VMO_MAP, stack, 0, STACK_SIZE, 3, (uint64_t)&at) != 0) return 92;
+    if (sys6(CROI_SYS_THREAD_CREATE, self, (uint64_t)"blocker", 7, 0, (uint64_t)&thread, 0) != 0) return 93;
+    if (sys(CROI_SYS_THREAD_START, thread, (uint64_t)blocker, ENTRY_SP(at + STACK_SIZE), event, 0) != 0) return 94;
+    sys(CROI_SYS_NANOSLEEP, now_ns() + 3000000, 0, 0, 0, 0);
+    return sys(CROI_SYS_PROCESS_EXIT, 7, 0, 0, 0, 0);
+  }
+  }
+  return 97;
+}
+
+static int64_t processes(const startup_t *s) {
+  uint32_t process = spawn_child(s, s->job, 1);
+  CHECK(87, wait_terminated(process) & CROI_SIGNAL_TASK_TERMINATED);
+  CHECK(88, return_code(process) == 42);
+  uint32_t thread = 0;
+  CHECK(89, sys6(CROI_SYS_THREAD_CREATE, process, 0, 0, 0, (uint64_t)&thread, 0) == ERR_BAD_STATE);
+  sys(CROI_SYS_HANDLE_CLOSE, process, 0, 0, 0, 0);
+
+  process = spawn_child(s, s->job, 2);
+  sys(CROI_SYS_NANOSLEEP, now_ns() + 2000000, 0, 0, 0, 0);
+  CHECK(90, sys(CROI_SYS_TASK_KILL, process, 0, 0, 0, 0) == 0);
+  CHECK(91, (wait_terminated(process) & CROI_SIGNAL_TASK_TERMINATED) &&
+                return_code(process) == CROI_TASK_RETCODE_SYSCALL_KILL);
+  sys(CROI_SYS_HANDLE_CLOSE, process, 0, 0, 0, 0);
+
+  process = spawn_child(s, s->job, 3);
+  CHECK(92, (wait_terminated(process) & CROI_SIGNAL_TASK_TERMINATED) &&
+                return_code(process) == CROI_TASK_RETCODE_EXCEPTION_KILL);
+  sys(CROI_SYS_HANDLE_CLOSE, process, 0, 0, 0, 0);
+
+  process = spawn_child(s, s->job, 4);
+  CHECK(93, (wait_terminated(process) & CROI_SIGNAL_TASK_TERMINATED) && return_code(process) == 7);
+  sys(CROI_SYS_HANDLE_CLOSE, process, 0, 0, 0, 0);
+
+  uint32_t job = 0, vmar = 0;
+  CHECK(94, sys(CROI_SYS_JOB_CREATE, s->job, 0, (uint64_t)&job, 0, 0) == 0);
+  process = spawn_child(s, job, 2);
+  sys(CROI_SYS_NANOSLEEP, now_ns() + 2000000, 0, 0, 0, 0);
+  CHECK(95, sys(CROI_SYS_TASK_KILL, job, 0, 0, 0, 0) == 0);
+  CHECK(96, (wait_terminated(process) & CROI_SIGNAL_TASK_TERMINATED) &&
+                return_code(process) == CROI_TASK_RETCODE_SYSCALL_KILL);
+  sys(CROI_SYS_HANDLE_CLOSE, process, 0, 0, 0, 0);
+  CHECK(97, sys6(CROI_SYS_PROCESS_CREATE, job, 0, 0, 0, (uint64_t)&process, (uint64_t)&vmar) == ERR_BAD_STATE);
+  sys(CROI_SYS_HANDLE_CLOSE, job, 0, 0, 0, 0);
+
+  // VMARs: a sub-region that may map read/write, not execute.
+  uint32_t sub = 0, vmo = 0;
+  uint64_t base = 0, at = 0;
+  uint64_t parent = s->vmar | (uint64_t)(CROI_VM_CAN_MAP_READ | CROI_VM_CAN_MAP_WRITE) << 32;
+  CHECK(98, sys6(CROI_SYS_VMAR_ALLOCATE, parent, 0, 65536, (uint64_t)&sub, (uint64_t)&base, 0) == 0);
+  CHECK(99, sys(CROI_SYS_VMO_CREATE, 8192, 0, (uint64_t)&vmo, 0, 0) == 0);
+  uint64_t rw = sub | (uint64_t)(CROI_VM_PERM_READ | CROI_VM_PERM_WRITE) << 32;
+  CHECK(100, sys6(CROI_SYS_VMAR_MAP, rw, 0, vmo, 0, 8192, (uint64_t)&at) == 0 && at >= base && at < base + 65536);
+  *(volatile uint64_t *)at = 0x1234;
+  CHECK(101, *(volatile uint64_t *)at == 0x1234);
+  uint64_t rx = sub | (uint64_t)(CROI_VM_PERM_READ | CROI_VM_PERM_EXECUTE) << 32;
+  CHECK(102, sys6(CROI_SYS_VMAR_MAP, rx, 0, vmo, 0, 8192, (uint64_t)&at) == ERR_ACCESS_DENIED);
+  CHECK(103, sys(CROI_SYS_VMAR_PROTECT, sub | (uint64_t)CROI_VM_PERM_READ << 32, at, 8192, 0, 0) == 0);
+  CHECK(104, *(volatile uint64_t *)at == 0x1234);
+  CHECK(105, sys(CROI_SYS_VMAR_UNMAP, sub, at, 8192, 0, 0) == 0);
+  CHECK(106, sys(CROI_SYS_VMAR_DESTROY, sub, 0, 0, 0, 0) == 0);
+  CHECK(107, sys6(CROI_SYS_VMAR_MAP, rw, 0, vmo, 0, 8192, (uint64_t)&at) == ERR_BAD_STATE ||
+                 sys6(CROI_SYS_VMAR_MAP, rw, 0, vmo, 0, 8192, (uint64_t)&at) < 0);
+  sys(CROI_SYS_HANDLE_CLOSE, sub, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, vmo, 0, 0, 0, 0);
+  return 0x600D;
+}
+
 // Mode 4: something to sample. Three frames deep, spin for `ns`, with a
 // clock syscall every 64 iterations (so some samples land in the kernel
 // and must continue into these frames).
@@ -294,14 +451,16 @@ __asm__(".section .text.start, \"ax\"\n"
         "  call test_main\n"
         "  ud2\n"
         ".text\n");
-[[noreturn]] __attribute__((used)) void test_main(uint64_t mode, uint64_t handle) {
+[[noreturn]] __attribute__((used)) void test_main(uint64_t mode, uint64_t handle, uint64_t vdso_base) {
 #else
-__attribute__((section(".text.start"))) [[noreturn]] void _start(uint64_t mode, uint64_t handle) {
+__attribute__((section(".text.start"))) [[noreturn]] void _start(uint64_t mode, uint64_t handle, uint64_t vdso_base) {
 #endif
   exit_with(mode == 1   ? marks((uint32_t)handle)
             : mode == 2 ? vdso(handle)
             : mode == 3 ? registers(handle & 0xFFFF, handle >> 16 & 1)
             : mode == 4 ? (spin1(handle) > 2 ? 0x600D : 1)
             : mode == 5 ? pmu()
+            : mode == 6 ? processes((const startup_t *)handle)
+            : mode >= 0x400 ? child((uint32_t)mode, handle, vdso_base)
                         : objects());
 }

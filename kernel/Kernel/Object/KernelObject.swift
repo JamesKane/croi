@@ -93,6 +93,10 @@ enum Objects {
             VmoPointer(address: UnsafeVmoObject(object).vmo).release()
             free(object, as: VmoObject.self)
         case .resource: free(object, as: ResourceObject.self)
+        case .job: Processes.destroyJob(object)
+        case .process: Processes.destroyProcess(object)
+        case .thread: Processes.destroyThread(object)
+        case .vmar: Processes.destroyVmar(object)
         case .none: panic("object: destroying an untyped object")
         }
         live.subtract(1, ordering: .relaxed)

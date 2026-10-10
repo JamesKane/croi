@@ -196,14 +196,15 @@ exception_common_user:
 .type arch_enter_user, %function
 arch_enter_user:
     msr     daifset, #0xf
-    mov     sp, x4
+    mov     sp, x5
     msr     sp_el0, x1
     msr     elr_el1, x0
     msr     spsr_el1, xzr
     msr     tpidrro_el0, xzr
     mov     x0, x2
     mov     x1, x3
-    .irp n, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30
+    mov     x2, x4
+    .irp n, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30
     mov     x\n, xzr
     .endr
     eret

@@ -292,6 +292,7 @@ struct UserAspace: ~Copyable {
               UserLayout.contains(base, size) else { throw .invalidArgument }
         var released = UniqueArray<UInt64>()
         try record.pointee.lock.withLock { () throws(VmError) in
+            guard !record.pointee.dead else { throw .dead }
             try removeMappings(base, size, collecting: &released)
         }
         release(released)
@@ -314,6 +315,7 @@ struct UserAspace: ~Copyable {
         guard base % KernelLayout.pageSize == 0, size % KernelLayout.pageSize == 0, size > 0,
               UserLayout.contains(base, size) else { throw .invalidArgument }
         try record.pointee.lock.withLock { () throws(VmError) in
+            guard !record.pointee.dead else { throw .dead }
             var covered: UInt64 = 0
             for i in 0..<record.pointee.mappings.count where record.pointee.mappings[i].overlaps(base, size) {
                 let m = record.pointee.mappings[i]
@@ -345,6 +347,7 @@ struct UserAspace: ~Copyable {
     }
 
     private func region(_ id: UInt32) throws(VmError) -> Region {
+        guard !record.pointee.dead else { throw .dead }
         if id == Self.root {
             return Region(id: 0, base: UserLayout.base, size: UserLayout.top - UserLayout.base, parent: 0,
                           reservation: false)
@@ -590,6 +593,25 @@ enum Asids {
 
     private static let invalidate: Ipi.Function = { asid in
         arch_tlb_invalidate_asid(asid)
+    }
+}
+
+extension UserAspace {
+    /// Runs `body` on a non-owning view of `record`, which its caller keeps
+    /// alive (a VMAR's reference). A dead address space refuses everything
+    /// (`.dead`), checked under its lock by each operation.
+    static func withView<R>(_ record: UserAspacePointer,
+                            _ body: (borrowing UserAspace) throws(VmError) -> R) throws(VmError) -> R {
+        let view = UserAspace.view(record)
+        let result: R
+        do throws(VmError) {
+            result = try body(view)
+        } catch {
+            view.forget()
+            throw error
+        }
+        view.forget()
+        return result
     }
 }
 

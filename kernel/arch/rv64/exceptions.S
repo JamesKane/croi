@@ -130,7 +130,7 @@ trap_entry:
     ld      sp, (2 * 8)(sp)         // the user's sp, last
     sret
 
-// void arch_enter_user(a0 pc, a1 sp, a2 arg0, a3 arg1, a4 kernel_top): to
+// void arch_enter_user(a0 pc, a1 sp, a2 arg0, a3 arg1, a4 arg2, a5 kernel_top): to
 // U-mode with interrupts on (SPIE), SUM off; the kernel stack top is
 // already in PerCpu kernel_sp.
 .globl arch_enter_user
@@ -146,7 +146,8 @@ arch_enter_user:
     mv      sp, a1
     mv      a0, a2
     mv      a1, a3
-    .irp n, 1, 3, 4, 5, 6, 7, 8, 9, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31
+    mv      a2, a4
+    .irp n, 1, 3, 4, 5, 6, 7, 8, 9, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31
     li      x\n, 0
     .endr
     sret

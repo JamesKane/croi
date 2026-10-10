@@ -19,6 +19,7 @@ add_library(kernel-swift OBJECT
   Kernel/Ref.swift
   Kernel/Smp.swift
   Kernel/User/Syscalls.swift
+  Kernel/User/TaskSyscalls.swift
   Kernel/User/Vdso.swift
   Kernel/User/VdsoSelfTest.swift
   Kernel/User/FpSelfTest.swift
@@ -29,6 +30,8 @@ add_library(kernel-swift OBJECT
   Kernel/Object/Wait.swift
   Kernel/Object/HandleTable.swift
   Kernel/Object/Port.swift
+  Kernel/Object/Process.swift
+  Kernel/Object/ProcessSelfTest.swift
   Kernel/Object/VmoObject.swift
   Kernel/Object/ObjectSelfTest.swift
   Kernel/Object/PortSelfTest.swift

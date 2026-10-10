@@ -16,10 +16,12 @@ enum UserTraps {
         if unsafe ExceptionFrame.isInterrupt(frame.pointee) {
             unsafe Interrupts.handle(frame)
             Scheduler.preemptIfRequested()
+            leaving()
             return
         }
         if unsafe ExceptionFrame.isSyscall(frame.pointee) {
             unsafe Syscalls.dispatch(frame)
+            leaving()
             return
         }
         if let fault = unsafe ExceptionFrame.pageFault(frame.pointee) {
@@ -27,12 +29,31 @@ enum UserTraps {
             let resolved = UserAspaces.handleFault(at: fault.address, write: fault.write, execute: fault.execute,
                                                    protectionKey: fault.protectionKey)
             _ = arch_interrupts_save()
-            if resolved { return }
+            if resolved {
+                leaving()
+                return
+            }
             unsafe killed("page fault", frame.pointee)
-            Scheduler.exit(killedByFault)
+            die(killedByFault)
         }
         unsafe killed("exception", frame.pointee)
-        Scheduler.exit(killedByException)
+        die(killedByException)
+    }
+
+    /// On every way back to user mode: a killed thread exits instead.
+    private static func leaving() {
+        guard Scheduler.current.pointee.killPending else { return }
+        arch_interrupts_enable()
+        Processes.checkKilled()
+    }
+
+    /// A fault or exception nothing handles: a process's thread takes its
+    /// whole process with it (K7d brings exception channels); a kernel
+    /// test's bare user thread just exits with `code`.
+    private static func die(_ code: Int) -> Never {
+        arch_interrupts_enable()
+        guard Scheduler.current.pointee.object != 0 else { Scheduler.exit(code) }
+        Processes.killCurrentProcess(code: TaskReturnCode.exceptionKill)
     }
 
     /// Logs why a user thread dies (until K7's exception channels report it).
@@ -62,7 +83,7 @@ enum UserTraps {
     /// Starts the calling thread in user mode in `aspace`, its syscalls
     /// using the handle table at `handles` (0: none). Never returns.
     static func enter(_ aspace: UserAspacePointer, handles: UInt64 = 0, pc: UInt64, sp: UInt64, arg0: UInt64,
-                      arg1: UInt64) -> Never {
+                      arg1: UInt64, arg2: UInt64 = 0) -> Never {
         let thread = Scheduler.current
         thread.pointee.handleTable = handles
         // Every user thread has FP/SIMD state (K6d), loaded before it runs.
@@ -74,7 +95,7 @@ enum UserTraps {
         Scheduler.setAspace(aspace)
         let top = Scheduler.current.pointee.stack.top
         Scheduler.setKernelStack(top)
-        arch_enter_user(pc, sp, arg0, arg1, top)
+        arch_enter_user(pc, sp, arg0, arg1, arg2, top)
     }
 }
 
@@ -106,10 +127,11 @@ enum Syscalls {
         switch number {
         case 0: return 0  // null
         case 1: return write(a[0], a[1])
-        case 2: Scheduler.exit(Int(Int64(bitPattern: a[0])))
+        case 2: Processes.exitThread(Int(Int64(bitPattern: a[0])))
+        case 63: Processes.exitProcess(Int64(bitPattern: a[0]))  // process_exit: no handles needed
         case 3: return Int64(bitPattern: Clock.now())
         case 4:
-            Scheduler.sleep(until: a[0])
+            Scheduler.sleepInterruptible(until: a[0])
             return 0
         case 5:
             reported.store(a[0], ordering: .relaxed)
@@ -206,6 +228,8 @@ enum Syscalls {
             }
         case 51:  // pmu_configure
             try pmuConfigure(table, handle, a)
+        case 60...79:
+            try taskCall(number, a, table)
         default:
             throw .notSupported
         }
@@ -250,7 +274,7 @@ enum Syscalls {
     // MARK: User memory
 
     /// Copies `value` out to user address `address`.
-    private static func put<T: BitwiseCopyable>(_ value: T, _ address: UInt64) throws(Status) {
+    static func put<T: BitwiseCopyable>(_ value: T, _ address: UInt64) throws(Status) {
         var copy = value
         let result = withUnsafeBytes(of: &copy) { unsafe UserCopy.to(address, $0.baseAddress!, UInt64($0.count)) }
         guard result == 0 else { throw .invalidArgs }
@@ -258,7 +282,7 @@ enum Syscalls {
 
     /// Checks an out-pointer is writable before doing anything (so a bad
     /// pointer doesn't leave a handle created that nobody can close).
-    private static func check(_ address: UInt64, _ size: Int) throws(Status) {
+    static func check(_ address: UInt64, _ size: Int) throws(Status) {
         guard UserLayout.contains(address & ~(KernelLayout.pageSize - 1), KernelLayout.pageSize) else {
             throw .invalidArgs
         }

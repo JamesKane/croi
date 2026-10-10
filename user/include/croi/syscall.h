@@ -11,7 +11,7 @@
 enum : uint64_t {
   CROI_SYS_NULL = 0,
   CROI_SYS_DEBUG_WRITE = 1,        // (const char *text, size_t length)
-  CROI_SYS_THREAD_EXIT = 2,        // (int64_t code)
+  CROI_SYS_THREAD_EXIT = 2,        // (int64_t code): the calling thread
   CROI_SYS_CLOCK_MONOTONIC = 3,    // () -> ns
   CROI_SYS_NANOSLEEP = 4,          // (deadline ns)
   CROI_SYS_TEST_REPORT = 5,        // (value) for the boot self-test
@@ -32,7 +32,28 @@ enum : uint64_t {
   CROI_SYS_VMO_MAP = 43,           // (vmo, offset, length, rights bits, uint64_t *address); until VMARs (K7)
   CROI_SYS_TRACE_CONFIGURE = 50,   // (resource, op, a, b, c, sample_hz)
   CROI_SYS_PMU_CONFIGURE = 51,     // (resource, op, a, b)
+  // Jobs, processes, threads (K7a). Zircon's calls; vmar_* pack the VMAR
+  // handle and options into the first argument (handle | options << 32).
+  CROI_SYS_JOB_CREATE = 60,        // (parent, options, out)
+  CROI_SYS_PROCESS_CREATE = 61,    // (job, name, name_len, options, out_process, out_vmar)
+  CROI_SYS_PROCESS_START = 62,     // (process, thread, entry, stack, arg1 handle, arg2)
+  CROI_SYS_PROCESS_EXIT = 63,      // (code)
+  CROI_SYS_THREAD_CREATE = 64,     // (process, name, name_len, options, out)
+  CROI_SYS_THREAD_START = 65,      // (thread, entry, stack, arg1, arg2)
+  CROI_SYS_TASK_KILL = 67,         // (task)
+  CROI_SYS_PROCESS_INFO = 68,      // (process, croi_process_info_t out)
+  CROI_SYS_VMAR_ALLOCATE = 70,     // (parent | options << 32, offset, size, out_child, out_addr)
+  CROI_SYS_VMAR_MAP = 71,          // (vmar | options << 32, vmar_offset, vmo, vmo_offset, len, out_addr)
+  CROI_SYS_VMAR_UNMAP = 72,        // (vmar, addr, len)
+  CROI_SYS_VMAR_PROTECT = 73,      // (vmar | options << 32, addr, len)
+  CROI_SYS_VMAR_DESTROY = 74,      // (vmar)
 };
+
+// A new process's first thread starts with arg1 (a handle in the process)
+// in the first argument register, arg2 in the second and the vDSO's base
+// in the third.
+
+#include "task.h"  // vmar options, task return codes, signals, croi_process_info_t
 
 enum : uint64_t {  // CROI_SYS_TRACE_CONFIGURE ops
   CROI_TRACE_OP_START = 0,   // a: categories, b: pages per CPU, c: mode;
@@ -93,6 +114,42 @@ static inline int64_t croi_syscall(uint64_t number, uint64_t a0, uint64_t a1, ui
   register uint64_t r3 __asm__("a3") = a3;
   register uint64_t r4 __asm__("a4") = a4;
   __asm__ volatile("ecall" : "+r"(r0) : "r"(a7), "r"(r1), "r"(r2), "r"(r3), "r"(r4) : "memory");
+  return (int64_t)r0;
+#endif
+}
+
+// Six arguments (the sixth in r9 / x5 / a5).
+static inline int64_t croi_syscall6(uint64_t number, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
+                                    uint64_t a4, uint64_t a5) {
+#if defined(__x86_64__)
+  register uint64_t r10 __asm__("r10") = a3;
+  register uint64_t r8 __asm__("r8") = a4;
+  register uint64_t r9 __asm__("r9") = a5;
+  int64_t result;
+  __asm__ volatile("syscall"
+                   : "=a"(result)
+                   : "a"(number), "D"(a0), "S"(a1), "d"(a2), "r"(r10), "r"(r8), "r"(r9)
+                   : "rcx", "r11", "memory");
+  return result;
+#elif defined(__aarch64__)
+  register uint64_t x16 __asm__("x16") = number;
+  register uint64_t x0 __asm__("x0") = a0;
+  register uint64_t x1 __asm__("x1") = a1;
+  register uint64_t x2 __asm__("x2") = a2;
+  register uint64_t x3 __asm__("x3") = a3;
+  register uint64_t x4 __asm__("x4") = a4;
+  register uint64_t x5 __asm__("x5") = a5;
+  __asm__ volatile("svc #0" : "+r"(x0) : "r"(x16), "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x5) : "memory");
+  return (int64_t)x0;
+#elif defined(__riscv)
+  register uint64_t a7 __asm__("a7") = number;
+  register uint64_t r0 __asm__("a0") = a0;
+  register uint64_t r1 __asm__("a1") = a1;
+  register uint64_t r2 __asm__("a2") = a2;
+  register uint64_t r3 __asm__("a3") = a3;
+  register uint64_t r4 __asm__("a4") = a4;
+  register uint64_t r5 __asm__("a5") = a5;
+  __asm__ volatile("ecall" : "+r"(r0) : "r"(a7), "r"(r1), "r"(r2), "r"(r3), "r"(r4), "r"(r5) : "memory");
   return (int64_t)r0;
 #endif
 }

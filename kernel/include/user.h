@@ -12,7 +12,8 @@
 // two argument registers, every other register zero. The kernel stack is
 // reset to `kernel_top` (whatever was on it is gone). Never returns: the
 // thread comes back only through traps, interrupts and syscalls.
-[[noreturn]] void arch_enter_user(uint64_t pc, uint64_t sp, uint64_t arg0, uint64_t arg1, uint64_t kernel_top);
+[[noreturn]] void arch_enter_user(uint64_t pc, uint64_t sp, uint64_t arg0, uint64_t arg1, uint64_t arg2,
+                                  uint64_t kernel_top);
 
 // Byte copies between kernel and user memory with fault recovery: 0, or
 // -1 if a user page couldn't be reached (see usercopy.h's fixups).

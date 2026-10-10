@@ -15,6 +15,8 @@ enum VmError: Error, Equatable {
     case invalidArgument
     /// The physical range is RAM or firmware memory (the deny list).
     case denied(UInt64)
+    /// The address space was torn down (its process died).
+    case dead
 }
 
 /// What a virtual address translates to.

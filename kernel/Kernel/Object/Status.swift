@@ -32,10 +32,15 @@ struct Rights: OptionSet, Equatable {
     static var setProperty: Rights { Rights(rawValue: 1 << 7) }
     static var enumerate: Rights { Rights(rawValue: 1 << 8) }
     static var destroy: Rights { Rights(rawValue: 1 << 9) }
+    static var getPolicy: Rights { Rights(rawValue: 1 << 10) }
+    static var setPolicy: Rights { Rights(rawValue: 1 << 11) }
     static var signal: Rights { Rights(rawValue: 1 << 12) }
     static var signalPeer: Rights { Rights(rawValue: 1 << 13) }
     static var wait: Rights { Rights(rawValue: 1 << 14) }
     static var inspect: Rights { Rights(rawValue: 1 << 15) }
+    static var manageJob: Rights { Rights(rawValue: 1 << 16) }
+    static var manageProcess: Rights { Rights(rawValue: 1 << 17) }
+    static var manageThread: Rights { Rights(rawValue: 1 << 18) }
     static var manageVmo: Rights { Rights(rawValue: 1 << 24) }
     /// duplicate/replace: keep the source handle's rights.
     static var sameRights: Rights { Rights(rawValue: 1 << 31) }
@@ -48,6 +53,13 @@ enum Signals {
     static var none: UInt32 { 0 }
     /// Event: signaled. (Bit 3, __ZX_OBJECT_SIGNALED.)
     static var signaled: UInt32 { 1 << 3 }
+    /// Process/thread/job terminated (ZX_TASK_TERMINATED, signal 3).
+    static var taskTerminated: UInt32 { 1 << 3 }
+    /// Thread running (ZX_THREAD_RUNNING, signal 4).
+    static var threadRunning: UInt32 { 1 << 4 }
+    /// Job: no child jobs (signal 4) / no child processes (signal 5).
+    static var jobNoJobs: UInt32 { 1 << 4 }
+    static var jobNoProcesses: UInt32 { 1 << 5 }
     /// A wait was canceled because its handle was closed.
     static var handleClosed: UInt32 { 1 << 23 }
     /// ZX_USER_SIGNAL_0...7.
@@ -57,8 +69,12 @@ enum Signals {
 /// zx_obj_type_t.
 enum ObjectType: UInt32 {
     case none = 0
+    case process = 1
+    case thread = 2
     case vmo = 3
     case event = 5
     case port = 6
     case resource = 15
+    case job = 17
+    case vmar = 18
 }

@@ -310,10 +310,13 @@ enum Scheduler {
 
     /// Blocks the running thread on `queue` (nil: no queue, only the
     /// deadline wakes it) until woken or until `deadline`. Lock held.
-    static func block(on queue: QueuePointer?, deadline: UInt64) -> Thread.WaitResult {
+    static func block(on queue: QueuePointer?, deadline: UInt64, interruptible: Bool = false) -> Thread.WaitResult {
         let me = Int(Cpu.current)
         let thread = cpus[me].current!
         guard !thread.pointee.isIdle else { panic("sched: the idle thread blocked") }
+        // A user-facing wait (syscalls) ends when its thread is killed.
+        if interruptible, thread.pointee.killPending { return .interrupted }
+        thread.pointee.interruptible = interruptible
         Trace.event(CROI_TRACE_SCHED, UInt16(CROI_TK_BLOCK), deadline)
         thread.pointee.state = .blocked
         thread.pointee.waitResult = .woken
@@ -343,6 +346,36 @@ enum Scheduler {
             thread.pointee.timeoutTimer = 0  // it fired: nothing to cancel
         }
         return thread.pointee.waitResult
+    }
+
+    /// Marks `thread` killed: an interruptible wait it is in ends now
+    /// (.interrupted), and if it is running elsewhere its CPU enters the
+    /// kernel, where the way back to user mode sees the mark. Lock held.
+    static func interrupt(_ thread: ThreadPointer) {
+        thread.pointee.killPending = true
+        switch thread.pointee.state {
+        case .blocked where thread.pointee.interruptible:
+            if let queue = thread.pointee.waitQueue {
+                queue.pointee.remove(thread)
+                thread.pointee.waitQueue = nil
+                if let owner = queue.pointee.owner { updateEffectiveProfile(owner) }
+            }
+            thread.pointee.waitResult = .interrupted
+            makeReady(thread)
+        case .running where thread.pointee.cpu != Int(Cpu.current):
+            requestPreemption(on: thread.pointee.cpu)
+        default:
+            break
+        }
+    }
+
+    /// Sleeps until `deadline` unless the thread is killed (nanosleep).
+    static func sleepInterruptible(until deadline: UInt64) {
+        locked {
+            while Clock.now() < deadline {
+                if block(on: nil, deadline: deadline, interruptible: true) == .interrupted { return }
+            }
+        }
     }
 
     /// Wakes the first thread on `queue`. Lock held.

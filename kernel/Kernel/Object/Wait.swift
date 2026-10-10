@@ -246,10 +246,16 @@ enum ObjectWait {
             }
         }
         var timedOut = false
+        var interrupted = false
         if !satisfied {
             Scheduler.locked {
                 while !state.pointee.done {
-                    if Scheduler.block(on: state.pointee.queue, deadline: deadline) == .timedOut, !state.pointee.done {
+                    let result = Scheduler.block(on: state.pointee.queue, deadline: deadline, interruptible: true)
+                    if result == .interrupted {
+                        interrupted = true
+                        return
+                    }
+                    if result == .timedOut, !state.pointee.done {
                         timedOut = true
                         return
                     }
@@ -268,6 +274,7 @@ enum ObjectWait {
             for i in 0..<items.count { items[i].pending |= Signals.handleClosed }
             throw .canceled
         }
+        if interrupted { throw .canceled }  // killed: it exits on the way out
         if timedOut { throw .timedOut }
     }
 }

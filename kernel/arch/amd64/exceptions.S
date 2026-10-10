@@ -143,12 +143,12 @@ syscall_entry:
     sysretq
 .size syscall_entry, . - syscall_entry
 
-// void arch_enter_user(pc, sp, arg0, arg1, kernel_top)
+// void arch_enter_user(pc, sp, arg0, arg1, arg2, kernel_top)
 .globl arch_enter_user
 .type arch_enter_user, @function
 arch_enter_user:
     cli
-    mov     %r8, %rsp
+    mov     %r9, %rsp
     pushq   $USER_DS                // ss
     pushq   %rsi                    // rsp
     pushq   $0x202                  // rflags: IF
@@ -156,10 +156,10 @@ arch_enter_user:
     pushq   %rdi                    // rip
     mov     %rdx, %rdi
     mov     %rcx, %rsi
+    mov     %r8, %rdx
     xor     %eax, %eax
     xor     %ebx, %ebx
     xor     %ecx, %ecx
-    xor     %edx, %edx
     xor     %ebp, %ebp
     xor     %r8d, %r8d
     xor     %r9d, %r9d
