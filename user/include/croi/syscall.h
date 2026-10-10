@@ -92,6 +92,15 @@ enum : uint64_t {
   CROI_SYS_RESOURCE_CREATE = 130,  // (parent | options << 32, base, size, name, name_size, uint32_t *out)
   CROI_SYS_IOPORTS_REQUEST = 131,  // (IOPORT resource, io_addr, len): amd64
   CROI_SYS_IOPORTS_RELEASE = 132,  // (IOPORT resource, io_addr, len): amd64
+
+  // Interrupts (K9c): Zircon's calls, values in interrupt.h.
+  CROI_SYS_INTERRUPT_CREATE = 140,   // (IRQ resource, number, options, uint32_t *out)
+  CROI_SYS_INTERRUPT_BIND = 141,     // (interrupt, port, key, options)
+  CROI_SYS_INTERRUPT_ACK = 142,      // (interrupt)
+  CROI_SYS_INTERRUPT_WAIT = 143,     // (interrupt, uint64_t *timestamp or 0)
+  CROI_SYS_INTERRUPT_DESTROY = 144,  // (interrupt)
+  CROI_SYS_INTERRUPT_TRIGGER = 145,  // (interrupt, options 0, timestamp): virtual only
+  CROI_SYS_INTERRUPT_SET_AFFINITY = 146,  // (interrupt, uint64_t cpu mask): croi's
 };
 
 enum : uint32_t {  // timer_create options (Zircon's ZX_TIMER_SLACK_*)
@@ -111,6 +120,7 @@ enum : uint32_t {  // timer_create options (Zircon's ZX_TIMER_SLACK_*)
 #include "resource.h" // resource kinds, flags, system bases, croi_info_resource_t
 #include "vmo.h"      // vmo_op_range ops, cache policies, cache_flush options
 #include "zbi.h"      // boot data items (CROI_PA_VMO_BOOTDATA)
+#include "interrupt.h" // interrupt options, port binding, packet type
 
 enum : uint64_t {  // CROI_SYS_TRACE_CONFIGURE ops
   CROI_TRACE_OP_START = 0,   // a: categories, b: pages per CPU, c: mode;

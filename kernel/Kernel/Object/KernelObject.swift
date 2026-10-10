@@ -116,6 +116,7 @@ enum Objects {
         case .log: DebugLogs.destroy(object)
         case .profile: free(object, as: ProfileObject.self)
         case .exception: Exceptions.destroy(object)
+        case .interrupt: InterruptObjects.destroyObject(object)
         case .none: panic("object: destroying an untyped object")
         }
         live.subtract(1, ordering: .relaxed)

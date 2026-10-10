@@ -18,6 +18,8 @@ struct PortPacket: Equatable {
     /// Packet types: Zircon's, then croi's own kernel sources.
     static var user: UInt32 { 0 }
     static var signalOne: UInt32 { 1 }
+    /// An interrupt object's (payload[0]: timestamp).
+    static var interrupt: UInt32 { 7 }
     /// Ext 3: a deadline reservation overran its budget (count in payload[2]).
     static var budgetOverrun: UInt32 { 0x80 }
     /// Ext 6: a memory account crossed its pressure level (bytes charged in
@@ -31,12 +33,15 @@ struct PortPacket: Equatable {
 }
 
 /// A queued packet. Owned by the queue (from wait_async or port_queue: freed
-/// when dequeued) or by a kernel packet source (reused: never freed here).
+/// when dequeued), by a kernel packet source, or by an interrupt object
+/// (both reused: never freed here).
 struct QueuedPacket {
     var next: UInt64 = 0
     var packet: PortPacket
-    /// 0, or the PacketSource that owns this record.
+    /// 0, the PacketSource that owns this record, or `Ports.interruptOwned`.
     let source: UInt64
+    /// An interrupt packet is on its port's interrupt list (packets lock).
+    var interruptQueued = false
     /// For cancellation: the object and handle a signal packet came from.
     let originTable: UInt64
     let originHandle: UInt32
@@ -65,7 +70,9 @@ struct QueuedPacket {
 
 /// A port (Zircon's PortDispatcher): a FIFO of packets and the threads
 /// waiting for them. `packetsLock` guards the queue; waiters block on the
-/// scheduler. Lock order: object -> scheduler -> packets.
+/// scheduler. Lock order: object -> scheduler -> packets. A port created
+/// with BIND_TO_INTERRUPT also has interrupt objects' packets, on a list
+/// of their own that is read first (Zircon's).
 struct PortObject: ~Copyable {
     var header = ObjectHeader(type: .port)
     let packetsLock = SpinLock()
@@ -73,6 +80,9 @@ struct PortObject: ~Copyable {
     var tail: UInt64 = 0
     var queued = 0
     let waiters = QueuePointer.allocate()
+    let bindToInterrupt: Bool
+    var interruptHead: UInt64 = 0
+    var interruptTail: UInt64 = 0
 
     /// ZX_DEFAULT_PORT_RIGHTS: no WAIT (ports are waited on with port_wait).
     static var defaultRights: Rights { Rights.basic.subtracting(.wait).union([.read, .write]) }
@@ -88,14 +98,20 @@ struct PortObject: ~Copyable {
 }
 
 enum Ports {
-    static func create() throws(Status) -> ObjectPointer {
-        guard let object = Objects.allocate(PortObject()) else { throw .noMemory }
+    /// `QueuedPacket.source` of an interrupt object's packet.
+    static var interruptOwned: UInt64 { ~0 }
+
+    static func create(options: UInt64 = 0) throws(Status) -> ObjectPointer {
+        guard options & ~UInt64(CROI_PORT_BIND_TO_INTERRUPT) == 0 else { throw .invalidArgs }
+        guard let object = Objects.allocate(PortObject(bindToInterrupt: options != 0)) else { throw .noMemory }
         return object
     }
 
     static func destroy(_ object: ObjectPointer) {
         let port = PortPointer(object: object)
-        while let record = pop(port) { release(record) }
+        while let (_, record) = pop(port) {
+            if let record { release(record) }
+        }
         port.pointee.waiters.deallocate()
         Objects.free(object, as: PortObject.self)
     }
@@ -120,14 +136,71 @@ enum Ports {
         }
     }
 
-    private static func pop(_ port: PortPointer) -> QueuedPacketPointer? {
-        port.pointee.packetsLock.withLock { () -> QueuedPacketPointer? in
+    /// The next packet (interrupts first), copied under the lock, and its
+    /// record if it needs `release` (an interrupt's stays its object's).
+    private static func pop(_ port: PortPointer) -> (PortPacket, QueuedPacketPointer?)? {
+        port.pointee.packetsLock.withLock { () -> (PortPacket, QueuedPacketPointer?)? in
+            if port.pointee.interruptHead != 0 {
+                let record = QueuedPacketPointer(address: port.pointee.interruptHead)
+                port.pointee.interruptHead = record.pointee.next
+                if port.pointee.interruptHead == 0 { port.pointee.interruptTail = 0 }
+                record.pointee.interruptQueued = false
+                port.pointee.queued -= 1
+                return (record.pointee.packet, nil)
+            }
             guard port.pointee.head != 0 else { return nil }
             let record = QueuedPacketPointer(address: port.pointee.head)
             port.pointee.head = record.pointee.next
             if port.pointee.head == 0 { port.pointee.tail = 0 }
             port.pointee.queued -= 1
-            return record
+            return (record.pointee.packet, record)
+        }
+    }
+
+    /// Queues an interrupt object's packet with `timestamp` and wakes a
+    /// waiter; false if it is still queued. Any context (interrupts too).
+    static func queueInterrupt(_ port: PortPointer, _ record: QueuedPacketPointer, timestamp: UInt64) -> Bool {
+        let queued = port.pointee.packetsLock.withLock { () -> Bool in
+            guard !record.pointee.interruptQueued else { return false }
+            record.pointee.interruptQueued = true
+            record.pointee.packet.type = PortPacket.interrupt
+            record.pointee.packet.status = 0
+            record.pointee.packet.payload[0] = timestamp
+            record.pointee.next = 0
+            if port.pointee.interruptTail != 0 {
+                QueuedPacketPointer(address: port.pointee.interruptTail).pointee.next = record.address
+            } else {
+                port.pointee.interruptHead = record.address
+            }
+            port.pointee.interruptTail = record.address
+            port.pointee.queued += 1
+            return true
+        }
+        if queued { Scheduler.locked { _ = Scheduler.wakeOne(port.pointee.waiters) } }
+        return queued
+    }
+
+    /// Takes an interrupt object's packet off its port; false if it wasn't
+    /// queued (already read).
+    static func removeInterrupt(_ port: PortPointer, _ record: QueuedPacketPointer) -> Bool {
+        port.pointee.packetsLock.withLock { () -> Bool in
+            guard record.pointee.interruptQueued else { return false }
+            var previous: UInt64 = 0
+            var cursor = port.pointee.interruptHead
+            while cursor != 0, cursor != record.address {
+                previous = cursor
+                cursor = QueuedPacketPointer(address: cursor).pointee.next
+            }
+            guard cursor != 0 else { return false }
+            if previous != 0 {
+                QueuedPacketPointer(address: previous).pointee.next = record.pointee.next
+            } else {
+                port.pointee.interruptHead = record.pointee.next
+            }
+            if port.pointee.interruptTail == record.address { port.pointee.interruptTail = previous }
+            record.pointee.interruptQueued = false
+            port.pointee.queued -= 1
+            return true
         }
     }
 
@@ -154,20 +227,19 @@ enum Ports {
     static func wait(_ table: borrowing HandleTable, _ handle: UInt32, deadline: UInt64) throws(Status) -> PortPacket {
         let ref = try table.get(handle, type: .port, rights: .read)
         let port = PortPointer(object: ref.object)
-        var record: QueuedPacketPointer? = nil
+        var popped: (PortPacket, QueuedPacketPointer?)? = nil
         Scheduler.locked {
             while true {
                 if let next = pop(port) {
-                    record = next
+                    popped = next
                     return
                 }
                 let result = Scheduler.block(on: port.pointee.waiters, deadline: deadline, interruptible: true)
                 if result == .interrupted || (result == .timedOut && port.pointee.queued == 0) { return }
             }
         }
-        guard let record else { throw .timedOut }
-        let packet = record.pointee.packet
-        release(record)
+        guard let (packet, record) = popped else { throw .timedOut }
+        if let record { release(record) }
         return packet
     }
 

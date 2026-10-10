@@ -5,10 +5,10 @@ import PageTables
 /// Interrupt handling (roadmap K2): one controller driver per arch behind
 /// a common surface, and the dispatch every interrupt goes through.
 ///
-/// Only IPIs are routed so far. Device interrupts (IOAPIC pins, GIC SPIs
-/// and LPIs through the ITS, APLIC/IMSIC) are discovered and left masked
-/// until drivers ask for them with an explicit CPU affinity (ext 8), and
-/// MSI vectors come from the ranges reserved below (requirement 13).
+/// Device interrupts (IOAPIC pins, GIC SPIs, PLIC sources) stay masked
+/// until an interrupt object takes them (K9c, `DeviceIrqs`), routed to an
+/// explicit CPU (ext 8). LPIs through the ITS, APLIC/IMSIC and MSI vectors
+/// (requirement 13) come with K9d.
 enum Interrupts {
     /// One line describing the controllers found, for the boot log.
     nonisolated(unsafe) private(set) static var summary: StaticString = "none"
@@ -20,7 +20,6 @@ enum Interrupts {
         guard LocalApic.initializeBootCpu(acpi) else { return false }
         detail = UInt64(IoApic.maskAll(acpi))
         summary = LocalApic.x2apic ? "x2APIC, IOAPIC pins" : "xAPIC, IOAPIC pins"
-        return true
         #elseif arch(arm64)
         guard GicV3.initializeBootCpu(acpi) else {
             summary = "GICv3 not found (GICv2 is not supported)"
@@ -28,13 +27,13 @@ enum Interrupts {
         }
         summary = "GICv3, ITS at"
         detail = GicV3.itsBase
-        return true
         #elseif arch(riscv64)
         RiscvInterrupts.initializeBootCpu(acpi)
-        summary = "SBI IPIs; IMSIC/APLIC/PLIC count"
+        summary = "SBI IPIs, PLIC sources; IMSIC/APLIC/PLIC count"
         detail = UInt64(RiscvInterrupts.controllers)
-        return true
         #endif
+        DeviceIrqs.initialize()
+        return true
     }
 
     /// This CPU's local controller (secondaries).
@@ -81,6 +80,8 @@ enum Interrupts {
             LocalApic.clearErrors()
         case UInt64(Pmu.vector):
             unsafe Pmu.handleOverflow(frame)
+        case UInt64(IoApic.firstVector)..<UInt64(IoApic.firstVector + IoApic.gsiLimit):
+            DeviceIrqs.dispatch(UInt32(vector) - IoApic.firstVector)
         default:
             unexpected(vector)
         }
@@ -96,6 +97,8 @@ enum Interrupts {
             Timers.handleInterrupt()
         } else if intid == Pmu.intid, intid != 0 {
             unsafe Pmu.handleOverflow(frame)
+        } else if intid >= 32 {
+            DeviceIrqs.dispatch(UInt32(intid))
         } else {
             unexpected(intid)
         }
@@ -111,6 +114,11 @@ enum Interrupts {
             Timers.handleInterrupt()
         } else if code == 13 {  // local counter overflow (Sscofpmf)
             unsafe Pmu.handleOverflow(frame)
+        } else if code == 9 {  // supervisor external interrupt: the PLIC
+            while let gsi = Plic.claim() {
+                DeviceIrqs.dispatch(gsi)
+                Plic.complete(gsi)
+            }
         } else {
             unexpected(code)
         }
@@ -228,13 +236,37 @@ enum LocalApic {
     }
 }
 
-/// I/O APICs: every redirection entry masked until a driver routes it.
+/// I/O APICs: every redirection entry masked until a driver routes it
+/// (K9c: interrupt objects, by GSI; vector 0x30 + GSI).
 enum IoApic {
-    /// Masks all pins of every IOAPIC in the MADT; returns how many pins.
+    private struct Chip {
+        var mmio: UInt64 = 0
+        var gsiBase: UInt32 = 0
+        var pins: UInt32 = 0
+    }
+    nonisolated(unsafe) private static var chips = InlineArray<8, Chip>(repeating: Chip())
+    nonisolated(unsafe) private static var chipCount = 0
+    /// MADT interrupt source overrides: ISA IRQ -> GSI and MPS INTI flags.
+    nonisolated(unsafe) private static var overrides = InlineArray<16, (isa: UInt8, gsi: UInt32, flags: UInt16)>(
+        repeating: (0, 0, 0))
+    nonisolated(unsafe) private static var overrideCount = 0
+
+    /// Device vectors: 0x30 + GSI, below the MSI range K9d takes (0xB0+).
+    static var firstVector: UInt32 { 0x30 }
+    static var gsiLimit: UInt32 { 0x80 }
+
+    /// Masks all pins of every IOAPIC in the MADT and records them and the
+    /// overrides; returns how many pins.
     static func maskAll(_ acpi: AcpiTables) -> Int {
         var pins = 0
         Madt.forEachEntry(acpi) { type, entry in
-            guard type == 1, entry.byteCount >= 12 else { return }  // I/O APIC
+            if type == 2, entry.byteCount >= 10, overrideCount < 16 {  // interrupt source override
+                overrides[overrideCount] = (entry.load(fromByteOffset: 3, as: UInt8.self),
+                                            entry.load(fromByteOffset: 4, as: UInt32.self),
+                                            entry.load(fromByteOffset: 8, as: UInt16.self))
+                overrideCount += 1
+            }
+            guard type == 1, entry.byteCount >= 12, chipCount < 8 else { return }  // I/O APIC
             let base = UInt64(entry.load(fromByteOffset: 4, as: UInt32.self))
             let window: UInt64
             do throws(VmError) {
@@ -244,14 +276,63 @@ enum IoApic {
                 return
             }
             let mmio = window + (base & (KernelLayout.pageSize - 1))
-            let count = Int((read(mmio, 1) >> 16) & 0xFF) + 1
+            let count = (read(mmio, 1) >> 16) & 0xFF + 1
             for pin in 0..<count {
-                write(mmio, UInt32(0x10 + 2 * pin), 1 << 16)  // masked, vector 0
-                write(mmio, UInt32(0x11 + 2 * pin), 0)
+                write(mmio, 0x10 + 2 * pin, 1 << 16)  // masked, vector 0
+                write(mmio, 0x11 + 2 * pin, 0)
             }
-            pins += count
+            chips[chipCount] = Chip(mmio: mmio, gsiBase: entry.load(fromByteOffset: 8, as: UInt32.self), pins: count)
+            chipCount += 1
+            pins += Int(count)
         }
         return pins
+    }
+
+    /// The chip and pin of `gsi`.
+    private static func pin(_ gsi: UInt32) -> (mmio: UInt64, pin: UInt32)? {
+        for i in 0..<chipCount where gsi >= chips[i].gsiBase && gsi - chips[i].gsiBase < chips[i].pins {
+            return (chips[i].mmio, gsi - chips[i].gsiBase)
+        }
+        return nil
+    }
+
+    static func isValid(_ gsi: UInt32) -> Bool { gsi < gsiLimit && pin(gsi) != nil }
+
+    /// The GSI an ISA IRQ arrives on (an override, else the same number).
+    static func remapIsa(_ irq: UInt32) -> UInt32 {
+        for i in 0..<overrideCount where UInt32(overrides[i].isa) == irq { return overrides[i].gsi }
+        return irq
+    }
+
+    /// What firmware says about `gsi`: an override's flags, else ISA
+    /// (edge, active high) below 16 and PCI (level, active low) above.
+    static func defaultMode(_ gsi: UInt32) -> (level: Bool, activeLow: Bool) {
+        var level = gsi >= 16, low = gsi >= 16
+        for i in 0..<overrideCount where overrides[i].gsi == gsi {
+            let polarity = overrides[i].flags & 3, trigger = (overrides[i].flags >> 2) & 3
+            if polarity == 1 { low = false } else if polarity == 3 { low = true }
+            if trigger == 1 { level = false } else if trigger == 3 { level = true }
+        }
+        return (level, low)
+    }
+
+    /// Programs `gsi`'s entry (masked) for `vector`, mode and destination.
+    /// Controller lock held.
+    static func program(_ gsi: UInt32, level: Bool, activeLow: Bool, apicId: UInt64) {
+        guard let (mmio, pin) = pin(gsi) else { return }
+        var low: UInt32 = (firstVector + gsi) | 1 << 16                 // fixed, physical, masked
+        if activeLow { low |= 1 << 13 }
+        if level { low |= 1 << 15 }
+        write(mmio, 0x10 + 2 * pin, 1 << 16)
+        write(mmio, 0x11 + 2 * pin, UInt32(apicId) << 24)
+        write(mmio, 0x10 + 2 * pin, low)
+    }
+
+    /// Masks or unmasks `gsi`. Controller lock held.
+    static func setMasked(_ gsi: UInt32, _ masked: Bool) {
+        guard let (mmio, pin) = pin(gsi) else { return }
+        let low = read(mmio, 0x10 + 2 * pin)
+        write(mmio, 0x10 + 2 * pin, masked ? low | 1 << 16 : low & ~(1 << 16))
     }
 
     private static func read(_ mmio: UInt64, _ register: UInt32) -> UInt32 {
@@ -276,6 +357,8 @@ enum GicV3 {
     nonisolated(unsafe) private static var redistributors: UInt64 = 0
     nonisolated(unsafe) private static var redistributorsSize: UInt64 = 0
     nonisolated(unsafe) private(set) static var itsBase: UInt64 = 0
+    /// Interrupt lines the distributor has (SPIs end below this).
+    nonisolated(unsafe) private static var lines: UInt32 = 0
 
     static func initializeBootCpu(_ acpi: AcpiTables) -> Bool {
         var gicd: UInt64 = 0
@@ -313,8 +396,8 @@ enum GicV3 {
         // Distributor: every SPI in Group 1, masked; affinity routing on.
         write32(distributor + 0x0, 0)
         waitForDistributor()
-        let lines = Int((read32(distributor + 0x4) & 0x1F) + 1) * 32
-        for n in 1..<(lines / 32) {
+        lines = min((read32(distributor + 0x4) & 0x1F + 1) * 32, 1020)
+        for n in 1..<Int((lines + 31) / 32) {
             write32(distributor + 0x80 + UInt64(n) * 4, ~0)    // IGROUPR: Group 1
             write32(distributor + 0x180 + UInt64(n) * 4, ~0)   // ICENABLER: masked
         }
@@ -349,6 +432,37 @@ enum GicV3 {
     static func enablePrivate(_ intid: UInt64) {
         guard intid < 32, let frame = redistributorFrame() else { return }
         write32(frame + 0x1_0000 + 0x100, 1 << UInt32(intid))  // ISENABLER0
+    }
+
+    // MARK: SPIs (K9c: interrupt objects)
+
+    static func isValidSpi(_ intid: UInt32) -> Bool { intid >= 32 && intid < lines }
+
+    /// Whether the distributor has `intid` configured level-sensitive (the
+    /// reset state, or firmware's).
+    static func spiIsLevel(_ intid: UInt32) -> Bool {
+        read32(distributor + 0xC00 + UInt64(intid / 16) * 4) & (2 << ((intid % 16) * 2)) == 0
+    }
+
+    /// Programs a (masked) SPI: trigger mode, priority, the CPU it goes to
+    /// (MPIDR affinity as in PerCpu.hardwareId, which IROUTER shares).
+    /// Controller lock held.
+    static func programSpi(_ intid: UInt32, level: Bool, affinity: UInt64) {
+        setSpiMasked(intid, true)
+        let config = distributor + 0xC00 + UInt64(intid / 16) * 4
+        let bit: UInt32 = 2 << ((intid % 16) * 2)
+        write32(config, level ? read32(config) & ~bit : read32(config) | bit)
+        let priority = distributor + 0x400 + UInt64(intid & ~3)
+        let shift = (intid % 4) * 8
+        write32(priority, read32(priority) & ~(0xFF << shift) | 0x80 << shift)
+        unsafe VolatileMappedRegister<UInt64>(unsafeBitPattern: UInt(distributor + 0x6000 + UInt64(intid) * 8))
+            .store(affinity & 0xFF_00FF_FFFF)
+    }
+
+    /// Masks (ICENABLER, waiting for it to take) or unmasks an SPI.
+    static func setSpiMasked(_ intid: UInt32, _ masked: Bool) {
+        write32(distributor + (masked ? 0x180 : 0x100) + UInt64(intid / 32) * 4, 1 << (intid % 32))
+        if masked { waitForDistributor() }
     }
 
     /// Sends SGI `intid` to the CPU with MPIDR affinity `target` (as in
@@ -395,8 +509,9 @@ enum GicV3 {
 #endif
 
 #if arch(riscv64)
-/// RISC-V: IPIs through SBI (supervisor software interrupts). External
-/// interrupt controllers (IMSIC, APLIC, PLIC) are only discovered so far.
+/// RISC-V: IPIs through SBI (supervisor software interrupts); device
+/// interrupts through the PLIC (K9c; QEMU virt's default). IMSIC/APLIC
+/// are only counted.
 enum RiscvInterrupts {
     nonisolated(unsafe) private(set) static var controllers = 0
 
@@ -404,6 +519,7 @@ enum RiscvInterrupts {
         Madt.forEachEntry(acpi) { type, _ in
             if type == 0x19 || type == 0x1A || type == 0x1B { controllers += 1 }  // IMSIC, APLIC, PLIC
         }
+        Plic.initialize(acpi)
         initializeThisCpu()
     }
 
@@ -411,11 +527,115 @@ enum RiscvInterrupts {
         arch_rv_sie_clear(~0)
         arch_rv_sip_clear(1 << 1)
         arch_rv_sie_set(1 << 1)  // SSIE: software interrupts (IPIs)
+        if Plic.initializeThisCpu() {
+            arch_rv_sie_set(1 << 9)  // SEIE: external interrupts
+        }
     }
 
     static func sendIpi(hart: UInt64) {
         let ipi: UInt64 = 0x73_5049  // "sPI"
         _ = arch_sbi_call(ipi, 0, 1, hart, 0)  // send_ipi(hart_mask = 1, hart_mask_base = hart)
+    }
+}
+
+/// The platform-level interrupt controller: sources 1..<count (GSI =
+/// gsiBase + source), one context per hart's S mode (the RINTC's
+/// external interrupt controller ID). A source is masked by priority 0
+/// and routed by enabling it in one context.
+enum Plic {
+    nonisolated(unsafe) private static var mmio: UInt64 = 0
+    nonisolated(unsafe) private(set) static var gsiBase: UInt32 = 0
+    nonisolated(unsafe) private(set) static var count: UInt32 = 0
+    /// Each hart's S-mode context.
+    nonisolated(unsafe) private static var contexts = InlineArray<64, (hart: UInt64, context: UInt32)>(
+        repeating: (0, 0))
+    nonisolated(unsafe) private static var contextCount = 0
+
+    static func initialize(_ acpi: AcpiTables) {
+        var base: UInt64 = 0, size: UInt64 = 0
+        Madt.forEachEntry(acpi) { type, e in
+            switch type {
+            case 0x1B where e.byteCount >= 36 && base == 0:  // PLIC (the first)
+                count = UInt32(e.load(fromByteOffset: 12, as: UInt16.self)) + 1
+                size = UInt64(e.load(fromByteOffset: 20, as: UInt32.self))
+                base = e.load(fromByteOffset: 24, as: UInt64.self)
+                gsiBase = e.load(fromByteOffset: 32, as: UInt32.self)
+            case 0x18 where e.byteCount >= 24 && contextCount < 64:  // RINTC
+                contexts[contextCount] = (e.load(fromByteOffset: 8, as: UInt64.self),
+                                          e.load(fromByteOffset: 20, as: UInt32.self) & 0xFFFF)
+                contextCount += 1
+            default: ()
+            }
+        }
+        guard base != 0, size != 0 else { return }
+        do throws(VmError) {
+            mmio = try kernelAspace.mapPhysical(base, size: size,
+                                                MapAttributes(writable: true, cache: .device, global: true))
+        } catch {
+            return
+        }
+        for source in 1..<count { write(UInt64(source) * 4, 0) }  // priority 0: masked
+        for i in 0..<contextCount {
+            for word in 0..<(count + 31) / 32 { write(enable(contexts[i].context) + UInt64(word) * 4, 0) }
+        }
+    }
+
+    /// Opens this hart's context (threshold 0). False with no PLIC.
+    static func initializeThisCpu() -> Bool {
+        guard mmio != 0, let context = context(of: thisHart) else { return false }
+        write(0x20_0000 + UInt64(context) * 0x1000, 0)
+        return true
+    }
+
+    static func context(of hart: UInt64) -> UInt32? {
+        for i in 0..<contextCount where contexts[i].hart == hart { return contexts[i].context }
+        return nil
+    }
+
+    static func isValid(_ gsi: UInt32) -> Bool { mmio != 0 && gsi > gsiBase && gsi - gsiBase < count }
+
+    /// Routes `gsi`'s source to `hart` only (masked until unmasked).
+    /// Controller lock held.
+    static func route(_ gsi: UInt32, hart: UInt64) -> Bool {
+        guard let target = context(of: hart) else { return false }
+        let source = gsi - gsiBase
+        setMasked(gsi, true)
+        for i in 0..<contextCount {
+            let word = enable(contexts[i].context) + UInt64(source / 32) * 4
+            let bit: UInt32 = 1 << (source % 32)
+            write(word, contexts[i].context == target ? read(word) | bit : read(word) & ~bit)
+        }
+        return true
+    }
+
+    static func setMasked(_ gsi: UInt32, _ masked: Bool) {
+        write(UInt64(gsi - gsiBase) * 4, masked ? 0 : 1)
+    }
+
+    /// The next pending source for this hart's context (0: none), as a GSI.
+    static func claim() -> UInt32? {
+        guard let context = context(of: thisHart) else { return nil }
+        let source = read(0x20_0004 + UInt64(context) * 0x1000)
+        return source == 0 ? nil : gsiBase + source
+    }
+
+    static func complete(_ gsi: UInt32) {
+        guard let context = context(of: thisHart) else { return }
+        write(0x20_0004 + UInt64(context) * 0x1000, gsi - gsiBase)
+    }
+
+    private static func enable(_ context: UInt32) -> UInt64 { 0x2000 + UInt64(context) * 0x80 }
+
+    /// S mode can't read its hart ID: the PerCpu record has it.
+    private static var thisHart: UInt64 {
+        unsafe UnsafePointer<PerCpu>(bitPattern: UInt(arch_percpu()))!.pointee.hardwareId
+    }
+
+    private static func read(_ offset: UInt64) -> UInt32 {
+        unsafe VolatileMappedRegister<UInt32>(unsafeBitPattern: UInt(mmio + offset)).load()
+    }
+    private static func write(_ offset: UInt64, _ value: UInt32) {
+        unsafe VolatileMappedRegister<UInt32>(unsafeBitPattern: UInt(mmio + offset)).store(value)
     }
 }
 #endif

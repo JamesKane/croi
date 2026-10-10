@@ -38,7 +38,7 @@ real-time wake error p99 < 100 µs.
 | 11 | Job, process, thread, exceptions, job policy | **Done** (K7a, K7d) |
 | 12 | userboot + bootfs | **Done** (K8b) |
 | 18 (core) | ktrace rings, categories, user marks, tick and PMU sampling, per-thread PMU counters | **Done** (K3–K6, see "Trace" below) |
-| 13 | Resources, interrupt objects, MSI | **Partial**: resources and physical VMOs (K9a). Interrupts and MSI are K9c, K9d |
+| 13 | Resources, interrupt objects, MSI | **Partial**: resources and physical VMOs (K9a), interrupt objects (K9c). MSI is K9d |
 | 14 | BTI/PMT and IOMMUs | Todo: a BTI without an IOMMU in K9e, IOMMUs after M3 |
 | 15–19 | FIFO/counter/stream/socket/clock/debuglog, pager, rings, debug syscalls | After M3, except debuglog (K8a) and exception channels (K7d). Item 17 needs nothing from croi |
 | 20 | Firmware data for user space (ACPI tables and op regions, GOP framebuffer) behind resources | **Done** (K9b) |
@@ -407,7 +407,14 @@ pinned DMA without a driver stack. The boot tests add it.
     boot self-test draws).
   - AML's SystemIO regions use K9a's IO ports; PCI config uses ECAM
     (MCFG ranges, MMIO) and, on amd64, ports 0xCF8/0xCFC.
-- **K9c: interrupt objects (item 13).** Zircon's calls:
+- **K9c: interrupt objects (item 13).** **Done** (2026-10-10): as
+  below with the PLIC on rv64 (QEMU's default; APLIC later), syscalls
+  140-146. The boot test uses each machine's RTC rather than `edu`'s
+  INTx (whose GSI comes from `_PRT`, i.e. user space): CMOS (amd64, edge),
+  PL031 (arm64, level), goldfish (rv64, level). The budget isn't met
+  under KVM yet: 11-18 us median from the fire to the woken thread, the
+  interrupt on CPU 1 waking a thread on another CPU (VM exits for the
+  wakeup IPI); measure on hardware. Details in CLAUDE.md. Zircon's calls:
   `interrupt_create(resource, vector, options)` (an IRQ resource
   covering the vector; EDGE/LEVEL and HIGH/LOW modes; VIRTUAL),
   `interrupt_bind` (to a port: a packet per interrupt, re-armed by

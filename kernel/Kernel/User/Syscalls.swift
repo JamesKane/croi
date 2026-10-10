@@ -244,7 +244,7 @@ enum Syscalls {
         case 31:  // port_create
             try Policy.check(UInt32(CROI_POL_NEW_PORT))
             try check(a[1], MemoryLayout<UInt32>.size)
-            try put(try table.add(try Ports.create(), rights: PortObject.defaultRights), a[1])
+            try put(try table.add(try Ports.create(options: a[0]), rights: PortObject.defaultRights), a[1])
         case 32:  // port_queue
             try Ports.queue(table, handle, try getPacket(a[1]))
         case 33:  // port_wait
@@ -312,7 +312,7 @@ enum Syscalls {
             return try unmapAndClose(a, table)
         case 60...79:
             try taskCall(number, a, table)
-        case 45, 46, 47, 130...139:
+        case 45, 46, 47, 130...149:
             try driverCall(number, a, table)
         case 120...129:
             try Profiles.call(number, a, table)

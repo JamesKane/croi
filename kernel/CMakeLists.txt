@@ -10,6 +10,7 @@ add_library(kernel-swift OBJECT
   Kernel/Heap.swift
   Kernel/Irq/Interrupts.swift
   Kernel/Irq/Ipi.swift
+  Kernel/Irq/DeviceIrqs.swift
   Kernel/KernelLayout.swift
   Kernel/KernelPageTables.swift
   Kernel/KernelStack.swift
@@ -47,6 +48,7 @@ add_library(kernel-swift OBJECT
   Kernel/Object/DebugLog.swift
   Kernel/Object/ProfileObject.swift
   Kernel/Object/Resource.swift
+  Kernel/Object/InterruptObject.swift
   Kernel/Object/ProcessSelfTest.swift
   Kernel/Object/VmoObject.swift
   Kernel/Object/ObjectSelfTest.swift

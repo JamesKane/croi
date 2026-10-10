@@ -70,6 +70,69 @@ extension Syscalls {
             }
         case 131, 132:  // ioports_request / ioports_release(resource, io_addr, len): amd64
             try IoPorts.change(table, resource: handle, base: a[1], count: a[2], allow: number == 131)
+        case 140...146:
+            try interruptCall(number, a, table)
+        default:
+            throw .notSupported
+        }
+    }
+
+    /// Interrupt objects (K9c; values in interrupt.h): Zircon's calls and
+    /// rights, plus interrupt_set_affinity.
+    private static func interruptCall(_ number: UInt64, _ a: InlineArray<6, UInt64>,
+                                      _ table: borrowing HandleTable) throws(Status) {
+        let handle = UInt32(truncatingIfNeeded: a[0])
+        switch number {
+        case 140:  // interrupt_create(resource, number, options, out)
+            try check(a[3], MemoryLayout<UInt32>.size)
+            let options = UInt32(truncatingIfNeeded: a[2])
+            let object: ObjectPointer
+            if options & UInt32(CROI_INTERRUPT_VIRTUAL) != 0 {
+                object = try InterruptObjects.createVirtual(options: options)
+            } else {
+                guard a[1] <= UInt64(UInt32.max) else { throw .invalidArgs }
+                try Resources.validate(table, handle, kind: UInt32(CROI_RSRC_KIND_IRQ), base: a[1], size: 1)
+                object = try InterruptObjects.create(number: UInt32(a[1]), options: options)
+            }
+            let value: UInt32
+            do throws(Status) {
+                value = try table.add(object, rights: InterruptObject.defaultRights)
+            } catch {
+                object.release()
+                throw error
+            }
+            do throws(Status) {
+                try put(value, a[3])
+            } catch {
+                try? table.close(value)
+                throw error
+            }
+        case 141:  // interrupt_bind(interrupt, port, key, options)
+            guard a[3] == UInt64(CROI_INTERRUPT_BIND) || a[3] == UInt64(CROI_INTERRUPT_UNBIND) else {
+                throw .invalidArgs
+            }
+            let interrupt = try table.get(handle, type: .interrupt, rights: .read)
+            let port = try table.get(UInt32(truncatingIfNeeded: a[1]), type: .port, rights: .write)
+            guard PortPointer(object: port.object).pointee.bindToInterrupt else { throw .wrongType }
+            if a[3] == UInt64(CROI_INTERRUPT_BIND) {
+                try InterruptObjects.bind(interrupt.object, port: port.object, key: a[2])
+            } else {
+                try InterruptObjects.unbind(interrupt.object, port: port.object)
+            }
+        case 142:  // interrupt_ack(interrupt)
+            try InterruptObjects.ack(try table.get(handle, type: .interrupt, rights: .write).object)
+        case 143:  // interrupt_wait(interrupt, timestamp out or 0)
+            if a[1] != 0 { try check(a[1], MemoryLayout<UInt64>.size) }
+            let interrupt = try table.get(handle, type: .interrupt, rights: .wait)
+            let timestamp = try InterruptObjects.wait(interrupt.object, table: table.address, handle: handle)
+            if a[1] != 0 { try put(timestamp, a[1]) }
+        case 144:  // interrupt_destroy(interrupt)
+            if let status = InterruptObjects.destroy(try table.get(handle, type: .interrupt).object) { throw status }
+        case 145:  // interrupt_trigger(interrupt, options, timestamp)
+            guard a[1] == 0 else { throw .invalidArgs }
+            try InterruptObjects.trigger(try table.get(handle, type: .interrupt, rights: .signal).object, timestamp: a[2])
+        case 146:  // interrupt_set_affinity(interrupt, cpu mask)
+            try InterruptObjects.setAffinity(try table.get(handle, type: .interrupt, rights: .write).object, mask: a[1])
         default:
             throw .notSupported
         }

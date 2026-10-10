@@ -593,6 +593,45 @@ include/zbi.h; Todhchai item 20):
   framebuffer pattern read back write-combining. QEMU has SMBIOS and a
   framebuffer on all three machines.
 
+Interrupt objects, K9c (Kernel/Object/InterruptObject.swift,
+Kernel/Irq/DeviceIrqs.swift, include/interrupt.h, syscalls 140-146 in
+User/DriverSyscalls.swift; Todhchai item 13):
+- Zircon's InterruptDispatcher: states IDLE / TRIGGERED / NEEDACK /
+  WAITING / DESTROYED, delivered as a port packet (type 7, payload[0] the
+  timestamp; the port needs BIND_TO_INTERRUPT, and its interrupt packets
+  are a list of their own read first, owned by the object so firing never
+  allocates) or to one thread in interrupt_wait. Level interrupts are
+  masked when they fire and unmasked on ack / the next wait. Virtual
+  interrupts (interrupt_trigger) carry UNTRIGGERED (signal 4). Rights are
+  Zircon's (bind READ + port WRITE, ack WRITE, wait WAIT, trigger SIGNAL).
+  Timestamps are monotonic (no suspend, so boot time is the same).
+- Numbers: amd64 GSI (IOAPIC pins, vector 0x30 + GSI below 0x80; MADT
+  overrides for MODE_DEFAULT and REMAP_IRQ; else ISA edge-high, PCI
+  level-low), arm64 INTID (GICv3 SPIs; active high only), rv64 GSI (PLIC
+  sources, the RINTC's context per hart; active high only).
+  EDGE_BOTH is NOT_SUPPORTED. One object per number (ALREADY_BOUND).
+- `interrupt_set_affinity` (146, croi's): routes to the lowest CPU of the
+  mask with `interruptsReady` (IOAPIC physical destination, IROUTER, PLIC
+  enable bits); INVALID_ARGS when none, NOT_SUPPORTED for virtual ones.
+  Until set, the boot CPU. It doesn't yet consult `reserve(cpu:tag:)`.
+- `DeviceIrqs`: handler table (heap, by number) under `tableLock`, held
+  while a handler runs, so `unregister` means no handler is running; lock
+  order table -> object -> controller (and object -> scheduler -> port
+  packets). A number with no handler is masked when it fires.
+- Differences from Zircon: closing the handle a thread waits through
+  cancels its interrupt_wait (as object waits; Zircon cancels on the last
+  handle). The object is destroyed with its last reference. Ext 5's
+  scheduling-context handoff has a field (`context`) and a single wake
+  path (`signal`), unused.
+- Boot test mode 11 (`ProcessSelfTest.runInterrupts`): virtual interrupts
+  through every state, then each machine's RTC (amd64 CMOS periodic, GSI
+  8, edge; arm64 PL031, INTID 34, level; rv64 goldfish, GSI 11, level)
+  by port and by wait, routed to CPU 1 (the kernel checks where it was
+  taken). It reports the median wait wake (fire timestamp to the woken
+  thread reading the clock): KVM 11-18 us, the interrupt on CPU 1 waking
+  a thread elsewhere. QEMU's PLIC pends only on a rising line, so rv64
+  skips the "acked while still asserted fires again" check.
+
 ACPI (`Kernel/Acpi/`, after Zircon's acpi_lite): `AcpiTables` validates
 RSDP/XSDT and finds tables by signature; `withPhysicalBytes` reads through
 the physmap or a temporary mapping. `Madt.forEachCpu` yields local APIC /
@@ -628,9 +667,9 @@ MMIO), legacy 8259s and every IOAPIC pin masked; vectors 0xF0 IPI, 0xFE
 error, 0xFF spurious. arm64: GICv3 only (QEMU runs `gic-version=3`):
 distributor with all SPIs masked, per-CPU redistributor found by
 affinity, SGI 0 = IPI; the ITS is found but not set up yet. rv64: IPIs
-are SBI `send_ipi` (supervisor software interrupt); IMSIC/APLIC/PLIC are
-only counted. Device interrupts stay masked until drivers route them with
-an affinity. `Ipi.callOthers(fn, arg)` runs a C function on every other
+are SBI `send_ipi` (supervisor software interrupt); the PLIC takes
+device interrupts (K9c), IMSIC/APLIC are only counted. Device interrupts
+stay masked until an interrupt object takes them (K9c). `Ipi.callOthers(fn, arg)` runs a C function on every other
 ready CPU and waits (Zircon's mp_sync_exec); waiters drain their own
 mailbox, so cross-calls can't deadlock. `TlbShootdown.flushOthers` (amd64,
 rv64) ends every ArchAspace map/unmap/protect. SpinLock restores the

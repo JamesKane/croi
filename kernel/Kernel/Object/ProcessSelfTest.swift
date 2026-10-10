@@ -161,6 +161,39 @@ enum ProcessSelfTest {
         console.write("through physical VMOs, cached only; the kernel's framebuffer pattern read write-combining\n")
     }
 
+    /// K9c: interrupt objects from user mode (usertest.c mode 11): virtual
+    /// ones, then each machine's RTC (amd64 GSI 8, arm64 INTID 34, rv64
+    /// GSI 11), routed to CPU 1 by interrupt_set_affinity.
+    static func runInterrupts(_ console: Uart) {
+        #if arch(x86_64)
+        let number: UInt32 = 8
+        #elseif arch(arm64)
+        let number: UInt32 = 34
+        #else
+        let number: UInt32 = 11
+        #endif
+        let before = Counts()
+        let exitCode = runInProcess(mode: 11)
+        guard exitCode == 0x600D else {
+            console.write("  irq:    user program failed check ")
+            console.write(decimal: UInt64(bitPattern: exitCode))
+            console.write("\n")
+            panic("interrupt self-test: user side")
+        }
+        before.expectUnchanged(console)
+        guard Smp.count < 2 || DeviceIrqs.lastCpu(number) == 1 else {
+            console.write("  irq:    taken on CPU ")
+            console.write(decimal: UInt64(bitPattern: Int64(DeviceIrqs.lastCpu(number))))
+            console.write(", affinity said 1\n")
+            panic("interrupt self-test: affinity not honored")
+        }
+        console.write("  irq:    interrupt objects (virtual; RTC ")
+        console.write(decimal: UInt64(number))
+        console.write(" by port and by wait, on CPU 1), wait wake ")
+        console.write(decimal: Syscalls.reported.load(ordering: .relaxed) / 1000)
+        console.write(" us median\n")
+    }
+
     /// Live processes, address spaces and objects, to check nothing leaked.
     struct Counts {
         let processes = Processes.live.load(ordering: .relaxed)

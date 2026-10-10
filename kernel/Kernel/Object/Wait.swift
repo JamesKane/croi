@@ -167,6 +167,9 @@ enum Observers {
     /// The handle `handle` of `table` closed: its waits are canceled (the
     /// waiting threads remove their own observers; async waits just go).
     static func handleClosed(_ object: ObjectPointer, table: UInt64, handle: UInt32) {
+        if object.header.type == .interrupt {
+            InterruptObjects.handleClosed(object, table: table, handle: handle)  // an interrupt_wait through it
+        }
         object.header.lock.withLock {
             var previous: ObserverPointer? = nil
             var cursor = object.header.observers

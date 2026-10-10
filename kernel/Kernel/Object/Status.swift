@@ -77,6 +77,7 @@ enum ObjectType: UInt32 {
     case channel = 4
     case event = 5
     case port = 6
+    case interrupt = 9
     case log = 12
     case resource = 15
     case eventpair = 16

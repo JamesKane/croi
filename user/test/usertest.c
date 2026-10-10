@@ -1323,6 +1323,271 @@ static int64_t drivers(const startup_t *s) {
   return firmware(s);
 }
 
+// Mode 11 (K9c): interrupt objects. Virtual ones through their whole
+// state machine, then a real device per arch with a fixed interrupt:
+// amd64 the CMOS RTC's periodic interrupt (GSI 8, edge), arm64 the PL031
+// alarm (INTID 34, level), rv64 the goldfish RTC alarm (GSI 11, level).
+#define ERR_ALREADY_BOUND (-27)
+#define ERR_CANCELED (-23)
+#if defined(__x86_64__)
+#define IRQ_NUMBER 8
+#define IRQ_LEVEL 0
+#define IRQ_WAITS 16
+static void outb(uint16_t port, uint8_t value) { __asm__ volatile("outb %0, %1" ::"a"(value), "Nd"(port)); }
+static uint8_t inb(uint16_t port) {
+  uint8_t value;
+  __asm__ volatile("inb %1, %0" : "=a"(value) : "Nd"(port));
+  return value;
+}
+static uint8_t cmos_read(uint8_t reg) {
+  outb(0x70, 0x80 | reg);  // NMIs stay off while we poke
+  return inb(0x71);
+}
+static void cmos_write(uint8_t reg, uint8_t value) {
+  outb(0x70, 0x80 | reg);
+  outb(0x71, value);
+}
+static volatile uint32_t *irq_device_setup(const startup_t *s) {
+  uint32_t ports = 0;
+  CHECK(250, resource_create(s->resource, CROI_RSRC_KIND_IOPORT, 0x70, 2, &ports) == 0 &&
+                 sys(CROI_SYS_IOPORTS_REQUEST, ports, 0x70, 2, 0, 0) == 0);
+  return 0;
+}
+static void irq_device_start(volatile uint32_t *regs) {  // 1024 Hz periodic
+  (void)regs;
+  cmos_write(0xA, (cmos_read(0xA) & 0xF0) | 6);
+  cmos_write(0xB, cmos_read(0xB) | 0x40);
+  cmos_read(0xC);
+}
+static void irq_device_clear(volatile uint32_t *regs) {
+  (void)regs;
+  cmos_read(0xC);
+}
+static void irq_device_stop(volatile uint32_t *regs) {
+  (void)regs;
+  cmos_write(0xB, cmos_read(0xB) & ~0x40);
+  cmos_read(0xC);
+}
+#else
+#if defined(__aarch64__)
+#define IRQ_NUMBER 34
+#define IRQ_DEVICE 0x09010000ull
+#define IRQ_WAITS 1  // the PL031 matches whole seconds
+#else
+#define IRQ_NUMBER 11
+#define IRQ_DEVICE 0x101000ull
+#define IRQ_WAITS 8
+#endif
+#define IRQ_LEVEL 1
+static volatile uint32_t *irq_device_setup(const startup_t *s) {
+  return (volatile uint32_t *)map_physical(s, s->resource, IRQ_DEVICE, PAGE, CROI_CACHE_POLICY_UNCACHED_DEVICE,
+                                           CROI_VM_PERM_READ | CROI_VM_PERM_WRITE);
+}
+#if defined(__aarch64__)
+static void irq_device_start(volatile uint32_t *irq_regs) {  // the next second
+  irq_regs[1] = irq_regs[0] + 1;      // RTCMR = RTCDR + 1
+  irq_regs[4] = 1;                    // RTCIMSC
+}
+static void irq_device_clear(volatile uint32_t *irq_regs) { irq_regs[7] = 1; }  // RTCICR
+static void irq_device_stop(volatile uint32_t *irq_regs) {
+  irq_regs[4] = 0;
+  irq_regs[7] = 1;
+}
+#else
+static void irq_device_start(volatile uint32_t *irq_regs) {  // 1 ms from now
+  uint64_t now = irq_regs[0];         // TIME_LOW latches TIME_HIGH
+  now |= (uint64_t)irq_regs[1] << 32;
+  now += 1000000;
+  irq_regs[4] = 1;  // IRQ_ENABLED
+  irq_regs[3] = (uint32_t)(now >> 32);
+  irq_regs[2] = (uint32_t)now;  // ALARM_LOW arms it
+}
+static void irq_device_clear(volatile uint32_t *irq_regs) { irq_regs[7] = 1; }  // CLEAR_INTERRUPT
+static void irq_device_stop(volatile uint32_t *irq_regs) {
+  irq_regs[4] = 0;
+  irq_regs[5] = 1;  // CLEAR_ALARM
+  irq_regs[7] = 1;
+}
+#endif
+#endif
+
+static int64_t port_next(uint32_t port, uint64_t ns, croi_port_packet_t *packet) {
+  return sys(CROI_SYS_PORT_WAIT, port, ns == 0 ? 0 : now_ns() + ns, (uint64_t)packet, 0, 0);
+}
+
+static void sleep_ns(uint64_t ns) { sys(CROI_SYS_NANOSLEEP, now_ns() + ns, 0, 0, 0, 0); }
+
+// A worker: interrupt_wait on `handle`; the status and time land here.
+typedef struct {
+  uint32_t handle;
+  volatile int64_t status;
+  volatile uint64_t time;
+} irq_waiter_t;
+static void irq_waiter(uint64_t arg) {
+  irq_waiter_t *w = (irq_waiter_t *)arg;
+  uint64_t time = 0;
+  int64_t status = sys(CROI_SYS_INTERRUPT_WAIT, w->handle, (uint64_t)&time, 0, 0, 0);
+  w->time = time;
+  w->status = status;
+  sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
+}
+
+static void join_checked(uint32_t thread) {
+  CHECK(251, wait_for(thread, CROI_SIGNAL_TASK_TERMINATED, 5000000000ull) & CROI_SIGNAL_TASK_TERMINATED);
+  sys(CROI_SYS_HANDLE_CLOSE, thread, 0, 0, 0, 0);
+}
+
+static int64_t virtual_interrupts(const startup_t *s, uint32_t port) {
+  uint32_t v = 0, v2 = 0, plain = 0;
+  croi_port_packet_t p;
+  uint64_t time = 0;
+  CHECK(252, sys(CROI_SYS_INTERRUPT_CREATE, 0, 0, CROI_INTERRUPT_VIRTUAL | CROI_INTERRUPT_REMAP_IRQ, (uint64_t)&v,
+                 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_INTERRUPT_CREATE, 0, 0, CROI_INTERRUPT_VIRTUAL, (uint64_t)&v, 0) == 0 &&
+                 (wait_for(v, CROI_VIRTUAL_INTERRUPT_UNTRIGGERED, 0) & CROI_VIRTUAL_INTERRUPT_UNTRIGGERED) &&
+                 sys(CROI_SYS_INTERRUPT_TRIGGER, v, 1, 5, 0, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_INTERRUPT_SET_AFFINITY, v, 1, 0, 0, 0) == ERR_NOT_SUPPORTED &&
+                 sys(CROI_SYS_INTERRUPT_ACK, v, 0, 0, 0, 0) == ERR_BAD_STATE);
+  // Bound: a packet per trigger, the next only after an ack.
+  CHECK(253, sys(CROI_SYS_PORT_CREATE, 0, (uint64_t)&plain, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_INTERRUPT_BIND, v, plain, 9, CROI_INTERRUPT_BIND, 0) == ERR_WRONG_TYPE &&
+                 sys(CROI_SYS_INTERRUPT_BIND, v, port, 9, 2, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_INTERRUPT_BIND, v, port, 9, CROI_INTERRUPT_BIND, 0) == 0 &&
+                 sys(CROI_SYS_INTERRUPT_BIND, v, port, 9, CROI_INTERRUPT_BIND, 0) == ERR_ALREADY_BOUND &&
+                 sys(CROI_SYS_INTERRUPT_WAIT, v, 0, 0, 0, 0) == ERR_BAD_STATE);
+  sys(CROI_SYS_HANDLE_CLOSE, plain, 0, 0, 0, 0);
+  CHECK(254, sys(CROI_SYS_INTERRUPT_TRIGGER, v, 0, 1111, 0, 0) == 0 &&
+                 !(wait_for(v, CROI_VIRTUAL_INTERRUPT_UNTRIGGERED, 0) & CROI_VIRTUAL_INTERRUPT_UNTRIGGERED) &&
+                 port_next(port, 1000000000, &p) == 0 && p.type == CROI_PKT_TYPE_INTERRUPT && p.key == 9 &&
+                 p.payload[0] == 1111);
+  CHECK(255, sys(CROI_SYS_INTERRUPT_TRIGGER, v, 0, 2222, 0, 0) == 0 && port_next(port, 0, &p) == ERR_TIMED_OUT &&
+                 sys(CROI_SYS_INTERRUPT_ACK, v, 0, 0, 0, 0) == 0 && port_next(port, 0, &p) == 0 &&
+                 p.payload[0] == 2222 &&
+                 !(wait_for(v, CROI_VIRTUAL_INTERRUPT_UNTRIGGERED, 0) & CROI_VIRTUAL_INTERRUPT_UNTRIGGERED) &&
+                 sys(CROI_SYS_INTERRUPT_ACK, v, 0, 0, 0, 0) == 0 &&
+                 (wait_for(v, CROI_VIRTUAL_INTERRUPT_UNTRIGGERED, 0) & CROI_VIRTUAL_INTERRUPT_UNTRIGGERED));
+  // Unbound with a packet queued: it counts as triggered again.
+  CHECK(256, sys(CROI_SYS_INTERRUPT_TRIGGER, v, 0, 3333, 0, 0) == 0 &&
+                 sys(CROI_SYS_INTERRUPT_BIND, v, port, 0, CROI_INTERRUPT_UNBIND, 0) == 0 &&
+                 sys(CROI_SYS_INTERRUPT_BIND, v, port, 0, CROI_INTERRUPT_UNBIND, 0) == ERR_NOT_FOUND &&
+                 port_next(port, 0, &p) == ERR_TIMED_OUT &&
+                 sys(CROI_SYS_INTERRUPT_WAIT, v, (uint64_t)&time, 0, 0, 0) == 0 && time == 3333);
+  // A thread waiting: woken by a trigger; canceled by closing its handle.
+  irq_waiter_t w = {.handle = v, .status = 1};
+  uint32_t worker = start_thread(s, irq_waiter, (uint64_t)&w);
+  sleep_ns(10000000);
+  CHECK(257, sys(CROI_SYS_INTERRUPT_TRIGGER, v, 0, 4444, 0, 0) == 0);
+  join_checked(worker);
+  CHECK(258, w.status == 0 && w.time == 4444);
+  CHECK(259, sys(CROI_SYS_HANDLE_DUPLICATE, v, 1u << 31, (uint64_t)&v2, 0, 0) == 0);
+  w.handle = v2, w.status = 1;
+  worker = start_thread(s, irq_waiter, (uint64_t)&w);
+  sleep_ns(10000000);
+  CHECK(260, sys(CROI_SYS_INTERRUPT_WAIT, v, 0, 0, 0, 0) == ERR_BAD_STATE &&  // one waiter at a time
+                 sys(CROI_SYS_HANDLE_CLOSE, v2, 0, 0, 0, 0) == 0);
+  join_checked(worker);
+  CHECK(261, w.status == ERR_CANCELED);
+  // Destroyed: a waiter wakes CANCELED, and so does everything after.
+  w.handle = v, w.status = 1;
+  worker = start_thread(s, irq_waiter, (uint64_t)&w);
+  sleep_ns(10000000);
+  CHECK(262, sys(CROI_SYS_INTERRUPT_DESTROY, v, 0, 0, 0, 0) == 0);
+  join_checked(worker);
+  CHECK(263, w.status == ERR_CANCELED && sys(CROI_SYS_INTERRUPT_TRIGGER, v, 0, 1, 0, 0) == ERR_CANCELED &&
+                 sys(CROI_SYS_INTERRUPT_WAIT, v, 0, 0, 0, 0) == ERR_CANCELED &&
+                 sys(CROI_SYS_HANDLE_CLOSE, v, 0, 0, 0, 0) == 0);
+  return 0x600D;
+}
+
+static int64_t interrupts(const startup_t *s) {
+  uint32_t port = 0, irq = 0, intr = 0, other = 0;
+  croi_port_packet_t p;
+  CHECK(264, sys(CROI_SYS_PORT_CREATE, 2, (uint64_t)&port, 0, 0, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_PORT_CREATE, CROI_PORT_BIND_TO_INTERRUPT, (uint64_t)&port, 0, 0, 0) == 0);
+  int64_t result = virtual_interrupts(s, port);
+  if (result != 0x600D) return result;
+
+  // Creation: the IRQ resource must cover the number; one object per number.
+  volatile uint32_t *regs = irq_device_setup(s);
+  CHECK(265, resource_create(s->resource, CROI_RSRC_KIND_IRQ, IRQ_NUMBER, 1, &irq) == 0 &&
+                 sys(CROI_SYS_INTERRUPT_CREATE, irq, IRQ_NUMBER + 1, 0, (uint64_t)&intr, 0) == ERR_OUT_OF_RANGE &&
+                 sys(CROI_SYS_INTERRUPT_CREATE, s->resource, 5000, 0, (uint64_t)&intr, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_INTERRUPT_CREATE, irq, IRQ_NUMBER, 1u << 8, (uint64_t)&intr, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_INTERRUPT_CREATE, irq, IRQ_NUMBER, CROI_INTERRUPT_MODE_EDGE_BOTH, (uint64_t)&intr, 0) ==
+                     ERR_NOT_SUPPORTED);
+  CHECK(266, sys(CROI_SYS_INTERRUPT_CREATE, irq, IRQ_NUMBER, 0, (uint64_t)&intr, 0) == 0 &&
+                 sys(CROI_SYS_INTERRUPT_CREATE, irq, IRQ_NUMBER, 0, (uint64_t)&other, 0) == ERR_ALREADY_BOUND &&
+                 sys(CROI_SYS_INTERRUPT_TRIGGER, intr, 0, 1, 0, 0) == ERR_BAD_STATE);
+  // Affinity: to CPU 1 (the kernel checks where it was taken).
+  CHECK(267, sys(CROI_SYS_INTERRUPT_SET_AFFINITY, intr, 0, 0, 0, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_INTERRUPT_SET_AFFINITY, intr, 1ull << 63, 0, 0, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_INTERRUPT_SET_AFFINITY, intr, 1u << 1, 0, 0, 0) == 0);
+
+  // Bound to a port.
+  CHECK(268, sys(CROI_SYS_INTERRUPT_BIND, intr, port, 42, CROI_INTERRUPT_BIND, 0) == 0);
+  uint64_t before = now_ns();
+  irq_device_start(regs);
+  CHECK(269, port_next(port, 3000000000ull, &p) == 0 && p.type == CROI_PKT_TYPE_INTERRUPT && p.key == 42 &&
+                 p.payload[0] >= before && p.payload[0] <= now_ns());
+#if IRQ_LEVEL && !defined(__riscv)
+  // Level: still asserted, so an ack without clearing it fires again.
+  // (Not on rv64: QEMU's PLIC sets pending only on a rising line, so a
+  // source completed while still high never comes back; real gateways
+  // forward it again.)
+  CHECK(270, sys(CROI_SYS_INTERRUPT_ACK, intr, 0, 0, 0, 0) == 0 && port_next(port, 500000000, &p) == 0 &&
+                 p.key == 42);
+  irq_device_stop(regs);
+#elif IRQ_LEVEL
+  irq_device_stop(regs);
+#else
+  // Edge: further edges while unacked are only remembered, then sent on ack.
+  irq_device_clear(regs);
+  sleep_ns(20000000);
+  CHECK(270, port_next(port, 0, &p) == ERR_TIMED_OUT && sys(CROI_SYS_INTERRUPT_ACK, intr, 0, 0, 0, 0) == 0 &&
+                 port_next(port, 500000000, &p) == 0 && p.key == 42);
+  irq_device_stop(regs);
+  for (int i = 0; i < 3 && port_next(port, 0, &p) != ERR_TIMED_OUT;) i++;
+#endif
+  // Quiet once the device is: ack, then nothing more.
+  sys(CROI_SYS_INTERRUPT_ACK, intr, 0, 0, 0, 0);
+  for (int i = 0; i < 3 && port_next(port, 20000000, &p) == 0; i++) sys(CROI_SYS_INTERRUPT_ACK, intr, 0, 0, 0, 0);
+  CHECK(271, port_next(port, 50000000, &p) == ERR_TIMED_OUT &&
+                 sys(CROI_SYS_INTERRUPT_BIND, intr, port, 0, CROI_INTERRUPT_UNBIND, 0) == 0);
+
+  // interrupt_wait: the woken thread's latency from the fire's timestamp.
+  uint64_t latencies[IRQ_WAITS];
+  irq_device_start(regs);
+  for (int i = 0; i < IRQ_WAITS; i++) {
+    uint64_t time = 0;
+    CHECK(272, sys(CROI_SYS_INTERRUPT_WAIT, intr, (uint64_t)&time, 0, 0, 0) == 0 && time != 0);
+    latencies[i] = now_ns() - time;
+    irq_device_clear(regs);
+#if IRQ_LEVEL
+    if (i + 1 < IRQ_WAITS) irq_device_start(regs);
+#endif
+  }
+  irq_device_stop(regs);
+  for (int i = 1; i < IRQ_WAITS; i++) {  // insertion sort for the median
+    uint64_t v = latencies[i];
+    int j = i;
+    for (; j > 0 && latencies[j - 1] > v; j--) latencies[j] = latencies[j - 1];
+    latencies[j] = v;
+  }
+  sys(CROI_SYS_TEST_REPORT, latencies[IRQ_WAITS / 2], 0, 0, 0, 0);
+
+  // Destroyed: everything is CANCELED; the number is free again.
+  CHECK(273, sys(CROI_SYS_INTERRUPT_DESTROY, intr, 0, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_INTERRUPT_ACK, intr, 0, 0, 0, 0) == ERR_BAD_STATE &&
+                 sys(CROI_SYS_INTERRUPT_WAIT, intr, 0, 0, 0, 0) == ERR_CANCELED &&
+                 sys(CROI_SYS_INTERRUPT_SET_AFFINITY, intr, 1, 0, 0, 0) == ERR_CANCELED &&
+                 sys(CROI_SYS_HANDLE_CLOSE, intr, 0, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_INTERRUPT_CREATE, irq, IRQ_NUMBER, 0, (uint64_t)&intr, 0) == 0 &&
+                 sys(CROI_SYS_HANDLE_CLOSE, intr, 0, 0, 0, 0) == 0);
+  sys(CROI_SYS_HANDLE_CLOSE, irq, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, port, 0, 0, 0, 0);
+  return 0x600D;
+}
+
 // Mode 4: something to sample. Three frames deep, spin for `ns`, with a
 // clock syscall every 64 iterations (so some samples land in the kernel
 // and must continue into these frames).
@@ -1362,6 +1627,7 @@ __attribute__((section(".text.start"))) [[noreturn]] void _start(uint64_t mode, 
             : mode == 8 ? sync_objects((const startup_t *)handle)
             : mode == 9 ? exceptions((const startup_t *)handle)
             : mode == 10 ? drivers((const startup_t *)handle)
+            : mode == 11 ? interrupts((const startup_t *)handle)
             : mode >= 0x400 ? child((uint32_t)mode, handle, vdso_base)
                         : objects());
 }

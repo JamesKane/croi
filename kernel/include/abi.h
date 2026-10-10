@@ -14,3 +14,4 @@
 #include "resource.h"
 #include "vmo.h"
 #include "zbi.h"
+#include "interrupt.h"
