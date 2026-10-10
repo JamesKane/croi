@@ -148,26 +148,30 @@ order, printing `Budget("<m2's name>", ns)`. Add the name to `BUDGETS` in
 
 ## Results so far (2026-10-10, AMD Ryzen 7 9700X, KVM, busy machine)
 
-Three interleaved rounds with another build and QEMU tests running (load
-6-7.5), so a pattern, not a measurement:
+croi at 6e93cf0 (clean tree), six interleaved rounds with another build and
+QEMU tests running (load 6.5-7.5), so a pattern, not a measurement. Median
+over the rounds, [min-max]:
 
 | Budget | croi | croi-nopoll | zircon | zircon-nomitig |
 |---|---|---|---|---|
-| `syscall.null` (< 100 ns) | 32 ns | 33 ns | 37 ns | 33 ns |
-| `ipc.channel_call` (< 1 µs) | 1.48 µs | 1.43 µs | 2.29 µs | 2.04 µs |
-| `port.wake_median` (< 2 µs) | 1.85 µs | 6.19 µs | 5.87 µs | 5.96 µs |
-| `timer.wake_error_p99` (< 100 µs) | 27 µs | 24 µs | 2.04 ms | 2.07 ms |
+| `syscall.null` (< 100 ns) | 33 ns [32-43] | 34 ns [30-39] | 39 ns [37-59] | 33 ns [33-45] |
+| `ipc.channel_call` (< 1 µs) | 1.45 µs [1.41-1.82] | 1.39 µs [1.38-1.59] | 2.24 µs [2.16-3.13] | 2.04 µs [2.02-2.65] |
+| `port.wake_median` (< 2 µs) | 1.86 µs [1.82-2.35] | 6.16 µs [6.10-6.51] | 5.94 µs [5.84-7.49] | 5.77 µs [5.73-7.32] |
+| `port.wake_p99` | 7.7 µs [3.2-84] | 17.7 µs [11.9-39.8] | 20.9 µs [11.1 µs-8.4 ms] | 12.7 µs [11.2-99.4] |
+| `timer.wake_error_p99` (< 100 µs) | 26 µs [20-45] | 35 µs [25 µs-1.5 ms] | 1.84 ms [27 µs-2.09 ms] | 2.02 ms [22 µs-2.09 ms] |
 
-- Null syscall: level; Zircon's mitigations cost little here.
+- Null syscall: level; Zircon's mitigations cost ~6 ns here.
 - `channel_call`: croi is ~0.6-0.8 µs faster than Zircon; neither meets
   1 µs. Zircon is no proof the target is attainable.
 - Port wake: croi meets 2 µs only through idle polling. Without it croi
   and Zircon are level at ~6 µs (IPI plus HLT exit under KVM).
 - Wake error: Zircon is usually far over (errors spread evenly over
-  0-2 ms), with some boots near 10-20 µs. Not timer slack (none by
+  0-2 ms), with some boots near 20-30 µs. Not timer slack (none by
   default), pinning, the sleeper's profile, or the TSC-deadline timer
-  (`CPU=host,-tsc-deadline` doesn't help). Unexplained so far; next is a
-  ktrace of the sleeper's CPU. croi is steady at 24-27 µs alongside it.
+  (`CPU=host,-tsc-deadline` doesn't help). croi without idle polling had
+  one such boot too (1.5 ms), so a halted vCPU's late wake under host load
+  is a suspect, one Zircon meets far more often. Unexplained so far; next
+  is a ktrace of the sleeper's CPU.
 
 Host: governor `powersave`, boost on, KVM `halt_poll_ns` 200000. These
 change the absolute figures for both kernels.
