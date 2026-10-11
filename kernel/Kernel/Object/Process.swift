@@ -1,4 +1,5 @@
 import CKernel
+import Fmt
 import Synchronization
 
 /// Jobs, processes, threads and VMARs (K7a; Zircon's JobDispatcher,
@@ -516,6 +517,56 @@ enum Processes {
         if object.header.lock.withLock({ process.pointee.running == 0 && process.pointee.handles != nil }) {
             teardown(object)
         }
+        if threads.count > 0, spared == nil, BootOptions.has("croi.kill_watch=1") { watchKill(object) }
+    }
+
+    // MARK: Lockup reports
+
+    /// With `croi.kill_watch=1`: a killed process should be dead within
+    /// moments: a kernel thread
+    /// holding a reference checks after 1 s and, if it isn't, prints its
+    /// threads and the scheduler's state (lockup detection; Todhchai saw
+    /// kills finish only when an unrelated interrupt came). A thread, not
+    /// a timer: the last reference may go here, and teardown can't run in
+    /// interrupt context.
+    private static func watchKill(_ object: ObjectPointer) {
+        object.retain()
+        do throws(VmError) {
+            let watcher = try Scheduler.spawn("kill-watch", killWatch, object.address)
+            _ = consume watcher  // detached
+        } catch {
+            object.release()
+        }
+    }
+
+    private static let killWatch: Thread.Entry = { address in
+        let object = ObjectPointer(address: address)
+        let process = ProcessPointer(object: object)
+        Scheduler.sleep(until: Clock.now() + 1_000_000_000)
+        let stuck = object.header.lock.withLock { process.pointee.state != .dead }
+        if stuck, let console = panicConsole {
+            console.write("kill: process ")
+            console.write(decimal: object.header.koid)
+            console.write(" not terminated 1 s after its kill; running ")
+            object.header.lock.withLock {
+                console.write(decimal: UInt64(process.pointee.running))
+                console.write(", threads:")
+                for i in 0..<process.pointee.threads.count {
+                    let thread = ThreadObjectPointer(object: ObjectPointer(address: process.pointee.threads[i]))
+                    console.write(" ")
+                    console.write(decimal: UInt64(thread.pointee.index))
+                    console.write("=")
+                    console.write(hex: thread.pointee.thread)
+                    console.write(thread.pointee.state == .dead ? "(dead)" : "")
+                }
+            }
+            console.write("\n")
+            let saved = arch_interrupts_save()  // dump takes the scheduler lock masked
+            Scheduler.dump(to: console)
+            arch_interrupts_restore(saved)
+        }
+        object.release()
+        return 0
     }
 
     /// task_kill on a thread.

@@ -1,5 +1,6 @@
 import CKernel
 import Fmt
+import Synchronization
 
 /// Power control (K10e; Zircon's system_powerctl and platform halt, power.h):
 /// shutdown and reboot for user space's power service.
@@ -166,8 +167,12 @@ enum Power {
             Scheduler.sleep(until: min(Clock.now() + 1_000_000, patience))
         }
         let drained = Clock.now()
+        // The dumper finishes the line it is on and stops, so no CPU is
+        // halted part way through the console (a capped drain left one
+        // there).
+        DebugLog.quiet.store(true, ordering: .releasing)
         _ = arch_interrupts_save()  // masked from here on
-        _ = Ipi.stopOthers(patience: 10_000_000)
+        _ = Ipi.stopOthers(patience: 50_000_000)
         // The kernel's own part, without waiting for the console: that
         // depends on how much log is still queued (m2's last lines take
         // ~20 ms through a KVM serial port, a byte per exit), so it is
@@ -184,9 +189,15 @@ enum Power {
                 Budgets.report(console, "power.log_drain", drained - draining)
             }
         }
-        switch action {
-        case .shutdown: powerOff()
-        case .reboot: resetMachine()
+        panicConsole?.drain(patience: 100_000_000)  // an emulator drops what is left
+        // The hardware (an emulator's main loop) may take a while: wait
+        // before saying it didn't act, and ask twice.
+        for _ in 0..<2 {
+            switch action {
+            case .shutdown: powerOff()
+            case .reboot: resetMachine()
+            }
+            Clock.delay(nanoseconds: 1_000_000_000)
         }
         panicConsole?.write("croi kernel: the hardware didn't act; halted\n")
         arch_halt()

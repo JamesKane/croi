@@ -74,7 +74,7 @@ enum SchedulerSelfTest {
         // (A slow emulator can let the first wait time out before the waker
         // sees it: that misses the window, and the round is retried.)
         var caught = false
-        for _ in 0..<10 where !caught {
+        for _ in 0..<20 where !caught {
             waiterDone.store(false, ordering: .relaxed)
             dueAt = 0
             let waiter = spawn("waiter", last, waitTwice, 0)
@@ -142,7 +142,7 @@ enum SchedulerSelfTest {
     /// woken, then timed out. 2: the first wait timed out (window missed).
     private static let waitTwice: Thread.Entry = { _ in
         let results = Scheduler.locked { () -> (Thread.WaitResult, Thread.WaitResult) in
-            dueAt = Clock.now() + 3_000_000
+            dueAt = Clock.now() + 20_000_000  // room for a waker a loaded host runs late
             let first = Scheduler.block(on: queue, deadline: dueAt)
             return (first, Scheduler.block(on: queue, deadline: dueAt))
         }

@@ -25,6 +25,9 @@ enum DebugLog {
     nonisolated(unsafe) private static var readers: UInt64 = 0
     nonisolated(unsafe) private static var dumperQueue = QueuePointer(address: 0)
     nonisolated(unsafe) private static var dumped: UInt64 = 0
+    /// Set at power off (K10e): the dumper stops at the end of its line, so
+    /// the CPUs are halted with nobody part way through the console.
+    static let quiet = Atomic<Bool>(false)
     /// Records the dumper has finished with (K10d: CROI_INFO_DEBUGLOG).
     private static let printed = Atomic<UInt64>(0)
 
@@ -146,7 +149,7 @@ enum DebugLog {
         var line = InlineArray<320, UInt8>(repeating: 0)
         while true {
             Scheduler.locked {
-                while next.load(ordering: .acquiring) == dumped {
+                while next.load(ordering: .acquiring) == dumped || quiet.load(ordering: .acquiring) {
                     _ = Scheduler.block(on: dumperQueue, deadline: .max)
                 }
             }

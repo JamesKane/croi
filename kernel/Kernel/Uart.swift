@@ -51,6 +51,24 @@ import Synchronization
         }
     }
 
+    /// Waits (up to `patience` ns) until everything written has left the
+    /// transmitter: before the machine is turned off, which drops what an
+    /// emulated UART still holds (power off, K10e).
+    func drain(patience: UInt64) {
+        let giveUp = Clock.now() + patience
+        while Clock.now() < giveUp {
+            switch config.kind {
+            case CROI_UART_NS16550_PIO, CROI_UART_NS16550_MMIO:
+                if ns16550Read(register: 5) & 0x40 != 0 { return }  // LSR.TEMT
+            case CROI_UART_PL011:
+                if unsafe mmio32(0x18).load() & 0x88 == 0x80 { return }  // FR.TXFE, not BUSY
+            default:
+                return
+            }
+            arch_spin_pause()
+        }
+    }
+
     private func put(_ byte: UInt8) {
         switch config.kind {
         case CROI_UART_NS16550_PIO, CROI_UART_NS16550_MMIO:

@@ -849,7 +849,15 @@ Todhchai M4's shutdown):
   `power.shutdown_kernel` / `power.reboot_kernel` (syscall entry to the
   hardware write, less the console wait: KVM ~20-180 µs, limit 10 ms)
   and `power.log_drain` (the wait itself: KVM ~25 ms of m2's last lines,
-  a serial byte per VM exit), and act; failure after that halts. Everything else
+  a serial byte per VM exit), and act; failure after that halts.
+  At the drain's end the dumper is made quiet (it stops at a line's end,
+  so no CPU is halted holding the console), the UART is drained
+  (`Uart.drain`: an emulator drops what it still holds at power off), and
+  the hardware is asked twice, a second apart, before "didn't act".
+- `croi.kill_watch=1` (lockup reports): 1 s after a task_kill of a
+  process, a kernel thread holding it prints its threads and
+  `Scheduler.dump` if it isn't dead (it holds the process that second,
+  so self-tests' leak checks see it later). Everything else
   (suspend, hotplug, PL1, bootloader/recovery) is NOT_SUPPORTED.
 - amd64: no SHUTDOWN (NOT_SUPPORTED): user space passes \_S5's sleep
   types (ACPI_TRANSITION_S_STATE, target 5), written to PM1a/b control
