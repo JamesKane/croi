@@ -813,8 +813,15 @@ THREAD, VMO, maps, handle table) and the NAME property.
   object_wait_many, handle_close_many, port_cancel_key, the channel *_etc
   calls, ZX_PROP_NAME; then vmar_op_range and the info topics (PROCESS,
   THREAD, THREAD_STATS, TASK_RUNTIME, JOB, JOB_CHILDREN, JOB_PROCESSES,
-  PROCESS_THREADS, VMO, PROCESS_VMOS, PROCESS_MAPS, HANDLE_TABLE). Next:
-  clock objects (UTC) and the debug calls.
+  PROCESS_THREADS, VMO, PROCESS_VMOS, PROCESS_MAPS, HANDLE_TABLE).
+- **K13f: clock objects.** **Done** (2026-10-11): Zircon's clocks,
+  mappable ones included; reference ticks are monotonic ns. A UTC clock
+  for user space (PA_CLOCK_UTC) is the time service's to create.
+- **K13g: debugging.** Part 1 **done** (2026-10-11): task_suspend and
+  tokens (syscalls restarted in the kernel for the waits that can be),
+  process_read/write_memory. Part 2 next: debugger exception channels
+  (process and job), PROCESS/THREAD_STARTING and THREAD_EXITING,
+  exception reports, single-step and hardware breakpoints.
 
 ### K13a (agreed with Todhchai, 2026-10-11): VMO slices and ZERO_CHILDREN
 

@@ -518,6 +518,28 @@ enum Scheduler {
         }
     }
 
+    /// A suspension for `thread` (K13g): it parks on its way to user mode;
+    /// a restartable wait it is blocked in ends now (`suspendRetry`), one
+    /// running elsewhere is preempted. Lock held.
+    static func requestSuspend(_ thread: ThreadPointer) {
+        thread.pointee.suspendPending = true
+        switch thread.pointee.state {
+        case .blocked where thread.pointee.interruptible && thread.pointee.restartable:
+            if let queue = thread.pointee.waitQueue {
+                queue.pointee.remove(thread)
+                thread.pointee.waitQueue = nil
+                if let owner = queue.pointee.owner { updateEffectiveProfile(owner) }
+            }
+            thread.pointee.suspendRetry = true
+            thread.pointee.waitResult = .interrupted
+            makeReady(thread)
+        case .running where thread.pointee.cpu != Int(Cpu.current):
+            requestPreemption(on: thread.pointee.cpu)
+        default:
+            break
+        }
+    }
+
     /// Sleeps until `deadline` unless the thread is killed (nanosleep).
     static func sleepInterruptible(until deadline: UInt64) {
         locked {

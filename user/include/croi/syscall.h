@@ -56,6 +56,7 @@ enum : uint64_t {
   CROI_SYS_VMAR_DESTROY = 74,      // (vmar)
   CROI_SYS_VMAR_UNMAP_HANDLE_CLOSE_THREAD_EXIT = 75,  // (vmar, addr, len, close_handle): no return on success
   CROI_SYS_VMAR_OP_RANGE = 76,     // (vmar, op, addr, len, buffer 0, buffer_size 0), K13e
+  CROI_SYS_VMAR_MAP_CLOCK = 77,    // (vmar, options, vmar_offset, clock, len, uint64_t *mapped_addr), K13f
   // Channels, eventpairs (K7b): Zircon's, except channel_read packs its
   // capacities (bytes | handles << 32) and writes both actuals (two
   // uint32_t) through one pointer.
@@ -163,6 +164,13 @@ enum : uint64_t {
   CROI_SYS_CHANNEL_WRITE_ETC = 213,     // (channel, options, bytes, num_bytes, croi_handle_disposition_t *, num_handles)
   CROI_SYS_CHANNEL_READ_ETC = 214,      // (channel, options, bytes, croi_handle_info_t *, num_bytes | num_handles << 32, actuals)
   CROI_SYS_CHANNEL_CALL_ETC = 215,      // (channel, options, deadline, croi_channel_call_etc_args_t *, actual_bytes, actual_handles)
+  CROI_SYS_CLOCK_CREATE = 216,          // (options | args version << 58, args, out), K13f: clock.h
+  CROI_SYS_CLOCK_READ = 217,            // (clock, int64_t *now)
+  CROI_SYS_CLOCK_GET_DETAILS = 218,     // (clock, CROI_CLOCK_ARGS_VERSION(1), croi_clock_details_v1_t *)
+  CROI_SYS_CLOCK_UPDATE = 219,          // (clock, flags | args version << 58, args)
+  CROI_SYS_PROCESS_READ_MEMORY = 230,   // (process, vaddr, buffer, size, size_t *actual), K13g
+  CROI_SYS_PROCESS_WRITE_MEMORY = 231,  // (process, vaddr, buffer, size, size_t *actual): croi.debug_syscalls
+  CROI_SYS_TASK_SUSPEND = 232,          // (thread or process, uint32_t *token)
   CROI_SYS_SYSTEM_POWERCTL = 180,       // (power resource, cmd, const croi_system_powerctl_arg_t *)
 
   // The kernel's CPRNG (K11b; Zircon's): at most CROI_CPRNG_MAX_LEN bytes.
@@ -193,6 +201,7 @@ enum : uint32_t {  // timer_create options (Zircon's ZX_TIMER_SLACK_*)
 #include "counter.h"  // counter signals, value waits
 #include "timeline.h" // display timelines, their page
 #include "power.h"    // system_powerctl commands, croi_system_powerctl_arg_t
+#include "clock.h"    // clock objects (K13f)
 
 enum : uint64_t {  // CROI_SYS_TRACE_CONFIGURE ops
   CROI_TRACE_OP_START = 0,   // a: categories, b: pages per CPU, c: mode;

@@ -1410,6 +1410,61 @@ TaskSyscalls `vmarOpRange`, syscall 76; task.h, vmo.h):
   be waited for); `UserAspacePointer.mapPresent` maps what the VMO has.
 - Mode 17's `info_topics`.
 
+Clock objects, K13f (Kernel/Object/ClockObject.swift, User/ClockSyscalls.swift,
+syscalls 216-219 and 77; clock.h):
+- Zircon's clock (type 30; rights BASIC | IO | SIGNAL | PROPERTY, MAP for
+  a MAPPABLE one; no policy): clock_create (options MONOTONIC, CONTINUOUS,
+  AUTO_START, BOOT, MAPPABLE; args version in bits 63:58, v1 backstop),
+  clock_read, clock_get_details (v1), clock_update (v1 value / rate ppm
+  +-1000 / error bound, v2 with a reference value), vmar_map_clock (77:
+  read-only, one page), ZX_INFO_CLOCK_MAPPED_SIZE (40), NAME. Zircon's
+  checks and rules: unstarted reads the backstop and only a value starts
+  it (BAD_STATE), MONOTONIC never back, CONTINUOUS no jumps once started,
+  never below the backstop; STARTED set at the start, UPDATED pulsed at
+  every update (set then cleared: waits and async waits see it).
+- croi's reference "ticks" are monotonic ns (the counter's 32.32 scale has
+  no u32/u32 ratio): reference_ticks_to_synthetic = reference_to_
+  synthetic and the details' tick fields are ns. BOOT is monotonic (no
+  suspend); timer_create takes clock id BOOT (1) too.
+- State is croi_clock_page_t (Zircon's mapped layout) in the object under
+  its lock; a MAPPABLE clock publishes it to a one-page read-only
+  contiguous VMO under `seq_lock` (generation = seq / 2, 1 when created).
+  Values: b_off + floor((r - a_off) * num / den), saturating (128-bit).
+  PA_CLOCK_UTC (0x40) is defined; nothing creates a UTC clock yet.
+- Mode 17's `clocks`.
+
+Suspension and process memory, K13g part 1 (Kernel/Object/Debug.swift,
+User/DebugSyscalls.swift, syscalls 230-232; task.h):
+- task_suspend (232; Zircon's task_suspend_token too): WRITE on a thread
+  or process (not the caller's own: NOT_SUPPORTED; others WRONG_TYPE),
+  a token (type 27, TRANSFER | INSPECT) that resumes it when closed.
+  `ThreadObject.suspendCount` (atomic); the scheduler thread's
+  `suspendPending` makes `UserTraps.leaving` (and the first entry) park it
+  on `suspendQueue` until the count is 0 or it is killed, `suspended` and
+  the SUSPENDED / RUNNING signals (1 << 5 / 1 << 4) meanwhile; ZX_INFO_
+  THREAD says SUSPENDED; thread_read/write_state work on its stack-top
+  frame. A process counts once and suspends each thread; threads started
+  meanwhile start suspended.
+- Blocked threads: Zircon wakes interruptible waits with INTR_RETRY and the
+  vDSO re-issues the call; croi's programs call the kernel directly, so
+  the kernel restarts: `Syscalls.restartable` (nanosleep, wait_one,
+  port_wait, vmo_read, futex_wait, interrupt_wait, counter_wait, readv,
+  readv_at, wait_many) marks `Thread.restartable`;
+  `Scheduler.requestSuspend` ends such a wait (`suspendRetry`), and
+  dispatch leaves the result unwritten and rewinds the PC over the syscall
+  (`ExceptionFrame.restartSyscall`: amd64 rip - 2, arm64 elr - 4, rv64 sepc
+  not yet advanced). A pager wait under a user page fault is left the
+  same way (the fault is taken again). Other waits (channel_call,
+  exceptions) suspend when they end.
+- process_read_memory (230; READ | WRITE) / process_write_memory (231;
+  WRITE; `croi.debug_syscalls=on`, implied by croi.test=1, else
+  NOT_SUPPORTED): within the one mapping at the address (NOT_FOUND
+  otherwise), clamped, OUT_OF_RANGE for nothing; pager pages waited for;
+  writing a mapping that isn't writable first gives it a private snapshot
+  child (`UserAspacePointer.privatize`, Zircon's ForceWritable), the vDSO
+  refused; executable code written is synced for instruction fetch.
+- Mode 17's `debugging`.
+
 Randomness, K11b (Kernel/Random.swift, syscalls 181-182; handoff v5):
 - The loader reads 32 bytes from EFI_RNG_PROTOCOL if the firmware has
   one (edk2 over virtio-rng: qemu.sh adds `-device virtio-rng-pci`) into

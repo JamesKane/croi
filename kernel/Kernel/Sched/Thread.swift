@@ -109,6 +109,12 @@ struct Thread: ~Copyable {
     /// Killed (task_kill): it exits on its way back to user mode, and its
     /// interruptible waits end at once. Blocked in one now.
     var killPending = false
+    /// K13g: a suspension waits for it on its way to user mode; the
+    /// syscall it is in may be restarted (a wait woken for a suspension
+    /// then sets `suspendRetry`, and the syscall is made again later).
+    var suspendPending = false
+    var restartable = false
+    var suspendRetry = false
     var interruptible = false
     /// The futex record it waits on (moved by requeue), or 0.
     var futex: UInt64 = 0

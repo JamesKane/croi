@@ -3167,6 +3167,191 @@ static int64_t info_topics(const startup_t *s) {
   return 0;
 }
 
+// K13f: clock objects. A clock's value at reference time r from its
+// mapped page's transform (small spans only: plain 64-bit math).
+static int64_t clock_at(const croi_clock_transformation_t *t, int64_t r) {
+  if (t->rate.synthetic_ticks == 0) return t->synthetic_offset;
+  int64_t d = r - t->reference_offset;
+  return t->synthetic_offset + d * (int64_t)t->rate.synthetic_ticks / (int64_t)t->rate.reference_ticks;
+}
+
+static int64_t clocks(const startup_t *s) {
+  uint32_t clock = 0, other = 0, port = 0, timer = 0;
+  int64_t now = 0;
+  croi_clock_create_args_v1_t create = {1000};
+  croi_clock_details_v1_t d;
+  croi_clock_update_args_v1_t up = {0, {0}, 0, 0};
+  // Refusals at creation; a fresh clock reads its backstop until started.
+  CHECK(530, sys(CROI_SYS_CLOCK_CREATE, 1u << 5, 0, (uint64_t)&clock, 0, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_CLOCK_CREATE, CROI_CLOCK_OPT_CONTINUOUS, 0, (uint64_t)&clock, 0, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_CLOCK_CREATE, 0, (uint64_t)&create, (uint64_t)&clock, 0, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_CLOCK_CREATE, CROI_CLOCK_ARGS_VERSION(1) | CROI_CLOCK_OPT_MONOTONIC | CROI_CLOCK_OPT_MAPPABLE,
+                     (uint64_t)&create, (uint64_t)&clock, 0, 0) == 0 &&
+                 sys(CROI_SYS_CLOCK_READ, clock, (uint64_t)&now, 0, 0, 0) == 0 && now == 1000 &&
+                 !(wait_for(clock, CROI_CLOCK_STARTED, 0) & CROI_CLOCK_STARTED) &&
+                 sys(CROI_SYS_CLOCK_GET_DETAILS, clock, CROI_CLOCK_ARGS_VERSION(1), (uint64_t)&d, 0, 0) == 0 &&
+                 d.generation_counter == 1 && d.backstop_time == 1000 && d.error_bound == CROI_CLOCK_UNKNOWN_ERROR &&
+                 sys(CROI_SYS_CLOCK_GET_DETAILS, clock, 0, (uint64_t)&d, 0, 0) == ERR_INVALID_ARGS);
+  // Starting: a rate alone is BAD_STATE; a value starts it (STARTED, and
+  // an UPDATED pulse an async wait sees); backwards and below the backstop
+  // refused; rates within +-1000 ppm.
+  up.rate_adjust = 10;
+  CHECK(531, sys(CROI_SYS_CLOCK_UPDATE, clock, CROI_CLOCK_ARGS_VERSION(1) | CROI_CLOCK_UPDATE_OPTION_RATE_ADJUST_VALID,
+                 (uint64_t)&up, 0, 0) == ERR_BAD_STATE &&
+                 sys(CROI_SYS_PORT_CREATE, 0, (uint64_t)&port, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_OBJECT_WAIT_ASYNC, clock, port, 9, CROI_CLOCK_UPDATED, 0) == 0);
+  up.value = 5000000000ll;
+  croi_port_packet_t packet;
+  CHECK(532, sys(CROI_SYS_CLOCK_UPDATE, clock, CROI_CLOCK_ARGS_VERSION(1) | CROI_CLOCK_UPDATE_OPTION_VALUE_VALID,
+                 (uint64_t)&up, 0, 0) == 0 &&
+                 (wait_for(clock, CROI_CLOCK_STARTED, 0) & CROI_CLOCK_STARTED) &&
+                 !(wait_for(clock, CROI_CLOCK_UPDATED, 0) & CROI_CLOCK_UPDATED) &&
+                 sys(CROI_SYS_PORT_WAIT, port, 0, (uint64_t)&packet, 0, 0) == 0 && packet.key == 9 &&
+                 sys(CROI_SYS_CLOCK_READ, clock, (uint64_t)&now, 0, 0, 0) == 0 && now >= 5000000000ll &&
+                 now < 5000000000ll + 1000000000ll);
+  up.value = 4000000000ll;
+  CHECK(533, sys(CROI_SYS_CLOCK_UPDATE, clock, CROI_CLOCK_ARGS_VERSION(1) | CROI_CLOCK_UPDATE_OPTION_VALUE_VALID,
+                 (uint64_t)&up, 0, 0) == ERR_INVALID_ARGS);
+  up.rate_adjust = 2000;
+  CHECK(534, sys(CROI_SYS_CLOCK_UPDATE, clock, CROI_CLOCK_ARGS_VERSION(1) | CROI_CLOCK_UPDATE_OPTION_RATE_ADJUST_VALID,
+                 (uint64_t)&up, 0, 0) == ERR_INVALID_ARGS);
+  up.rate_adjust = 500;
+  up.error_bound = 77;
+  CHECK(535, sys(CROI_SYS_CLOCK_UPDATE, clock,
+                 CROI_CLOCK_ARGS_VERSION(1) | CROI_CLOCK_UPDATE_OPTION_RATE_ADJUST_VALID | CROI_CLOCK_UPDATE_OPTION_ERROR_BOUND_VALID,
+                 (uint64_t)&up, 0, 0) == 0 &&
+                 sys(CROI_SYS_CLOCK_GET_DETAILS, clock, CROI_CLOCK_ARGS_VERSION(1), (uint64_t)&d, 0, 0) == 0 &&
+                 d.generation_counter == 3 && d.error_bound == 77 &&
+                 d.reference_to_synthetic.rate.synthetic_ticks == 1000500 &&
+                 d.reference_to_synthetic.rate.reference_ticks == 1000000);
+  // Mapped: the page agrees with the details and with clock_read.
+  uint64_t at = 0, size = 0, counts[2] = {0, 0};
+  CHECK(536, sys6(CROI_SYS_VMAR_MAP_CLOCK, s->vmar, CROI_VM_PERM_READ | CROI_VM_PERM_WRITE, 0, clock, PAGE,
+                  (uint64_t)&at) == ERR_INVALID_ARGS &&
+                 sys6(CROI_SYS_VMAR_MAP_CLOCK, s->vmar, CROI_VM_PERM_READ, 0, clock, 2 * PAGE, (uint64_t)&at) ==
+                     ERR_INVALID_ARGS &&
+                 sys6(CROI_SYS_VMAR_MAP_CLOCK, s->vmar, CROI_VM_PERM_READ, 0, clock, PAGE, (uint64_t)&at) == 0 &&
+                 sys6(CROI_SYS_OBJECT_GET_INFO, clock, CROI_INFO_CLOCK_MAPPED_SIZE, (uint64_t)&size, 8,
+                      (uint64_t)&counts[0], (uint64_t)&counts[1]) == 0 && size == PAGE);
+  const volatile croi_clock_page_t *page = (const volatile croi_clock_page_t *)at;
+  croi_clock_transformation_t t;
+  uint32_t seq;
+  do {
+    seq = page->seq_lock;
+    t.reference_offset = page->reference_ticks_to_synthetic.reference_offset;
+    t.synthetic_offset = page->reference_ticks_to_synthetic.synthetic_offset;
+    t.rate.synthetic_ticks = page->reference_ticks_to_synthetic.rate.synthetic_ticks;
+    t.rate.reference_ticks = page->reference_ticks_to_synthetic.rate.reference_ticks;
+  } while ((seq & 1) || seq != page->seq_lock);
+  int64_t mapped = clock_at(&t, (int64_t)now_ns());
+  CHECK(537, sys(CROI_SYS_CLOCK_READ, clock, (uint64_t)&now, 0, 0, 0) == 0 && seq == 6 && page->backstop_time == 1000 &&
+                 page->error_bound == 77 && page->cur_ppm_adj == 500 && now >= mapped && now - mapped < 100000000);
+  // AUTO_START: running from creation; CONTINUOUS: no jumps once started;
+  // not mappable: INVALID_ARGS for vmar_map_clock; names; BOOT timers.
+  create.backstop_time = 0;
+  CHECK(538, sys(CROI_SYS_CLOCK_CREATE, CROI_CLOCK_OPT_MONOTONIC | CROI_CLOCK_OPT_CONTINUOUS | CROI_CLOCK_OPT_AUTO_START,
+                 0, (uint64_t)&other, 0, 0) == 0 &&
+                 (wait_for(other, CROI_CLOCK_STARTED, 0) & CROI_CLOCK_STARTED) &&
+                 sys(CROI_SYS_CLOCK_READ, other, (uint64_t)&now, 0, 0, 0) == 0 &&
+                 now <= (int64_t)now_ns() && (int64_t)now_ns() - now < 100000000 &&
+                 sys(CROI_SYS_CLOCK_UPDATE, other, CROI_CLOCK_ARGS_VERSION(1) | CROI_CLOCK_UPDATE_OPTION_VALUE_VALID,
+                     (uint64_t)&up, 0, 0) == ERR_INVALID_ARGS &&
+                 sys6(CROI_SYS_VMAR_MAP_CLOCK, s->vmar, CROI_VM_PERM_READ, 0, other, PAGE, (uint64_t)&size) ==
+                     ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_OBJECT_SET_PROPERTY, other, CROI_PROP_NAME, (uint64_t)"utc", 3, 0) == 0 &&
+                 sys(CROI_SYS_TIMER_CREATE, 0, 1, (uint64_t)&timer, 0, 0) == 0 &&
+                 sys(CROI_SYS_TIMER_CREATE, 0, 2, (uint64_t)&size, 0, 0) == ERR_INVALID_ARGS);
+  create.backstop_time = (int64_t)now_ns() + 1000000000000ll;
+  CHECK(539, sys(CROI_SYS_CLOCK_CREATE, CROI_CLOCK_ARGS_VERSION(1) | CROI_CLOCK_OPT_AUTO_START, (uint64_t)&create,
+                 (uint64_t)&size, 0, 0) == ERR_INVALID_ARGS);
+  sys(CROI_SYS_VMAR_UNMAP, s->vmar, at, PAGE, 0, 0);
+  uint32_t rest[4] = {clock, other, port, timer};
+  sys(CROI_SYS_HANDLE_CLOSE_MANY, (uint64_t)rest, 4, 0, 0, 0);
+  return 0;
+}
+
+// K13g: debugging. A thread that counts, to be suspended and resumed.
+static void counting(uint64_t arg) {
+  volatile uint64_t *count = (volatile uint64_t *)arg;
+  for (;;) *count += 1;
+}
+
+static int64_t debugging(const startup_t *s) {
+  // A running thread: suspended (SUSPENDED, its count stops, registers
+  // readable, state SUSPENDED), then resumed by closing the token.
+  volatile uint64_t count = 0;
+  uint32_t worker = start_thread(s, counting, (uint64_t)&count);
+  uint32_t token = 0;
+  uint64_t give_up = now_ns() + 2000000000ull;
+  while (count == 0 && now_ns() < give_up) {
+  }
+  croi_thread_state_general_regs_t regs;
+  croi_info_thread_t thread;
+  uint64_t counts[2];
+  CHECK(540, sys(CROI_SYS_THREAD_READ_STATE, worker, CROI_THREAD_STATE_GENERAL_REGS, (uint64_t)&regs, sizeof regs, 0) ==
+                 ERR_BAD_STATE &&
+                 sys(CROI_SYS_TASK_SUSPEND, s->process, (uint64_t)&token, 0, 0, 0) == ERR_NOT_SUPPORTED &&
+                 sys(CROI_SYS_TASK_SUSPEND, worker, (uint64_t)&token, 0, 0, 0) == 0 &&
+                 (wait_for(worker, CROI_THREAD_SUSPENDED, 2000000000ull) & CROI_THREAD_SUSPENDED));
+  uint64_t frozen = count;
+  sys(CROI_SYS_NANOSLEEP, now_ns() + 20000000ull, 0, 0, 0, 0);
+  CHECK(541, count == frozen &&
+                 sys(CROI_SYS_THREAD_READ_STATE, worker, CROI_THREAD_STATE_GENERAL_REGS, (uint64_t)&regs, sizeof regs, 0) == 0 &&
+                 sys6(CROI_SYS_OBJECT_GET_INFO, worker, CROI_INFO_THREAD, (uint64_t)&thread, sizeof thread,
+                      (uint64_t)&counts[0], (uint64_t)&counts[1]) == 0 &&
+                 thread.state == CROI_THREAD_STATE_SUSPENDED &&
+                 sys(CROI_SYS_HANDLE_CLOSE, token, 0, 0, 0, 0) == 0 &&
+                 (wait_for(worker, CROI_THREAD_RUNNING, 2000000000ull) & CROI_THREAD_RUNNING));
+  give_up = now_ns() + 2000000000ull;
+  while (count == frozen && now_ns() < give_up) {
+  }
+  CHECK(542, count != frozen && sys(CROI_SYS_TASK_KILL, worker, 0, 0, 0, 0) == 0);
+  join(worker);
+  // A thread blocked in port_wait: suspended (the wait ends and is made
+  // again once resumed), then it still gets the packet.
+  uint32_t port = 0;
+  CHECK(543, sys(CROI_SYS_PORT_CREATE, 0, (uint64_t)&port, 0, 0, 0) == 0);
+  uint32_t sleeper = start_thread(s, port_sleeper, port);
+  give_up = now_ns() + 2000000000ull;
+  do {
+    sys6(CROI_SYS_OBJECT_GET_INFO, sleeper, CROI_INFO_THREAD, (uint64_t)&thread, sizeof thread, (uint64_t)&counts[0],
+         (uint64_t)&counts[1]);
+  } while (thread.state != CROI_THREAD_STATE_BLOCKED_PORT && now_ns() < give_up);
+  CHECK(544, thread.state == CROI_THREAD_STATE_BLOCKED_PORT &&
+                 sys(CROI_SYS_TASK_SUSPEND, sleeper, (uint64_t)&token, 0, 0, 0) == 0 &&
+                 (wait_for(sleeper, CROI_THREAD_SUSPENDED, 2000000000ull) & CROI_THREAD_SUSPENDED) &&
+                 sys(CROI_SYS_HANDLE_CLOSE, token, 0, 0, 0, 0) == 0);
+  give_up = now_ns() + 2000000000ull;
+  do {
+    sys6(CROI_SYS_OBJECT_GET_INFO, sleeper, CROI_INFO_THREAD, (uint64_t)&thread, sizeof thread, (uint64_t)&counts[0],
+         (uint64_t)&counts[1]);
+  } while (thread.state != CROI_THREAD_STATE_BLOCKED_PORT && now_ns() < give_up);
+  croi_port_packet_t wake = {0};
+  CHECK(545, thread.state == CROI_THREAD_STATE_BLOCKED_PORT &&
+                 sys(CROI_SYS_PORT_QUEUE, port, (uint64_t)&wake, 0, 0, 0) == 0 &&
+                 (wait_for(sleeper, CROI_SIGNAL_TASK_TERMINATED, 3000000000ull) & CROI_SIGNAL_TASK_TERMINATED));
+  sys(CROI_SYS_HANDLE_CLOSE, sleeper, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, port, 0, 0, 0, 0);
+  // Memory: read our own; an unmapped address NOT_FOUND; a write into a
+  // read-only mapping lands in a private copy (the VMO keeps its bytes).
+  uint64_t secret = 0x5EC12E7, got = 0, actual = 0, at = 0;
+  uint32_t vmo = 0;
+  char byte = 0;
+  CHECK(546, sys(CROI_SYS_PROCESS_READ_MEMORY, s->process, (uint64_t)&secret, (uint64_t)&got, 8, (uint64_t)&actual) == 0 &&
+                 got == secret && actual == 8 &&
+                 sys(CROI_SYS_PROCESS_READ_MEMORY, s->process, 0x10, (uint64_t)&got, 8, 0) == ERR_NOT_FOUND &&
+                 sys(CROI_SYS_PROCESS_READ_MEMORY, s->process, (uint64_t)&secret, (uint64_t)&got, 0, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_VMO_CREATE, PAGE, 0, (uint64_t)&vmo, 0, 0) == 0 &&
+                 sys(CROI_SYS_VMO_WRITE, vmo, (uint64_t)"A", 0, 1, 0) == 0 &&
+                 sys6(CROI_SYS_VMAR_MAP, s->vmar | (uint64_t)CROI_VM_PERM_READ << 32, 0, vmo, 0, PAGE, (uint64_t)&at) == 0 &&
+                 sys(CROI_SYS_PROCESS_WRITE_MEMORY, s->process, at, (uint64_t)"B", 1, (uint64_t)&actual) == 0 &&
+                 actual == 1 && *(volatile char *)at == 'B' &&
+                 sys(CROI_SYS_VMO_READ, vmo, (uint64_t)&byte, 0, 1, 0) == 0 && byte == 'A');
+  sys(CROI_SYS_VMAR_UNMAP, s->vmar, at, PAGE, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, vmo, 0, 0, 0, 0);
+  return 0;
+}
+
 // K13b: FIFOs (Zircon's: records into the peer's ring, READABLE /
 // WRITABLE / PEER_CLOSED, user signals to the peer) and
 // vmo_replace_as_executable (a VMEX resource; the handle consumed).
@@ -3490,6 +3675,10 @@ static int64_t extensions(const startup_t *s) {
   if (small != 0) return small;
   int64_t topics = info_topics(s);
   if (topics != 0) return topics;
+  int64_t clk = clocks(s);
+  if (clk != 0) return clk;
+  int64_t dbg = debugging(s);
+  if (dbg != 0) return dbg;
   int64_t random = cprng_checks();
   if (random != 0) return random;
 

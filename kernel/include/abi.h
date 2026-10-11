@@ -18,4 +18,5 @@
 #include "dma.h"
 #include "counter.h"
 #include "timeline.h"
+#include "clock.h"
 #include "power.h"

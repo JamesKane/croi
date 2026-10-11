@@ -98,6 +98,10 @@ extension Syscalls {
                 let failed = withUnsafeBytes(of: &entry) { unsafe UserCopy.to(address, $0.baseAddress!, UInt64(size)) }
                 guard failed == 0 else { throw .invalidArgs }
             }
+        case UInt32(CROI_INFO_CLOCK_MAPPED_SIZE) where version == 0:  // K13f
+            let ref = try table.get(handle, type: .clock)
+            guard ClockPointer(object: ref.object).pointee.page != nil else { throw .invalidArgs }
+            try single(KernelLayout.pageSize, 8, a)
         case UInt32(CROI_INFO_HANDLE_TABLE) where version == 0:
             let ref = try table.get(handle, type: .process, rights: .inspect | .manageProcess | .manageThread)
             let process = ProcessPointer(object: ref.object)
@@ -185,6 +189,8 @@ extension Syscalls {
                 info.cpu_affinity_mask.0 = affinity
                 if thread.pointee.killed {
                     info.state = UInt32(CROI_THREAD_STATE_DYING)
+                } else if thread.pointee.suspended {
+                    info.state = UInt32(CROI_THREAD_STATE_SUSPENDED)
                 } else if thread.pointee.exceptionFrame != 0 {
                     info.state = UInt32(CROI_THREAD_STATE_BLOCKED_EXCEPTION)
                 } else if blocked {

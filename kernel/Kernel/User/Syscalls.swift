@@ -27,10 +27,17 @@ enum UserTraps {
         }
         if let fault = unsafe ExceptionFrame.pageFault(frame.pointee) {
             arch_interrupts_enable()
+            let me = Scheduler.current
+            me.pointee.restartable = true  // a pager wait here may end for a suspension (K13g)
             let resolved = UserAspaces.handleFault(at: fault.address, write: fault.write, execute: fault.execute,
                                                    protectionKey: fault.protectionKey)
+            me.pointee.restartable = false
+            let retry = Scheduler.locked { () -> Bool in
+                defer { me.pointee.suspendRetry = false }
+                return me.pointee.suspendRetry
+            }
             _ = arch_interrupts_save()
-            if resolved {
+            if resolved || retry {  // a fault left for a suspension is taken again after
                 leaving()
                 return
             }
@@ -71,9 +78,12 @@ enum UserTraps {
             bitPattern: UInt(top) - UInt(MemoryLayout<arch_exception_frame_t>.stride))!
     }
 
-    /// On every way back to user mode: a killed thread exits instead.
+    /// On every way back to user mode: a suspended thread parks (K13g), a
+    /// killed one exits instead.
     static func leaving() {
-        guard Scheduler.current.pointee.killPending else { return }
+        let me = Scheduler.current
+        if me.pointee.suspendPending { Debug.park() }
+        guard me.pointee.killPending else { return }
         arch_interrupts_enable()
         Processes.checkKilled()
     }
@@ -117,6 +127,13 @@ enum UserTraps {
                       arg1: UInt64, arg2: UInt64 = 0) -> Never {
         let thread = Scheduler.current
         thread.pointee.handleTable = handles
+        // Started while its thread or process is suspended (K13g): parks first.
+        if thread.pointee.object != 0,
+           ThreadObjectPointer(object: ObjectPointer(address: thread.pointee.object)).pointee.suspendCount.load(ordering: .acquiring) > 0 {
+            _ = arch_interrupts_save()
+            Debug.park()
+            arch_interrupts_enable()
+        }
         // Every user thread has FP/SIMD state (K6d), loaded before it runs.
         if thread.pointee.extendedState == 0 { thread.pointee.extendedState = ExtendedState.allocate() }
         if thread.pointee.extendedState != 0 {
@@ -149,11 +166,33 @@ enum Syscalls {
         for i in 0..<6 { a[i] = unsafe ExceptionFrame.syscallArgument(frame.pointee, i) }
         count.add(1, ordering: .relaxed)
         Trace.event(CROI_TRACE_SYSCALL, UInt16(CROI_TK_SYSCALL_ENTER), number, a[0])
+        let me = Scheduler.current
+        me.pointee.restartable = restartable(number)
         let result = run(number, a)
+        me.pointee.restartable = false
         Trace.event(CROI_TRACE_SYSCALL, UInt16(CROI_TK_SYSCALL_EXIT), number, UInt64(bitPattern: result))
-        unsafe ExceptionFrame.setSyscallResult(&frame.pointee, UInt64(bitPattern: result))
+        let retry = Scheduler.locked { () -> Bool in
+            defer { me.pointee.suspendRetry = false }
+            return me.pointee.suspendRetry
+        }
+        if retry {
+            unsafe ExceptionFrame.restartSyscall(&frame.pointee)  // made again once resumed (K13g)
+        } else {
+            unsafe ExceptionFrame.setSyscallResult(&frame.pointee, UInt64(bitPattern: result))
+        }
         Scheduler.preemptIfRequested()
         _ = arch_interrupts_save()
+    }
+
+    /// Syscalls a suspension may end and restart (K13g): their waits leave
+    /// nothing behind, and deadlines are absolute. nanosleep, object and
+    /// port waits, futex_wait, interrupt_wait, counter_wait, wait_many;
+    /// vmo_read, streams' reads (pager waits).
+    static func restartable(_ number: UInt64) -> Bool {
+        switch number {
+        case 4, 21, 33, 41, 90, 143, 164, 197, 198, 210: true
+        default: false
+        }
     }
 
     private static func run(_ number: UInt64, _ a: InlineArray<6, UInt64>) -> Int64 {
@@ -345,6 +384,10 @@ enum Syscalls {
             try socketCall(number, a, table)
         case 194...201:
             try streamCall(number, a, table)
+        case 230...232:
+            try debugCall(number, a, table)
+        case 216...219:
+            try clockCall(number, a, table)
         case 202...208:
             try pagerCall(number, a, table)
         case 180:  // system_powerctl

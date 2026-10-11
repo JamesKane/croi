@@ -527,6 +527,42 @@ struct UserAspace: ~Copyable {
 }
 
 extension UserAspacePointer {
+    /// process_write_memory into a mapping that isn't writable (K13g,
+    /// Zircon's ForceWritable): the mapping now maps a snapshot child of its
+    /// range instead (its pages copied at first touch), so the write stays
+    /// this address space's. Returns the new mapping.
+    func privatize(_ mapping: Mapping) throws(Status) -> Mapping {
+        let child: VmoPointer
+        do throws(VmError) {
+            child = try Vmo(childOf: mapping.vmo, offset: mapping.offset, size: mapping.size).keep()  // the mapping's reference
+        } catch {
+            throw error.status
+        }
+        do throws(Status) {
+            return try pointee.lock.withLock { () throws(Status) -> Mapping in
+                guard !pointee.dead else { throw .badState }
+                for i in 0..<pointee.mappings.count where pointee.mappings[i].base == mapping.base {
+                    let old = pointee.mappings[i]
+                    guard old.vmo == mapping.vmo, old.size == mapping.size else { break }
+                    let fresh = Mapping(base: old.base, size: old.size, vmo: child, offset: 0, rights: old.rights,
+                                        region: old.region, key: old.key)
+                    child.addMapper(address)
+                    pointee.mappings[i] = fresh
+                    try? pointee.arch.unmap(virt: old.base, size: old.size)
+                    old.vmo.removeMapper(address)
+                    old.vmo.release()  // the old mapping's
+                    return fresh
+                }
+                throw .notFound
+            }
+        } catch {
+            child.release()
+            throw error
+        }
+    }
+}
+
+extension UserAspacePointer {
     /// vmar_op_range's map step (K13e): every page of [base, base+size)
     /// whose VMO has it (its own: a child's untouched pages still fault)
     /// gets its entry now; a pager VMO's clean pages read only.

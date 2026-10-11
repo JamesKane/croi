@@ -121,6 +121,8 @@ enum ObjectType: UInt32 {
     case socket = 14
     case stream = 31
     case pager = 28
+    case clock = 30
+    case suspendToken = 27
     case fifo = 19
     case job = 17
     case vmar = 18

@@ -111,6 +111,13 @@ enum Vdso {
         }
     }
 
+    /// One of the vDSO's VMOs (process_write_memory refuses them, K13g).
+    static func owns(_ vmo: VmoPointer) -> Bool {
+        if vmo.address == code { return true }
+        for i in 0..<3 where pages[i] == vmo.address { return true }
+        return false
+    }
+
     /// Maps the vDSO (read/execute) and its pages (read only) into
     /// `aspace`, in a region of their own. Returns the vDSO's base.
     static func map(into aspace: borrowing UserAspace) throws(VmError) -> UInt64 {

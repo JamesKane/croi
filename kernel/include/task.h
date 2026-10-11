@@ -215,6 +215,11 @@ enum : uint32_t {
   CROI_INFO_MAPS_TYPE_MAPPING = 3,
 
   CROI_INFO_INVALID_CPU = 0xFFFFFFFFu,
+
+  // K13g: suspension (task_suspend's token, Zircon's type 27) and its signals.
+  CROI_OBJ_TYPE_SUSPEND_TOKEN = 27,
+  CROI_THREAD_RUNNING = 1u << 4,
+  CROI_THREAD_SUSPENDED = 1u << 5,
 };
 
 // zx_info_process_t.

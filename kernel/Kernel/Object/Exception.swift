@@ -284,8 +284,15 @@ enum Exceptions {
     }
     #endif
 
+    /// Its registers: in an exception, or parked suspended (K13g: the frame
+    /// at its kernel stack top); else BAD_STATE.
     private static func frame(of thread: ObjectPointer) throws(Status) -> UnsafeMutablePointer<arch_exception_frame_t> {
-        let address = thread.header.lock.withLock { ThreadObjectPointer(object: thread).pointee.exceptionFrame }
+        let address = thread.header.lock.withLock { () -> UInt64 in
+            let t = ThreadObjectPointer(object: thread)
+            if t.pointee.exceptionFrame != 0 { return t.pointee.exceptionFrame }
+            guard t.pointee.suspended, t.pointee.thread != 0 else { return 0 }
+            return UInt64(UInt(bitPattern: unsafe UserTraps.userFrame(of: ThreadPointer(address: t.pointee.thread))))
+        }
         guard let frame = unsafe UnsafeMutablePointer<arch_exception_frame_t>(bitPattern: UInt(address)) else {
             throw .badState
         }

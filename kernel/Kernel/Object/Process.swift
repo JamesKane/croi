@@ -66,6 +66,8 @@ struct ProcessObject: ~Copyable {
     /// K13e: when its first thread started (ZX_INFO_PROCESS), and the
     /// runtime of its threads that have exited (TASK_RUNTIME).
     var startTime: UInt64 = 0
+    /// K13g: suspensions of the whole process (each of its threads holds one).
+    var suspendCount = 0
     var deadCpu: UInt64 = 0
     var deadQueue: UInt64 = 0
     /// Retained.
@@ -114,6 +116,10 @@ struct ThreadObject: ~Copyable {
     /// K13e: the exception channel it waits on (ZX_EXCEPTION_CHANNEL_TYPE_*),
     /// and once dead its runtime and last CPU (THREAD_STATS, TASK_RUNTIME).
     var exceptionChannelType: UInt32 = 0
+    /// K13g: suspensions (tokens) outstanding; parked meanwhile (Debug).
+    let suspendCount = Atomic<Int>(0)
+    var suspended = false
+    let suspendQueue = QueuePointer.allocate()
     var finalCpuTime: UInt64 = 0
     var finalQueueTime: UInt64 = 0
     var lastCpu: UInt32 = 0xFFFF_FFFF
@@ -407,6 +413,7 @@ enum Processes {
             }
         }
         process.release()
+        thread.pointee.suspendQueue.deallocate()
         Objects.free(object, as: ThreadObject.self)
     }
 
@@ -429,6 +436,7 @@ enum Processes {
                 thread.pointee.arg1 = arg1
             }
             if p.pointee.state == .initial { p.pointee.startTime = Clock.now() }
+            if p.pointee.suspendCount > 0 { thread.pointee.suspendCount.add(1, ordering: .relaxed) }  // starts suspended
             p.pointee.state = .running
             p.pointee.running += 1
         }

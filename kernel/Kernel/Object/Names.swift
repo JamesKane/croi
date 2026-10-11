@@ -40,6 +40,8 @@ enum Names {
             return object.header.lock.withLock { JobPointer(object: object).pointee.name }
         case .bti:
             return object.header.lock.withLock { BtiPointer(object: object).pointee.name }
+        case .clock:
+            return object.header.lock.withLock { ClockPointer(object: object).pointee.name }
         case .thread:
             return try object.header.lock.withLock { () throws(Status) -> ObjectName in
                 guard ThreadObjectPointer(object: object).pointee.state != .dead else { throw .badState }
@@ -64,6 +66,8 @@ enum Names {
             object.header.lock.withLock { JobPointer(object: object).pointee.name = name }
         case .bti:
             object.header.lock.withLock { BtiPointer(object: object).pointee.name = name }
+        case .clock:
+            object.header.lock.withLock { ClockPointer(object: object).pointee.name = name }
         case .thread:
             try object.header.lock.withLock { () throws(Status) in
                 guard ThreadObjectPointer(object: object).pointee.state != .dead else { throw .badState }

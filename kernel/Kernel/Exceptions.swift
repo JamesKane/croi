@@ -118,6 +118,8 @@ enum ExceptionFrame {
         }
     }
     static func setSyscallResult(_ f: inout arch_exception_frame_t, _ value: UInt64) { f.rax = value }
+    /// Back over the SYSCALL (2 bytes), rax still the number (K13g).
+    static func restartSyscall(_ f: inout arch_exception_frame_t) { f.rip -= 2 }
     static func setProgramCounter(_ f: inout arch_exception_frame_t, _ pc: UInt64) { f.rip = pc }
     static func isInterrupt(_ f: arch_exception_frame_t) -> Bool { f.vector >= 32 }
 
@@ -227,6 +229,8 @@ enum ExceptionFrame {
         withUnsafeBytes(of: f.x) { unsafe $0.load(fromByteOffset: 8 * i, as: UInt64.self) }
     }
     static func setSyscallResult(_ f: inout arch_exception_frame_t, _ value: UInt64) { f.x.0 = value }
+    /// Back over the svc (ELR is past it), x0 still the first argument (K13g).
+    static func restartSyscall(_ f: inout arch_exception_frame_t) { f.elr -= 4 }
     static func setProgramCounter(_ f: inout arch_exception_frame_t, _ pc: UInt64) { f.elr = pc }
 
     /// IRQ, from the current EL or from EL0 (slots 1, 5, 9, 13).
@@ -329,6 +333,8 @@ enum ExceptionFrame {
         f.x.10 = value
         f.sepc += 4
     }
+    /// sepc is still at the ecall, a0 the first argument (K13g).
+    static func restartSyscall(_ f: inout arch_exception_frame_t) {}
     static func setProgramCounter(_ f: inout arch_exception_frame_t, _ pc: UInt64) { f.sepc = pc }
     static func isInterrupt(_ f: arch_exception_frame_t) -> Bool { f.scause >> 63 != 0 }
 
