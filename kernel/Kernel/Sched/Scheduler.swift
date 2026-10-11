@@ -1682,6 +1682,17 @@ enum Scheduler {
     /// Prints every CPU's and thread's scheduling state. For lockups: it
     /// takes the lock without waiting forever, and reads other CPUs' state
     /// as it finds it.
+    /// `time` relative to now, in µs, signed.
+    private static func writeOffset(_ time: UInt64, to out: some TextOutput) {
+        let now = Clock.now()
+        if time >= now {
+            out.write(decimal: (time - now) / 1000)
+        } else {
+            out.write("-")
+            out.write(decimal: (now - time) / 1000)
+        }
+    }
+
     static func dump(to out: some TextOutput) {
         var tries = 0
         while !lock.tryLockMasked() {
@@ -1706,6 +1717,13 @@ enum Scheduler {
             out.write(decimal: UInt64(cpus[cpu].deadline.count))
             out.write(" throttled ")
             out.write(decimal: UInt64(cpus[cpu].throttled.count))
+            if cpus[cpu].eligibilityAt != 0 || cpus[cpu].eligibilityTimer != 0 {
+                out.write(" (eligible in ")
+                writeOffset(cpus[cpu].eligibilityAt, to: out)
+                out.write(" us, timer ")
+                out.write(decimal: UInt64(cpus[cpu].eligibilityTimer))
+                out.write(")")
+            }
             out.write(", slice ")
             out.write(decimal: UInt64(cpus[cpu].sliceTimer))
             out.write(pending & (1 << UInt64(cpu)) != 0 ? ", preempt pending" : "")
@@ -1770,7 +1788,11 @@ enum Scheduler {
                 out.write(decimal: thread.pointee.effective.params.period / 1000)
                 out.write(" us left ")
                 out.write(decimal: UInt64(max(0, thread.pointee.remaining)) / 1000)
+                out.write(", period starts in ")
+                writeOffset(thread.pointee.periodStart, to: out)
+                out.write(" us")
             }
+            if thread.pointee.killPending { out.write(" killed") }
             out.write(" queue ")
             out.write(hex: thread.pointee.waitQueue?.address ?? 0)
             out.write(" timer ")
