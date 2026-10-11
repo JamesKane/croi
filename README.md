@@ -14,40 +14,43 @@ compiler runtime.
 It boots on **amd64, arm64 and rv64** from UEFI with ACPI and runs SMP on
 all three. userboot starts Embedded Swift programs from a Zircon-format
 bootfs, in processes that talk over channels and ports. Its first
-consumer, the Todhchai OS, runs its services on croi natively. Performance
-targets come from Todhchai and are measured with croi's own trace, under
-KVM on amd64:
+consumer, the Todhchai OS, runs on croi natively: its launcher and
+services, devmgr with ACPI and PCI, drivers for virtio devices with
+interrupts and DMA, a file system on virtio-blk, and a framebuffer
+console. Performance targets come from Todhchai and are measured with
+croi's own trace, under KVM on amd64 (a shared machine, so typical
+figures):
 
 | Measurement | Today | Budget |
 |---|---|---|
-| Null syscall | ~35 ns | < 100 ns |
-| `channel_call` round trip, one core, deadline donation | ~1.4 µs | < 1 µs (not met yet; enforced at 1.6 µs) |
-| Port wake from another core (median) | ~1.75 µs | < 2 µs |
-| Real-time wake error, p99 | 27–46 µs | < 100 µs |
-| `clock_get_monotonic` via the vDSO | ~12 ns | — |
+| Kernel entry to userboot (self-tests off) | ~77 ms | < 100 ms to the console's first frame |
+| Spawn a program until its `main` runs | ~50 µs | < 200 µs |
+| Null syscall | ~33 ns | < 100 ns |
+| `channel_call` round trip, one core, deadline donation | ~1.45 µs | < 1 µs, a hardware target: Zircon measures ~2.2 µs on the same VM |
+| Port wake from another core (median) | ~1.85 µs | < 2 µs (with croi's idle polling under a hypervisor) |
+| Real-time wake error, p99 | ~26 µs | < 100 µs |
+| Interrupt to the waiting thread (median) | ~12 µs | < 5 µs on hardware |
 | Enabled trace event | ~18 ns | < 30 ns |
 
-The kernel is about 19k lines of Swift and 4.1k lines of assembly (three
+The kernel is about 22k lines of Swift and 3.9k lines of assembly (three
 architectures), with about 100 lines of C (the compiler runtime and two
 globals Swift would initialize lazily), plus the C headers that define
 the loader, kernel and user ABIs.
 
 ## Progress
 
-**M2, croi reaches user space, is done** (2026-10-10). userboot starts a
-Swift process from bootfs. The process creates a channel pair, passes a
-VMO across it, waits on a port with a deadline timer, and prints over
-debuglog, on all three architectures; the budgets above are checked on
-every KVM boot.
+**Todhchai's M2 (croi reaches user space) and M3 (native tier 0) are
+done** (2026-10-10). M3 ran Todhchai's services, devmgr, its drivers, a
+file system on virtio-blk and a framebuffer console on croi, with every
+system budget met under KVM, resident memory included (2-2.5 MiB at the
+console against 32 MiB).
 
-The next target is **M3, Todhchai's native tier 0**: devmgr, ACPI, PCI,
-virtio-blk and a framebuffer console on croi. Todhchai's services already
-boot from bootfs on croi under KVM; what they still need from the kernel
-is driver support (milestone K9 below).
+The next target is **M4, Todhchai's native desktop v0**: a compositor,
+input and audio. What it needs from the kernel is milestone K10 below.
 
 | Milestone | Scope | Status |
 |---|---|---|
-| K1 | UEFI loader, handoff v3 (bootfs, cmdline, framebuffer), cache policy | ✅ |
+| K1 | UEFI loader, handoff (bootfs, cmdline, framebuffer, SMBIOS), cache policy | ✅ |
 | K2 | Interrupt controllers, IPIs, TLB shootdown, monotonic clock, tickless timers, topology | ✅ |
 | K3 | Threads, priority inheritance, scheduling contexts, fair + EDF, admission, extended state | ✅ |
 | Trace | Per-CPU rings; `sched`, `irq`, `vm`, `syscall`, `ipc` (flows), `futex` categories; user marks; tick and PMU sampling; per-thread PMU counters | ✅ |
@@ -56,8 +59,9 @@ is driver support (milestone K9 below).
 | K6 | Syscalls, SMEP/SMAP/PAN/SUM, user copies, vDSO + shared pages, user FP/SIMD | ✅ |
 | K7 | Channels, eventpairs, timers, futexes with owners; jobs, processes, threads, exceptions, job policy | ✅ |
 | K8 | Debuglog, ELF loading, Swift user programs, bootfs + userboot, the M2 exit test and budgets | ✅ |
-| K9 | M3: resources, VMO syscalls, firmware data, interrupt objects, MSI, BTI without an IOMMU | ⬜ next |
-| Later | IOMMUs (VT-d first), FIFOs/counters/sockets/streams/clocks, pager, debugger syscalls | ⬜ after M3 |
+| K9 | M3: resources, physical VMOs, firmware data (ZBI items), interrupt objects with affinity, MSI/MSI-X (amd64), BTI without an IOMMU, boot budgets, task and kernel memory stats | ✅ |
+| K10 | M4: counters, display timeline, wakeups that carry a deadline, frame intent, overrun ports, CPU reservation, power control, no idle wakeups | ⬜ next |
+| Later | IOMMUs (VT-d first), GICv3 ITS and RISC-V IMSIC, FIFOs/sockets/streams, VMO clones, pager, debugger syscalls | ⬜ after M4 |
 
 See [`docs/roadmap.md`](docs/roadmap.md) for the detailed plan and the
 requirement-by-requirement mapping.
@@ -125,10 +129,16 @@ These are additions Todhchai needs. Each was checked against Zircon first.
   amd64 protection keys, or dual RW/RX views where the hardware has none.
 - **Shared read-only pages:** topology, power hints and (later) vblank
   timing, seqlocked and mapped next to the vDSO.
-- **Interrupts:** every IRQ has an explicit CPU affinity. GICv3 ITS and
-  RISC-V AIA MSIs are planned (Zircon's ITS is unimplemented).
-- **IOMMUs as a core feature:** VT-d, AMD-Vi, SMMUv3 and the RISC-V IOMMU,
-  with BTIs that carry an IOVA window, a DMA width and a memory type.
+- **Interrupts:** every IRQ, and each MSI-X vector, has an explicit CPU
+  affinity (`interrupt_set_affinity`). GICv3 ITS and RISC-V AIA MSIs are
+  planned (Zircon's ITS is unimplemented).
+- **DMA:** BTIs carry a DMA address width, a window of device addresses
+  and a memory type, which can only be narrowed; a BTI with no IOMMU is a
+  recorded trust decision. IOMMUs are a core feature to come: VT-d,
+  AMD-Vi, SMMUv3 and the RISC-V IOMMU.
+- **Firmware data for user space:** ACPI tables, SMBIOS and the GOP
+  framebuffer reach drivers as ZBI-format boot data and physical VMOs
+  under resources, with no ZBI boot protocol.
 - **Hardening and board bring-up:** SMEP/SMAP, PAN and SUM on every CPU;
   the SBSA watchdog; an arm64 SError policy; DBG2 consoles; SMC resources
   scoped by function-ID range.
@@ -154,11 +164,26 @@ cmake --build --preset arm64        # build only
 ninja -C build/rv64 run             # boot interactively (Ctrl-A x quits)
 ```
 
-Each boot runs the kernel's self-tests (PMM, heap, SMP, IPIs and
+Each test boot runs the kernel's self-tests (PMM, heap, SMP, IPIs and
 shootdowns, timers, the scheduler, the VM, objects, user mode, IPC,
-processes and exceptions, and a framebuffer screendump check), then
-userboot starts `bin/m2`, the M2 exit test. On amd64 with `/dev/kvm`,
-`boot-smoke-kvm` also enforces the budgets.
+processes and exceptions, resources, interrupts, MSI, DMA, and a
+framebuffer screendump check), then userboot starts `bin/m2`, the M2 exit
+test. `croi.selftest=off` on the kernel command line skips the self-tests,
+as Todhchai's boots do (`boot-lean` tests that path).
+
+Timings are judged separately from correctness, after Todhchai's
+discipline: every budget is printed as a `budget name=... value=...`
+line, and
+
+```sh
+tools/bench.py                       # KVM boots: medians against this machine's history
+tools/bench.py --compare <commit>    # this tree against a commit, boots interleaved
+tools/zircon-bench/compare.py        # the same budgets measured on Zircon, interleaved
+```
+
+A missed budget is checked against Zircon first: if Zircon meets it the
+target is attainable, if neither does it is a design decision
+(`docs/roadmap.md`, "Budgets against Zircon").
 
 ## Layout
 
@@ -169,7 +194,8 @@ userboot starts `bin/m2`, the M2 exit test. On amd64 with `/dev/kvm`,
 | `kernel/arch/` | Per-arch assembly: entry, exceptions, context switch, SMP trampolines, user copies |
 | `lib/` | Shared by loader and kernel: handoff ABI, page tables, text formatting, C runtime |
 | `user/` | User-space headers (`croi/syscall.h`), the C user runtime, the vDSO, userboot, `m2` and test programs |
-| `tools/` | `mkbootfs.py`, `elf2efi.py`, the QEMU runner and its helpers |
+| `tools/` | `mkbootfs.py`, `elf2efi.py`, the QEMU runner, `bench.py`, and `zircon-bench/` (croi's budgets on Zircon) |
+| `bench/history/` | Recorded budget runs per machine (`tools/bench.py --record`) |
 | `docs/` | Roadmap |
 
 `CLAUDE.md` is the detailed design notebook for each subsystem.
