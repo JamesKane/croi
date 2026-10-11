@@ -24,9 +24,9 @@ enum SyscallSelfTest {
             let size = (croi_user_program_size() + KernelLayout.pageSize - 1) & ~(KernelLayout.pageSize - 1)
             let code = try Vmo(anonymous: size)
             code.writeBytes(at: 0, from: croi_user_program_address(), count: croi_user_program_size())
-            _ = try space.map(code, size: size, at: codeAt, rights: [.read, .execute])
+            _ = try space.map(code, size: size, at: codeAt, rights: .read | .execute)
             let stack = try Vmo(anonymous: stackSize)
-            _ = try space.map(stack, size: stackSize, at: stackAt, rights: [.read, .write])
+            _ = try space.map(stack, size: stackSize, at: stackAt, rights: .read | .write)
 
             // Objects from user mode.
             let handles = HandleTable()

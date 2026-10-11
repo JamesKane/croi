@@ -118,12 +118,12 @@ enum Vdso {
         let region = try aspace.allocateRegion(size: codeSize + 3 * page)
         let size = codeSize
         _ = try Vmo.withBorrowed(VmoPointer(address: code)) { (vmo: borrowing Vmo) throws(VmError) -> UInt64 in
-            try aspace.map(vmo, size: size, at: region.base, in: region.id, rights: [.read, .execute])
+            try aspace.map(vmo, size: size, at: region.base, in: region.id, rights: .read | .execute)
         }
         for i in 0..<3 {
             let at = region.base + size + UInt64(i) * page
             _ = try Vmo.withBorrowed(VmoPointer(address: pages[i])) { (vmo: borrowing Vmo) throws(VmError) -> UInt64 in
-                try aspace.map(vmo, size: page, at: at, in: region.id, rights: [.read])
+                try aspace.map(vmo, size: page, at: at, in: region.id, rights: .read)
             }
         }
         return region.base

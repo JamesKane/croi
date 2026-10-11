@@ -11,10 +11,10 @@ extension Syscalls {
         case 100:  // task_create_exception_channel(task, options, out)
             guard a[1] == 0 else { throw .invalidArgs }
             try check(a[2], 4)
-            let task = try table.get(handle, rights: [.inspect, .write])
+            let task = try table.get(handle, rights: .inspect | .write)
             guard task.type == .thread || task.type == .process || task.type == .job else { throw .wrongType }
             let channel = try Exceptions.createChannel(for: task.object)
-            try put(try table.add(channel, rights: [.transfer, .wait, .read, .inspect]), a[2])
+            try put(try table.add(channel, rights: .transfer | .wait | .read | .inspect), a[2])
         case 101, 102:  // exception_get_thread / exception_get_process(exception, out)
             try check(a[1], 4)
             let exception = try table.get(handle, type: .exception)

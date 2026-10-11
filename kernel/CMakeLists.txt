@@ -102,6 +102,18 @@ set_target_properties(kernel-swift PROPERTIES Swift_MODULE_NAME Kernel)
 target_include_directories(kernel-swift PRIVATE include)
 target_link_libraries(kernel-swift PRIVATE croi-fmt croi-handoff croi-pagetables croi-elf)
 
+# Flag types are BitFlags, never OptionSet (cmake/CheckNoOptionSet.cmake).
+get_target_property(_kernel_sources kernel-swift SOURCES)
+list(TRANSFORM _kernel_sources PREPEND ${CMAKE_CURRENT_SOURCE_DIR}/)
+add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/no-optionset.stamp
+  COMMAND ${CMAKE_COMMAND} "-DSOURCES=${_kernel_sources}" -DSTAMP=${CMAKE_CURRENT_BINARY_DIR}/no-optionset.stamp
+          -P ${PROJECT_SOURCE_DIR}/cmake/CheckNoOptionSet.cmake
+  DEPENDS ${_kernel_sources} ${PROJECT_SOURCE_DIR}/cmake/CheckNoOptionSet.cmake
+  COMMENT "Checking the kernel declares no OptionSet"
+  VERBATIM)
+add_custom_target(kernel-no-optionset DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/no-optionset.stamp)
+add_dependencies(kernel-swift kernel-no-optionset)
+
 add_executable(kernel
   arch/${CROI_ARCH}/start.S
   arch/${CROI_ARCH}/cpu.S

@@ -98,7 +98,7 @@ struct HandleTable: ~Copyable {
     /// A reference to the object behind `handle`, if it has `rights` (and,
     /// with `type`, is of that type). Zircon's order of errors: bad handle,
     /// wrong type, access denied.
-    func get(_ handle: UInt32, type: ObjectType? = nil, rights: Rights = []) throws(Status) -> ObjectRef {
+    func get(_ handle: UInt32, type: ObjectType? = nil, rights: Rights = Rights()) throws(Status) -> ObjectRef {
         let object = try table.pointee.lock.withLock { () throws(Status) -> ObjectPointer in
             let index = try slot(handle)
             let entry = table.pointee.slots[index]

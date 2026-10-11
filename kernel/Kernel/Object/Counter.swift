@@ -13,7 +13,7 @@ struct CounterObject: ~Copyable {
     var lend: Profile? = nil
 
     /// ZX_DEFAULT_COUNTER_RIGHTS.
-    static var defaultRights: Rights { Rights.basic.union([.read, .write, .signal]) }
+    static var defaultRights: Rights { Rights.basic.union(.read | .write | .signal) }
 }
 
 @safe struct CounterPointer {
@@ -79,7 +79,7 @@ enum Counters {
     /// (TIMED_OUT), or the handle is closed (CANCELED).
     static func wait(_ table: borrowing HandleTable, _ handle: UInt32, target: Int64,
                      deadline: UInt64) throws(Status) {
-        let ref = try waitable(table, handle, rights: [.wait, .read])
+        let ref = try waitable(table, handle, rights: .wait | .read)
         let object = ref.object
         let state = try WaitStatePointer.forCurrentThread()
         let observer = try object.header.lock.withLock { () throws(Status) -> ObserverPointer? in
@@ -122,7 +122,7 @@ enum Counters {
     /// `key` once the value is at least `target` (now, if it is).
     static func waitAsync(_ table: borrowing HandleTable, _ handle: UInt32, port portHandle: UInt32, key: UInt64,
                           target: Int64) throws(Status) {
-        let object = try waitable(table, handle, rights: [.wait, .read])
+        let object = try waitable(table, handle, rights: .wait | .read)
         let port = try table.get(portHandle, type: .port, rights: .write)
         let record = try QueuedPacketPointer.allocate(PortPacket(key: key, type: UInt32(CROI_PKT_TYPE_COUNTER)),
                                                       table: table.address, handle: handle)

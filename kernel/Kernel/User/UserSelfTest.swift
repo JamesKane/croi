@@ -25,9 +25,9 @@ enum UserSelfTest {
             let size = (croi_user_test_size() + KernelLayout.pageSize - 1) & ~(KernelLayout.pageSize - 1)
             let code = try Vmo(anonymous: size)
             code.writeBytes(at: 0, from: croi_user_test_address(), count: croi_user_test_size())
-            _ = try space.map(code, size: size, at: codeAt, rights: [.read, .execute])
+            _ = try space.map(code, size: size, at: codeAt, rights: .read | .execute)
             let stack = try Vmo(anonymous: stackSize)
-            _ = try space.map(stack, size: stackSize, at: stackAt, rights: [.read, .write])
+            _ = try space.map(stack, size: stackSize, at: stackAt, rights: .read | .write)
 
             // Mode 0: syscalls, registers, a message, timing.
             guard run(mode: 0) == 0x600D else { panic("user self-test: syscalls or registers") }

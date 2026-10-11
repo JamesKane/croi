@@ -341,9 +341,9 @@ enum ProcessSelfTest {
             let record = VmarPointer(object: vmar).info.aspace
             try vmStatus { () throws(VmError) in
                 try UserAspace.withView(record) { (aspace: borrowing UserAspace) throws(VmError) in
-                    _ = try aspace.map(code, size: codeSize, at: 0x100_0000, rights: [.read, .execute])
-                    _ = try aspace.map(stack, size: 16 * 1024, at: 0x200_0000, rights: [.read, .write])
-                    _ = try aspace.map(startup, size: page, at: 0x300_0000, rights: [.read])
+                    _ = try aspace.map(code, size: codeSize, at: 0x100_0000, rights: .read | .execute)
+                    _ = try aspace.map(stack, size: 16 * 1024, at: 0x200_0000, rights: .read | .write)
+                    _ = try aspace.map(startup, size: page, at: 0x300_0000, rights: .read)
                 }
             }
             let job = try Processes.addHandle(Processes.rootJob, rights: JobObject.defaultRights, to: process)

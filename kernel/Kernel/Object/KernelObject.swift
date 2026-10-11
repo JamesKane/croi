@@ -142,7 +142,7 @@ enum Objects {
 struct EventObject: ~Copyable {
     var header = ObjectHeader(type: .event)
 
-    static var defaultRights: Rights { [.basic, .signal] }
+    static var defaultRights: Rights { .basic | .signal }
 
     static func create() throws(Status) -> ObjectPointer {
         guard let object = Objects.allocate(EventObject()) else { throw .noMemory }

@@ -55,7 +55,7 @@ struct InterruptObject: ~Copyable {
     var lend: Profile? = nil
 
     /// ZX_DEFAULT_INTERRUPT_RIGHTS.
-    static var defaultRights: Rights { Rights.basic.union([.read, .write, .signal]) }
+    static var defaultRights: Rights { Rights.basic.union(.read | .write | .signal) }
 }
 
 @safe struct InterruptPointer {

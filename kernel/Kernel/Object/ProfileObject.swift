@@ -18,7 +18,7 @@ struct ProfileObject: ~Copyable {
     let cpuMask: UInt64
 
     /// Zircon's ZX_DEFAULT_PROFILE_RIGHTS: basic less WAIT, plus APPLY_PROFILE.
-    static var defaultRights: Rights { [.transfer, .duplicate, .inspect, .applyProfile] }
+    static var defaultRights: Rights { .transfer | .duplicate | .inspect | .applyProfile }
 }
 
 @safe struct ProfileObjectPointer {

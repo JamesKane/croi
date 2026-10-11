@@ -118,9 +118,9 @@ enum PmuSelfTest {
             let size = (croi_user_program_size() + KernelLayout.pageSize - 1) & ~(KernelLayout.pageSize - 1)
             let code = try Vmo(anonymous: size)
             code.writeBytes(at: 0, from: croi_user_program_address(), count: croi_user_program_size())
-            _ = try space.map(code, size: size, at: 0x100_0000, rights: [.read, .execute])
+            _ = try space.map(code, size: size, at: 0x100_0000, rights: .read | .execute)
             let stack = try Vmo(anonymous: 16 * 1024)
-            _ = try space.map(stack, size: 16 * 1024, at: 0x200_0000, rights: [.read, .write])
+            _ = try space.map(stack, size: 16 * 1024, at: 0x200_0000, rights: .read | .write)
             let handles = HandleTable()  // a process's, from K7
             table = handles.address
             let exit = spawn(Smp.count - 1, user, 0).join()

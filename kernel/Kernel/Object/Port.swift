@@ -85,7 +85,7 @@ struct PortObject: ~Copyable {
     var interruptTail: UInt64 = 0
 
     /// ZX_DEFAULT_PORT_RIGHTS: no WAIT (ports are waited on with port_wait).
-    static var defaultRights: Rights { Rights.basic.subtracting(.wait).union([.read, .write]) }
+    static var defaultRights: Rights { Rights.basic.subtracting(.wait).union(.read | .write) }
 }
 
 @safe struct PortPointer {

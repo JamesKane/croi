@@ -36,7 +36,7 @@ enum ShootdownSelfTest {
             data.writeWord(at: page, 0x5EEE)
 
             // Unmap under a reader.
-            at = try a.map(data, size: page, rights: [.read])
+            at = try a.map(data, size: page, rights: .read)
             var (reader, bystander) = cpus()
             phase.store(0, ordering: .relaxed)
             let loads = spawn(reader, keepLoading)
@@ -48,13 +48,13 @@ enum ShootdownSelfTest {
             guard loads.join() == 0 else { panic("tlb self-test: a stale entry survived unmap on another CPU") }
 
             // Read-only under a writer.
-            at = try a.map(data, offset: page, size: page, rights: [.read, .write])
+            at = try a.map(data, offset: page, size: page, rights: .read | .write)
             (reader, bystander) = cpus()
             phase.store(0, ordering: .relaxed)
             let stores = spawn(reader, keepStoring)
             while phase.load(ordering: .acquiring) == 0 { arch_spin_pause() }
             let protectBefore = (TlbShootdown.received(reader), TlbShootdown.received(bystander))
-            try a.protect(at, size: page, rights: [.read])
+            try a.protect(at, size: page, rights: .read)
             let protectAfter = (TlbShootdown.received(reader), TlbShootdown.received(bystander))
             phase.store(2, ordering: .releasing)
             guard stores.join() == 0 else { panic("tlb self-test: a stale writable entry survived protect") }

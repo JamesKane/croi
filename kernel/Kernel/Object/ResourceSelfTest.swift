@@ -39,17 +39,17 @@ enum ResourceSelfTest {
             var handles = try TraceControl.rings(table, tracing)
             rings = handles.count
             guard rings == Smp.count, try !table.rights(of: handles[0]).contains(.write),
-                  status({ () throws(Status) in _ = try VmoObject.forMapping(table, handles[0], [.read, .write]) }) == .accessDenied else {
+                  status({ () throws(Status) in _ = try VmoObject.forMapping(table, handles[0], (.read | .write)) }) == .accessDenied else {
                 panic("resource self-test: rings writable")
             }
 
             // Map CPU 0's ring read-only and read its header from "user".
-            let vmo = try VmoObject.forMapping(table, handles[0], [.read])
+            let vmo = try VmoObject.forMapping(table, handles[0], .read)
             do throws(VmError) {
                 let space = try UserAspace()
                 aspace = space.record.address
                 let borrowed = Vmo.borrowing(vmo)
-                ringAt = try space.map(borrowed, size: borrowed.size, rights: [.read])
+                ringAt = try space.map(borrowed, size: borrowed.size, rights: .read)
                 _ = borrowed.keep()
                 guard run(readHeader) == 0, frequencySeen.load(ordering: .relaxed) == Clock.frequency else {
                     panic("resource self-test: ring not readable through a mapping")
@@ -65,13 +65,13 @@ enum ResourceSelfTest {
 
             // vmo_create and mapping rights.
             let made = try table.add(try VmoObject.create(size: 4 * KernelLayout.pageSize), rights: VmoObject.defaultRights)
-            VmoObject.forMappingReleasing(table, made, [.read, .write])
-            let readOnly = try table.replace(made, rights: [.basic, .read, .map])
-            guard status({ () throws(Status) in _ = try VmoObject.forMapping(table, readOnly, [.read, .write]) }) == .accessDenied,
-                  status({ () throws(Status) in _ = try VmoObject.forMapping(table, readOnly, [.read, .execute]) }) == .accessDenied else {
+            VmoObject.forMappingReleasing(table, made, (.read | .write))
+            let readOnly = try table.replace(made, rights: .basic | .read | .map)
+            guard status({ () throws(Status) in _ = try VmoObject.forMapping(table, readOnly, (.read | .write)) }) == .accessDenied,
+                  status({ () throws(Status) in _ = try VmoObject.forMapping(table, readOnly, (.read | .execute)) }) == .accessDenied else {
                 panic("resource self-test: VMO rights not enforced")
             }
-            VmoObject.forMappingReleasing(table, readOnly, [.read])
+            VmoObject.forMappingReleasing(table, readOnly, .read)
         } catch {
             panic("resource self-test: unexpected status")
         }

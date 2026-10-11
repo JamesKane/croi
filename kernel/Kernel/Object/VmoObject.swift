@@ -9,12 +9,12 @@ struct VmoObject: ~Copyable {
 
     /// ZX_DEFAULT_VMO_RIGHTS.
     static var defaultRights: Rights {
-        [.basic, .read, .write, .map, .getProperty, .setProperty, .signal]
+        (.basic | .read | .write | .map | .getProperty | .setProperty | .signal)
     }
 
     /// vmo_create_physical's (Zircon's list: no WAIT, INSPECT or SIGNAL).
     static var physicalRights: Rights {
-        [.duplicate, .transfer, .read, .write, .execute, .map, .getProperty, .setProperty]
+        (.duplicate | .transfer | .read | .write | .execute | .map | .getProperty | .setProperty)
     }
 
     /// A handle-able object for `vmo` (takes a reference of its own).
@@ -41,9 +41,7 @@ struct VmoObject: ~Copyable {
         return try wrap(vmo.record)
     }
 
-    /// The syscall (its own function: objectCall's size decides what the
-    /// optimizer folds there).
-    @inline(never)
+    /// The syscall.
     static func createChildCall(_ a: InlineArray<6, UInt64>, _ table: borrowing HandleTable) throws(Status) {
         try Syscalls.check(a[4], MemoryLayout<UInt32>.size)
         let (child, rights) = try createChild(table, UInt32(truncatingIfNeeded: a[0]),
@@ -71,7 +69,7 @@ struct VmoObject: ~Copyable {
         guard kind == snapshotAtLeastOnWrite else { throw .notSupported }
         let pageMask = KernelLayout.pageSize - 1
         guard size <= UInt64.max - pageMask else { throw .outOfRange }
-        let ref = try table.get(handle, type: .vmo, rights: [.duplicate, .read])
+        let ref = try table.get(handle, type: .vmo, rights: .duplicate | .read)
         var rights = try table.rights(of: handle)
         let parent = VmoPointer(address: UnsafeVmoObject(ref.object).vmo)
         let child: Vmo
@@ -168,7 +166,7 @@ enum TraceControl {
         var handles = UniqueArray<UInt32>()
         for cpu in 0..<Smp.count {
             guard let vmo = Trace.ringVmo(cpu) else { throw .badState }
-            handles.append(try table.add(try VmoObject.wrap(vmo), rights: [.basic, .read, .map, .getProperty]))
+            handles.append(try table.add(try VmoObject.wrap(vmo), rights: .basic | .read | .map | .getProperty))
         }
         return handles
     }

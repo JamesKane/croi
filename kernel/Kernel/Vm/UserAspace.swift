@@ -17,7 +17,7 @@ enum UserLayout {
 }
 
 /// What a mapping allows user code to do.
-struct VmRights: OptionSet, Equatable {
+struct VmRights: BitFlags {
     let rawValue: UInt8
     static var read: VmRights { VmRights(rawValue: 1) }
     static var write: VmRights { VmRights(rawValue: 2) }
@@ -183,7 +183,6 @@ struct UserAspace: ~Copyable {
     /// A reservation holds its range for views (`mapView`).
     /// A JIT reservation (`jit`, entitled code generation) gets a
     /// protection key where the hardware has them (see Jit).
-    @inline(never)
     func allocateRegion(size: UInt64, alignment: UInt64 = KernelLayout.pageSize, in parent: UInt32 = root,
                         at fixed: UInt64? = nil, reservation: Bool = false, jit: Bool = false) throws(VmError) -> Region {
         guard size > 0, size % KernelLayout.pageSize == 0, alignment % KernelLayout.pageSize == 0,
@@ -451,7 +450,7 @@ struct UserAspace: ~Copyable {
     /// Adds a mapping (mapping physical/contiguous VMOs at once), taking a
     /// VMO reference and listing this address space on the VMO.
     private func insert(_ mapping: Mapping) throws(VmError) {
-        if mapping.vmo.pointee.sharedReadOnly, mapping.rights != [.read] { throw .invalidArgument }
+        if mapping.vmo.pointee.sharedReadOnly, mapping.rights != .read { throw .invalidArgument }
         if case .anonymous = mapping.vmo.pointee.kind {} else {
             try record.pointee.arch.map(virt: mapping.base, phys: mapping.vmo.commit(at: mapping.offset)!,
                                         size: mapping.size,

@@ -17,7 +17,7 @@ struct ResourceObject: ~Copyable {
 
     /// ZX_DEFAULT_RESOURCE_RIGHTS: basic less WAIT, plus WRITE (to mint
     /// children) and GET_PROPERTY.
-    static var defaultRights: Rights { [.transfer, .duplicate, .inspect, .write, .getProperty] }
+    static var defaultRights: Rights { .transfer | .duplicate | .inspect | .write | .getProperty }
 
     var exclusive: Bool { flags & UInt32(CROI_RSRC_FLAG_EXCLUSIVE) != 0 }
 

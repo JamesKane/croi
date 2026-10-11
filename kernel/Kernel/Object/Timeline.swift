@@ -31,7 +31,7 @@ struct TimelineObject: ~Copyable {
     var lend: Profile? = nil
 
     /// BASIC | READ | WRITE | SIGNAL (WRITE drives it; clients get READ).
-    static var defaultRights: Rights { Rights.basic.union([.read, .write, .signal]) }
+    static var defaultRights: Rights { Rights.basic.union(.read | .write | .signal) }
 }
 
 @safe struct TimelinePointer {
@@ -126,7 +126,7 @@ enum Timelines {
         try VmoObject.wrap(TimelinePointer(object: object).pointee.page)
     }
 
-    static var pageRights: Rights { [.basic, .read, .map, .getProperty] }
+    static var pageRights: Rights { .basic | .read | .map | .getProperty }
 
     /// A value wait was registered: a synthetic timeline makes sure a timer
     /// is armed for the earliest vblank any waiter needs. NO_RESOURCES if

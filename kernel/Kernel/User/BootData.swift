@@ -18,7 +18,7 @@ enum BootData {
     nonisolated(unsafe) private(set) static var object = ObjectPointer(address: 0)
 
     /// Read only: user space can't change what firmware said.
-    static var rights: Rights { [.basic, .read, .map, .getProperty] }
+    static var rights: Rights { .basic | .read | .map | .getProperty }
 
     private static let header = MemoryLayout<croi_zbi_header_t>.size
     private static let range = MemoryLayout<croi_zbi_mem_range_t>.size

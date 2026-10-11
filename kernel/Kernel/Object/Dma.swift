@@ -32,7 +32,7 @@ struct BtiObject: ~Copyable {
 
     /// ZX_DEFAULT_BTI_RIGHTS.
     static var defaultRights: Rights {
-        Rights.basic.subtracting(.wait).union([.read, .write, .getProperty, .setProperty, .map])
+        Rights.basic.subtracting(.wait).union(.read | .write | .getProperty | .setProperty | .map)
     }
 }
 

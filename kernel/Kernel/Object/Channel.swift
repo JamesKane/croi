@@ -179,7 +179,7 @@ struct ChannelObject: ~Copyable {
     var nextTxid: UInt32 = 0
 
     /// ZX_DEFAULT_CHANNEL_RIGHTS: no DUPLICATE (an endpoint has one reader).
-    static var defaultRights: Rights { Rights.basic.subtracting(.duplicate).union([.read, .write, .signal, .signalPeer]) }
+    static var defaultRights: Rights { Rights.basic.subtracting(.duplicate).union(.read | .write | .signal | .signalPeer) }
 }
 
 @safe struct ChannelPointer {
@@ -197,7 +197,7 @@ struct EventPairObject: ~Copyable {
     var peer: UInt64 = 0
     var peerKoid: UInt64 = 0
 
-    static var defaultRights: Rights { [.basic, .signal, .signalPeer] }
+    static var defaultRights: Rights { .basic | .signal | .signalPeer }
 }
 
 @safe struct EventPairPointer {

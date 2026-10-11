@@ -25,7 +25,7 @@ struct TimerObject: ~Copyable {
     /// yielding (a yield ends its period: a period's wait per try).
     let configuring = Mutex()
 
-    static var defaultRights: Rights { [.basic, .write, .signal] }
+    static var defaultRights: Rights { .basic | .write | .signal }
 }
 
 @safe struct TimerObjectPointer {

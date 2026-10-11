@@ -229,8 +229,8 @@ struct LogObject: ~Copyable {
     var position: UInt64 = 0
     var nextReader: UInt64 = 0
 
-    static var readRights: Rights { [.basic, .read, .write, .signal] }
-    static var writeRights: Rights { [.basic, .write, .signal] }
+    static var readRights: Rights { .basic | .read | .write | .signal }
+    static var writeRights: Rights { .basic | .write | .signal }
 }
 
 @safe struct LogObjectPointer {

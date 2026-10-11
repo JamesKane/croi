@@ -58,7 +58,7 @@ enum ProgramLoader {
             let stack = try vmStatus { () throws(VmError) -> Vmo in try Vmo(anonymous: stackSize) }
             let stackBase = try vmStatus { () throws(VmError) -> UInt64 in
                 try UserAspace.withView(record) { (aspace: borrowing UserAspace) throws(VmError) -> UInt64 in
-                    try aspace.map(stack, size: stackSize, rights: [.read, .write])
+                    try aspace.map(stack, size: stackSize, rights: .read | .write)
                 }
             }
             let thread = try Processes.createThread(process: process)

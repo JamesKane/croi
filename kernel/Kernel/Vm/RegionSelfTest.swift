@@ -30,10 +30,10 @@ enum RegionSelfTest {
             let inner = try a.allocateRegion(size: 4 * page, in: outer.id)
             guard outer.contains(inner.base, inner.size) else { panic("region self-test: nesting") }
             let scratch = try Vmo(anonymous: 4 * page)
-            let inside = try a.map(scratch, size: 4 * page, in: inner.id, rights: [.read, .write])
+            let inside = try a.map(scratch, size: 4 * page, in: inner.id, rights: .read | .write)
             guard inner.contains(inside, 4 * page) else { panic("region self-test: mapping escaped its region") }
             do throws(VmError) {
-                _ = try a.map(scratch, size: page, at: outer.base + 15 * page + page, in: inner.id, rights: [.read])
+                _ = try a.map(scratch, size: page, at: outer.base + 15 * page + page, in: inner.id, rights: .read)
                 panic("region self-test: mapped outside its region")
             } catch {}
             try scratch.commit(offset: 0, size: 4 * page)
@@ -49,9 +49,9 @@ enum RegionSelfTest {
                 green.writeWord(at: i * page, 0x6EE0 + i)
             }
             viewAt = reservation.base + 2 * page
-            try a.mapView(red, size: 4 * page, at: viewAt, in: reservation.id, rights: [.read])
+            try a.mapView(red, size: 4 * page, at: viewAt, in: reservation.id, rights: .read)
             do throws(VmError) {
-                _ = try a.map(red, size: page, at: reservation.base, rights: [.read])
+                _ = try a.map(red, size: page, at: reservation.base, rights: .read)
                 panic("region self-test: ordinary mapping inside a reservation")
             } catch {}
             stop.store(false, ordering: .relaxed)
@@ -62,9 +62,9 @@ enum RegionSelfTest {
             while swaps < 200 || reads.load(ordering: .relaxed) < 1000 {
                 guard Clock.now() < until else { break }
                 if swaps % 2 == 0 {
-                    try a.mapView(green, size: 4 * page, at: viewAt, in: reservation.id, rights: [.read])
+                    try a.mapView(green, size: 4 * page, at: viewAt, in: reservation.id, rights: .read)
                 } else {
-                    try a.mapView(red, size: 4 * page, at: viewAt, in: reservation.id, rights: [.read])
+                    try a.mapView(red, size: 4 * page, at: viewAt, in: reservation.id, rights: .read)
                 }
                 swaps += 1
             }
@@ -78,12 +78,12 @@ enum RegionSelfTest {
 
             // Partial unmap, protect, decommit (seen from two spaces).
             let data = try Vmo(anonymous: 8 * page)
-            plain = try a.map(data, size: 8 * page, rights: [.read, .write])
-            sharedAt = try b.map(data, size: 8 * page, rights: [.read])
+            plain = try a.map(data, size: 8 * page, rights: .read | .write)
+            sharedAt = try b.map(data, size: 8 * page, rights: .read)
             for i in 0..<UInt64(8) { data.writeWord(at: i * page, 0xDA7A + i) }
             try a.unmap(plain + 3 * page, size: 2 * page)
             guard a.mappingCount == 2 else { panic("region self-test: partial unmap didn't split") }
-            try a.protect(plain, size: 2 * page, rights: [.read])
+            try a.protect(plain, size: 2 * page, rights: .read)
             // Fault pages 6-7 in through both spaces first, so decommit has
             // live entries to take down (else nothing could go stale).
             guard run(touchTail) == 0 else { panic("region self-test: couldn't read the pages to decommit") }

@@ -55,7 +55,7 @@ struct ExceptionObject: ~Copyable {
     var state = UInt32(CROI_EXCEPTION_STATE_TRY_NEXT)
     let wait: ExceptionWaitPointer
 
-    static var defaultRights: Rights { [.transfer, .duplicate, .wait, .inspect, .getProperty, .setProperty] }
+    static var defaultRights: Rights { .transfer | .duplicate | .wait | .inspect | .getProperty | .setProperty }
 }
 
 @safe struct ExceptionPointer {

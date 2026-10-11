@@ -66,7 +66,7 @@ extension Syscalls {
                 try check(a[5], 4)
                 if args.rd_num_bytes > 0 { try check(args.rd_bytes, Int(args.rd_num_bytes)) }
                 if args.rd_num_handles > 0 { try check(args.rd_handles, Int(args.rd_num_handles) * 4) }
-                channel = try table.get(handle, type: .channel, rights: [.read, .write])
+                channel = try table.get(handle, type: .channel, rights: .read | .write)
             } catch {
                 discard(table, handles: args.wr_handles, count: UInt64(args.wr_num_handles))
                 throw error

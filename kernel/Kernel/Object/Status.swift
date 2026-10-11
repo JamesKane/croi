@@ -21,7 +21,37 @@ enum Status: Int32, Error, Equatable {
     case accessDenied = -30
 }
 
-struct Rights: OptionSet, Equatable {
+/// Option-set bit flags for the kernel, without OptionSet's array-literal
+/// syntax: `[.read, .write]` builds an Array (a heap allocation, and with
+/// it Swift's refcounting runtime, which the kernel can't have) unless the
+/// optimizer folds it to a constant, and whether it does depends on
+/// unrelated code around it: three changes in a row failed the no-ARC
+/// link check that way. Combine with `|` (a constant expression); `init()`
+/// is the empty set.
+protocol BitFlags: Equatable {
+    associatedtype RawValue: FixedWidthInteger
+    var rawValue: RawValue { get }
+    init(rawValue: RawValue)
+}
+
+extension BitFlags {
+    @inline(__always) init() { self.init(rawValue: 0) }
+
+    @inline(__always) static func | (a: Self, b: Self) -> Self { Self(rawValue: a.rawValue | b.rawValue) }
+
+    var isEmpty: Bool { rawValue == 0 }
+    func contains(_ other: Self) -> Bool { rawValue & other.rawValue == other.rawValue }
+    func isSuperset(of other: Self) -> Bool { contains(other) }
+    func union(_ other: Self) -> Self { self | other }
+    func intersection(_ other: Self) -> Self { Self(rawValue: rawValue & other.rawValue) }
+    func subtracting(_ other: Self) -> Self { Self(rawValue: rawValue & ~other.rawValue) }
+    mutating func insert(_ other: Self) { self = self | other }
+    mutating func remove(_ other: Self) { self = subtracting(other) }
+    mutating func formUnion(_ other: Self) { self = self | other }
+    mutating func subtract(_ other: Self) { self = subtracting(other) }
+}
+
+struct Rights: BitFlags {
     let rawValue: UInt32
     static var duplicate: Rights { Rights(rawValue: 1 << 0) }
     static var transfer: Rights { Rights(rawValue: 1 << 1) }
@@ -47,7 +77,7 @@ struct Rights: OptionSet, Equatable {
     /// duplicate/replace: keep the source handle's rights.
     static var sameRights: Rights { Rights(rawValue: 1 << 31) }
 
-    static var basic: Rights { [.transfer, .duplicate, .wait, .inspect] }
+    static var basic: Rights { .transfer | .duplicate | .wait | .inspect }
 }
 
 /// Signal bits (zx_signals_t).

@@ -114,7 +114,7 @@ extension Syscalls {
         try check(a[4], 8)
         let parent = try table.get(UInt32(truncatingIfNeeded: a[0]), type: .vmar)
         let parentRights = try table.rights(of: UInt32(truncatingIfNeeded: a[0]))
-        var rights: Rights = [.transfer, .inspect, .destroy]
+        var rights: Rights = .transfer | .inspect | .destroy
         if options & UInt32(CROI_VM_CAN_MAP_READ) != 0 { rights.insert(.read) }
         if options & UInt32(CROI_VM_CAN_MAP_WRITE) != 0 { rights.insert(.write) }
         if options & UInt32(CROI_VM_CAN_MAP_EXECUTE) != 0 { rights.insert(.execute) }

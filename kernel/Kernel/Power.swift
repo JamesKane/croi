@@ -95,7 +95,6 @@ enum Power {
     }
 
     /// system_powerctl(power resource, cmd, const croi_system_powerctl_arg_t *).
-    @inline(never)
     static func call(_ a: InlineArray<6, UInt64>, _ table: borrowing HandleTable) throws(Status) -> Never {
         let started = Clock.now()
         try Resources.check(table, UInt32(truncatingIfNeeded: a[0]), system: UInt64(CROI_RSRC_SYSTEM_POWER_BASE))

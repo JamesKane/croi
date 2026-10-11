@@ -36,8 +36,8 @@ struct JobObject: ~Copyable {
     var reservedCpus: UInt64 = 0
 
     static var defaultRights: Rights {
-        [.basic, .read, .write, .getProperty, .setProperty, .getPolicy, .setPolicy, .enumerate, .destroy, .signal,
-         .manageJob, .manageProcess, .manageThread]
+        .basic | .read | .write | .getProperty | .setProperty | .getPolicy | .setPolicy | .enumerate | .destroy | .signal
+            | .manageJob | .manageProcess | .manageThread
     }
 }
 
@@ -78,8 +78,8 @@ struct ProcessObject: ~Copyable {
     var exceptionChannel: UInt64 = 0
 
     static var defaultRights: Rights {
-        [.basic, .read, .write, .getProperty, .setProperty, .enumerate, .destroy, .signal, .manageProcess,
-         .manageThread]
+        .basic | .read | .write | .getProperty | .setProperty | .enumerate | .destroy | .signal | .manageProcess
+            | .manageThread
     }
 }
 
@@ -117,7 +117,7 @@ struct ThreadObject: ~Copyable {
     var exceptionFrame: UInt64 = 0
 
     static var defaultRights: Rights {
-        [.basic, .read, .write, .getProperty, .setProperty, .destroy, .signal, .manageThread]
+        (.basic | .read | .write | .getProperty | .setProperty | .destroy | .signal | .manageThread)
     }
 }
 
@@ -142,7 +142,7 @@ struct VmarObject: ~Copyable {
     let base: UInt64
     let size: UInt64
 
-    static var defaultRights: Rights { [.transfer, .inspect, .read, .write, .execute] }
+    static var defaultRights: Rights { .transfer | .inspect | .read | .write | .execute }
 }
 
 @safe struct VmarPointer {

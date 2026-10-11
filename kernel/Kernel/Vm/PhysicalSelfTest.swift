@@ -45,14 +45,14 @@ enum PhysicalSelfTest {
 
             // A policy change is refused while mapped and applies after.
             let aspace = try UserAspace()
-            let at = try aspace.map(low, size: 16 * page, rights: [.read])
+            let at = try aspace.map(low, size: 16 * page, rights: .read)
             do throws(VmError) {
                 try low.setCachePolicy(.writeCombining)
                 panic("phys self-test: cache policy changed while mapped")
             } catch {}
             try aspace.unmap(mappingAt: at)
             try low.setCachePolicy(.writeCombining)
-            let again = try aspace.map(low, size: 16 * page, rights: [.read])
+            let again = try aspace.map(low, size: 16 * page, rights: .read)
             // Only where page tables carry memory types (rv64 without
             // Svpbmt leaves them to the PMAs).
             var typed = true

@@ -75,7 +75,6 @@ enum Random {
 
     /// The syscalls (Zircon's): at most `maxDraw` bytes either way, else
     /// INVALID_ARGS; a bad user buffer is INVALID_ARGS too.
-    @inline(never)
     static func call(_ number: UInt64, _ a: InlineArray<6, UInt64>) -> Int64 {
         guard a[1] <= UInt64(maxDraw) else { return Int64(Status.invalidArgs.rawValue) }
         let count = Int(a[1])

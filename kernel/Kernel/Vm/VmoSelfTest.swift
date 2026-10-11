@@ -25,9 +25,9 @@ enum VmoSelfTest {
             let size = vmo.size
             aspace = a.record.address
             other = b.record.address
-            writable = try a.map(vmo, size: size, rights: [.read, .write])
-            readOnly = try a.map(vmo, size: size, rights: [.read])
-            shared = try b.map(vmo, size: size, rights: [.read])
+            writable = try a.map(vmo, size: size, rights: .read | .write)
+            readOnly = try a.map(vmo, size: size, rights: .read)
+            shared = try b.map(vmo, size: size, rights: .read)
             guard writable != readOnly, vmo.committedPages == 0 else { panic("vmo self-test: committed before use") }
 
             let before = UserAspaces.faultsResolved.load(ordering: .relaxed)
@@ -56,7 +56,7 @@ enum VmoSelfTest {
 
             // Four CPUs fault the same fresh pages at once.
             let fresh = try Vmo(anonymous: 32 * KernelLayout.pageSize)
-            racing = try a.map(fresh, size: fresh.size, rights: [.read, .write])
+            racing = try a.map(fresh, size: fresh.size, rights: .read | .write)
             go.store(false, ordering: .relaxed)
             var handles = UniqueArray<ThreadHandle>(capacity: 4)
             for cpu in 0..<min(4, Smp.count) { handles.append(spawn(cpu, race)) }
@@ -69,7 +69,7 @@ enum VmoSelfTest {
             // Contiguous and physical VMOs are mapped at once; 2 MiB aligned
             // ones with large pages.
             let big = try Vmo(contiguous: 2 << 20, alignLog2: 21)
-            let at = try a.map(big, size: big.size, at: 0x4000_0000, rights: [.read, .write])
+            let at = try a.map(big, size: big.size, at: 0x4000_0000, rights: .read | .write)
             guard a.query(at + 0x1234)?.pageSize == 2 << 20 else { panic("vmo self-test: no large page") }
             // RAM is refused (the deny list); a hole in the memory map, as
             // device memory would be, is fine.
@@ -83,7 +83,7 @@ enum VmoSelfTest {
             pmm.free(ram)
             let phys = (PhysicalMap.highestEnd + (2 << 30)) & ~((1 << 30) - 1)
             let device = try Vmo(physical: phys, size: KernelLayout.pageSize, cache: .uncached)
-            let mapped = try a.map(device, size: KernelLayout.pageSize, rights: [.read])
+            let mapped = try a.map(device, size: KernelLayout.pageSize, rights: .read)
             guard a.query(mapped)?.physical == phys else { panic("vmo self-test: physical VMO misplaced") }
 
             try a.unmap(mappingAt: readOnly)

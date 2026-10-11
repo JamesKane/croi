@@ -1306,6 +1306,12 @@ kernel must not use PAC until it does.
   atomic count like Zircon's fbl::RefPtr; `share()` adds an owner, the last
   drop frees). `cmake/CheckNoArc.cmake` fails the kernel link if any
   refcounting entry point survives --gc-sections.
+- Kernel flag types are `BitFlags` (Object/Status.swift: `Rights`,
+  `VmRights`), combined with `|` (`.read | .write`, `Rights()` for none),
+  never `OptionSet`: an OptionSet array literal builds an Array, and
+  whether the optimizer folded it away depended on unrelated nearby code
+  (unrelated edits broke the no-ARC link three times). The build checks
+  (`cmake/CheckNoOptionSet.cmake`).
 - Reading a `~Copyable` value through an `unsafeAddress` accessor makes the
   owner unconsumable afterwards in 6.4.0; use `_read { yield ... }` (the
   SE-0474 `yielding borrow` spelling is still experimental). `borrow`

@@ -15,7 +15,7 @@ enum JitSelfTest {
 
     static func run(_ console: Uart) {
         let page = KernelLayout.pageSize
-        let rwx: VmRights = [.read, .write, .execute]
+        let rwx: VmRights = .read | .write | .execute
         var keysAvailable = 0
         do throws(VmError) {
             let a = try UserAspace()
@@ -27,7 +27,7 @@ enum JitSelfTest {
                 do throws(VmError) { try body(); return false } catch { return true }
             }
             let plain = try a.allocateRegion(size: 8 * page, reservation: true)
-            let data = try a.map(vmo, size: 4 * page, rights: [.read, .write])
+            let data = try a.map(vmo, size: 4 * page, rights: .read | .write)
             guard refused({ () throws(VmError) in _ = try a.map(vmo, size: 4 * page, rights: rwx) }),
                   refused({ () throws(VmError) in try a.mapView(vmo, size: 4 * page, at: plain.base, in: plain.id, rights: rwx) }),
                   refused({ () throws(VmError) in try a.protect(data, size: page, rights: rwx) }) else {
@@ -72,8 +72,8 @@ enum JitSelfTest {
                       refused({ () throws(VmError) in try a.mapView(vmo, size: 4 * page, at: jit.base, in: jit.id, rights: rwx) }) else {
                     panic("jit self-test: writable+executable view without keys")
                 }
-                try a.mapView(vmo, size: 4 * page, at: jit.base, in: jit.id, rights: [.read, .write])
-                try a.mapView(vmo, size: 4 * page, at: jit.base + 8 * page, in: jit.id, rights: [.read, .execute])
+                try a.mapView(vmo, size: 4 * page, at: jit.base, in: jit.id, rights: .read | .write)
+                try a.mapView(vmo, size: 4 * page, at: jit.base + 8 * page, in: jit.id, rights: .read | .execute)
                 code = jit.base
                 guard run(viewsThread) == 0 else { panic("jit self-test: views don't share their VMO") }
             }

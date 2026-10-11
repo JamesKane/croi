@@ -27,13 +27,13 @@ enum ObjectSelfTest {
                 panic("object self-test: handle errors")
             }
             // Duplicate (subset), replace (old gone), stale handles.
-            let readOnly = try table.duplicate(event, rights: [.wait, .inspect, .transfer])
-            guard try table.rights(of: readOnly) == [.wait, .inspect, .transfer],
+            let readOnly = try table.duplicate(event, rights: .wait | .inspect | .transfer)
+            guard try table.rights(of: readOnly) == .wait | .inspect | .transfer,
                   status({ () throws(Status) in _ = try table.duplicate(readOnly, rights: .sameRights) }) == .accessDenied,
-                  status({ () throws(Status) in _ = try table.duplicate(event, rights: [.write]) }) == .invalidArgs else {
+                  status({ () throws(Status) in _ = try table.duplicate(event, rights: .write) }) == .invalidArgs else {
                 panic("object self-test: duplicate")
             }
-            let replaced = try table.replace(readOnly, rights: [.wait])
+            let replaced = try table.replace(readOnly, rights: .wait)
             guard status({ () throws(Status) in _ = try table.get(readOnly) }) == .badHandle else { panic("object self-test: replace") }
             try table.close(replaced)
             let reused = try table.add(try EventObject.create(), rights: EventObject.defaultRights)

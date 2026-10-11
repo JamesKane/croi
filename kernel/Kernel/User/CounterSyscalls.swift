@@ -13,7 +13,7 @@ extension Syscalls {
             try check(a[1], MemoryLayout<UInt32>.size)
             try addAndPut(try Counters.create(), rights: CounterObject.defaultRights, a[1], table)
         case 161:  // counter_add(counter, amount): READ and WRITE (the result reveals the value)
-            try Counters.add(try table.get(handle, type: .counter, rights: [.read, .write]).object,
+            try Counters.add(try table.get(handle, type: .counter, rights: .read | .write).object,
                              Int64(bitPattern: a[1]))
         case 162:  // counter_read(counter or timeline, value out)
             guard a[1] != 0 else { throw .invalidArgs }
