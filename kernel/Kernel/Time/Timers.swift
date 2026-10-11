@@ -162,6 +162,9 @@ enum Timers {
     /// again, over a longer baseline, once that has doubled.
     nonisolated(unsafe) private static var skewMeasuredAt: UInt64 = 0
 
+    /// The farthest the hardware is ever armed (2^40 ns, ~18 minutes).
+    static var maxDistance: UInt64 { 1 << 40 }
+
     /// The most a timer interrupt waits for a deadline it came before.
     static var earlyTolerance: UInt64 { 1_000_000 }
 
@@ -224,6 +227,10 @@ enum Timers {
         return unsafe (deadline, queue.pointee.programmed, pending, queue.pointee.interrupts)
     }
 
+    /// When this CPU's hardware was last armed to fire (ns; the time
+    /// self-test's check of `maxDistance`).
+    static var hardwareTarget: UInt64 { unsafe queue.pointee.hardwareTarget }
+
     /// Timer interrupts this CPU has taken.
     static var interruptCount: UInt64 { unsafe queue.pointee.interrupts }
 
@@ -272,7 +279,14 @@ enum Timers {
         #endif
         let lead = leadPpm
         let extra = min(distance, 1 << 40) * lead / 1_000_000
-        let ns = requested &+ extra < requested ? .max : requested + extra
+        // Never further out than `maxDistance`: KVM converts a TSC deadline
+        // to host ns as delta * 10^6 / tsc_khz in 64 bits, which wraps past
+        // ~6000 s at 3 GHz and fired at once; the handler found nothing due
+        // and re-armed the same far deadline, an interrupt storm (a futex
+        // wait 146 years out took a contended lock from 0.3 ms to 5.6 s,
+        // Todhchai's pthread test). Reaching the cap, the interrupt finds
+        // nothing due and arms for what is left: one wakeup per cap.
+        let ns = min(requested &+ extra < requested ? .max : requested + extra, nowNs + Self.maxDistance)
         unsafe queue.pointee.hardwareTarget = ns
         unsafe queue.pointee.hardwareArmedAt = nowNs
         let counter = max(Clock.counter(atNanoseconds: ns), now + 1)

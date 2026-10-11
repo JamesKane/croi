@@ -1180,6 +1180,13 @@ resource.h CROI_INFO_CPU_STATS, Smp.swift `CpuStats`):
   from kvmclock's scale when KVM offers it (no 10 ms HPET loop at boot),
   or a hypervisor leaf 0x40000010. Settled again right before the
   halt (an idle thread switched away mid-poll resumes past the first).
+- The hardware is never armed further out than `Timers.maxDistance`
+  (2^40 ns, ~18 min; one wakeup per cap for a far timer): KVM converts a
+  TSC deadline to host ns in 64 bits (delta x 10^6 / tsc_khz), which
+  wraps past ~6000 s, and futex waits with a deadline 146 years out ran
+  ~2000x slower under KVM (Todhchai's pthread test: 39 s and a hang).
+  The time self-test checks the cap; mode 17's check 620 runs a
+  contended futex lock with both kinds of deadline.
 - Left: the SBSA watchdog's refresh, now every 20-25 s with slack
   (`croi.watchdog=off` removes it; QEMU has none). The debuglog dumper,
   timeline ticks and idle polling were already event-driven.

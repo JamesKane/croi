@@ -3741,6 +3741,65 @@ static int64_t postmortem_checks(const startup_t *s, uint32_t *channel_out) {
   return 0;
 }
 
+// Todhchai's report (2026-10-11): a contended futex lock whose waits carry
+// a far-future finite deadline (INT64_MAX >> 1) must behave like one
+// waiting forever. Drepper's mutex (0 free, 1 locked, 2 contended).
+typedef struct {
+  volatile uint32_t word;
+  volatile uint64_t counter;
+  uint64_t deadline;
+  uint64_t rounds;
+} futex_lock_t;
+
+static void futex_lock(futex_lock_t *l) {
+  uint32_t c = 0;
+  if (__atomic_compare_exchange_n(&l->word, &c, 1, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return;
+  if (c != 2) c = __atomic_exchange_n(&l->word, 2, __ATOMIC_ACQUIRE);
+  while (c != 0) {
+    sys(CROI_SYS_FUTEX_WAIT, (uint64_t)&l->word, 2, 0, l->deadline, 0);
+    c = __atomic_exchange_n(&l->word, 2, __ATOMIC_ACQUIRE);
+  }
+}
+
+static void futex_unlock(futex_lock_t *l) {
+  if (__atomic_fetch_sub(&l->word, 1, __ATOMIC_RELEASE) != 1) {
+    __atomic_store_n(&l->word, 0, __ATOMIC_RELEASE);
+    sys(CROI_SYS_FUTEX_WAKE, (uint64_t)&l->word, 1, 0, 0, 0);
+  }
+}
+
+static void futex_locker(uint64_t arg) {
+  futex_lock_t *l = (futex_lock_t *)arg;
+  for (uint64_t i = 0; i < l->rounds; i++) {
+    futex_lock(l);
+    l->counter = l->counter + 1;
+    futex_unlock(l);
+  }
+  sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
+}
+
+static uint64_t contended_futex(const startup_t *s, uint64_t deadline) {
+  futex_lock_t l = {0, 0, deadline, 2000};
+  uint32_t threads[4];
+  uint64_t start = now_ns();
+  for (int i = 0; i < 4; i++) threads[i] = start_thread(s, futex_locker, (uint64_t)&l);
+  for (int i = 0; i < 4; i++) {
+    wait_for(threads[i], CROI_SIGNAL_TASK_TERMINATED, 60000000000ull);
+    sys(CROI_SYS_HANDLE_CLOSE, threads[i], 0, 0, 0, 0);
+  }
+  return l.counter == 4 * 2000 ? now_ns() - start : ~0ull;
+}
+
+static int64_t futex_deadlines(const startup_t *s) {
+  // The lock works with waits that never time out and with ones 146 years
+  // out (under KVM the latter once took ~2000x longer: the kernel's time
+  // self-test checks the cause, a hardware timer armed past what KVM can
+  // convert).
+  CHECK(620, contended_futex(s, 0x7FFFFFFFFFFFFFFFull) != ~0ull &&
+                 contended_futex(s, 0x7FFFFFFFFFFFFFFFull >> 1) != ~0ull);
+  return 0;
+}
+
 // K14a: reclamation. A pager VMO's clean pages are evicted oldest first
 // (DONT_NEED first, ALWAYS_NEED and dirty pages kept, ALWAYS_NEED given up
 // at OOM) and come back from the pager; a discardable VMO's lock states and
@@ -4243,6 +4302,8 @@ static int64_t extensions(const startup_t *s) {
   if (smcs != 0) return smcs;
   int64_t frozen = postmortem(s);
   if (frozen != 0) return frozen;
+  int64_t futexes = futex_deadlines(s);
+  if (futexes != 0) return futexes;
   int64_t reclaimed = reclaim(s);
   if (reclaimed != 0) return reclaimed;
   int64_t random = cprng_checks();

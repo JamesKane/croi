@@ -818,6 +818,17 @@ private func timeSelfTest(others: Int, _ console: Uart) {
         guard TimerProbe.firedAt[3] != 0 else { panic("timer self-test: a due timer didn't fire at once") }
     }
 
+    // A deadline 146 years out arms the hardware no further than
+    // `maxDistance` (KVM wrapped a far TSC deadline: Todhchai's futex waits
+    // with one were ~2000x slower).
+    let saved = arch_interrupts_save()
+    let far = UInt64(Int64.max >> 1)
+    guard let farTimer = Timers.arm(deadline: far, TimerProbe.record, 3) else { panic("timer self-test: arm") }
+    let armedTarget = Timers.hardwareTarget
+    Timers.cancel(farTimer)
+    arch_interrupts_restore(saved)
+    guard armedTarget <= Clock.now() + Timers.maxDistance else { panic("timer self-test: hardware armed too far out") }
+
     Ipi.callOthers(TimerProbe.armOnThisCpu, 0)
     let deadline = Clock.now() + 1_000 * ms
     while TimerProbe.cpusFired.load(ordering: .relaxed) < others, Clock.now() < deadline {
