@@ -34,6 +34,8 @@ struct JobObject: ~Copyable {
     var dead = false
     /// The kernel's end of its exception channel (retained), or 0.
     var exceptionChannel: UInt64 = 0
+    /// K13g: its debugger channels' kernel ends (retained, at most 32).
+    var debugChannels = UniqueArray<UInt64>()
     /// Job policy: an action per condition (CROI_POL_*), from the parent.
     var policy = InlineArray<16, UInt8>(repeating: 0)
     /// K10d, ext 8: the CPU reservation tag its threads carry (its own, or
@@ -68,6 +70,8 @@ struct ProcessObject: ~Copyable {
     var startTime: UInt64 = 0
     /// K13g: suspensions of the whole process (each of its threads holds one).
     var suspendCount = 0
+    /// K13g: its debugger channel's kernel end (retained), or 0.
+    var debugChannel: UInt64 = 0
     var deadCpu: UInt64 = 0
     var deadQueue: UInt64 = 0
     /// Retained.
@@ -120,6 +124,10 @@ struct ThreadObject: ~Copyable {
     let suspendCount = Atomic<Int>(0)
     var suspended = false
     let suspendQueue = QueuePointer.allocate()
+    /// K13g: while an exception is offered, its report (THREAD_EXCEPTION_REPORT).
+    var inException = false
+    var exceptionReport = croi_exception_report_t()
+    var startsProcess = false
     var finalCpuTime: UInt64 = 0
     var finalQueueTime: UInt64 = 0
     var lastCpu: UInt32 = 0xFFFF_FFFF
@@ -257,6 +265,7 @@ enum Processes {
     static func destroyJob(_ object: ObjectPointer) {
         let job = JobPointer(object: object)
         Exceptions.releaseChannel(job.pointee.exceptionChannel)
+        for i in 0..<job.pointee.debugChannels.count { Exceptions.releaseChannel(job.pointee.debugChannels[i]) }
         if job.pointee.reservedCpus != 0 {
             try? Scheduler.setReservation(mask: 0, previous: job.pointee.reservedCpus, tag: job.pointee.reservation)
         }
@@ -359,15 +368,18 @@ enum Processes {
         let process = ProcessPointer(object: object)
         var handles: HandleTable? = nil
         var aspace: UserAspace? = nil
-        var channel: UInt64 = 0
+        var channel: UInt64 = 0, debugger: UInt64 = 0
         object.header.lock.withLock {
             process.pointee.state = .dead
             handles = process.pointee.handles.take()
             aspace = process.pointee.aspace.take()
             channel = process.pointee.exceptionChannel
             process.pointee.exceptionChannel = 0
+            debugger = process.pointee.debugChannel
+            process.pointee.debugChannel = 0
         }
         Exceptions.releaseChannel(channel)
+        Exceptions.releaseChannel(debugger)
         _ = handles.take()  // closes every handle
         if let record = aspace?.record {
             // Threads that exited before the last one may not have left yet
@@ -430,6 +442,7 @@ enum Processes {
             try object.header.lock.withLock { () throws(Status) in
                 guard thread.pointee.state == .initial else { throw .badState }
                 thread.pointee.state = .running
+                thread.pointee.startsProcess = first
                 thread.pointee.pc = pc
                 thread.pointee.sp = sp
                 thread.pointee.arg0 = arg0
@@ -481,8 +494,19 @@ enum Processes {
         }
         let handles = process.pointee.handles?.address ?? 0
         if killed || handles == 0 { exitThread(0) }
-        UserTraps.enter(process.pointee.aspaceRecord, handles: handles, pc: thread.pointee.pc, sp: thread.pointee.sp,
-                        arg0: thread.pointee.arg0, arg1: thread.pointee.arg1, arg2: process.pointee.vdsoBase)
+        // Debuggers see it start (K13g): job debuggers the process's first
+        // thread (PROCESS_STARTING), the process's debugger every thread
+        // (THREAD_STARTING), with registers they may change.
+        var start = StartValues(pc: thread.pointee.pc, sp: thread.pointee.sp, arg0: thread.pointee.arg0,
+                                arg1: thread.pointee.arg1, arg2: process.pointee.vdsoBase)
+        var frame = unsafe ExceptionFrame.startFrame(start)
+        let address = withUnsafeMutablePointer(to: &frame) { UInt64(UInt(bitPattern: $0)) }
+        if thread.pointee.startsProcess { Exceptions.raiseSynthetic(UInt32(CROI_EXCP_PROCESS_STARTING), frame: address) }
+        Exceptions.raiseSynthetic(UInt32(CROI_EXCP_THREAD_STARTING), frame: address)
+        start = unsafe ExceptionFrame.startValues(frame)
+        if Scheduler.current.pointee.killPending { exitThread(0) }
+        UserTraps.enter(process.pointee.aspaceRecord, handles: handles, pc: start.pc, sp: start.sp,
+                        arg0: start.arg0, arg1: start.arg1, arg2: start.arg2)
     }
 
     /// Ends the calling thread (thread_exit, or killed). The process's last
@@ -492,6 +516,7 @@ enum Processes {
         guard me.pointee.object != 0 else { Scheduler.exit(code) }  // a kernel test's user thread
         let object = ObjectPointer(address: me.pointee.object)
         let thread = ThreadObjectPointer(object: object)
+        Exceptions.raiseSynthetic(UInt32(CROI_EXCP_THREAD_EXITING), frame: 0)  // its debugger (K13g)
         let (cpuTime, queueTime) = Scheduler.runtime(me)
         object.header.lock.withLock {
             thread.pointee.state = .dead
@@ -539,6 +564,10 @@ enum Processes {
             let process = ThreadObjectPointer(object: ObjectPointer(address: me.pointee.object)).pointee.process
             kill(process: process, code: code, sparing: me)
         }
+        // Dying with the rest (Zircon kills the caller too): its THREAD_
+        // EXITING doesn't wait for a debugger (K13g; one that is this
+        // process would never answer).
+        Scheduler.locked { me.pointee.killPending = true }
         exitThread(0)
     }
 

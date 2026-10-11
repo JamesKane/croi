@@ -20,6 +20,14 @@ extension Syscalls {
         case UInt32(CROI_INFO_THREAD) where version == 0:
             let ref = try table.get(handle, type: .thread, rights: .inspect)
             try single(threadInfo(ref.object), MemoryLayout<croi_info_thread_t>.size, a)
+        case UInt32(CROI_INFO_THREAD_EXCEPTION_REPORT_V1) where version <= 1:  // K13g
+            let ref = try table.get(handle, type: .thread, rights: .inspect)
+            let report = try ref.object.header.lock.withLock { () throws(Status) -> croi_exception_report_t in
+                let t = ThreadObjectPointer(object: ref.object)
+                guard t.pointee.inException else { throw .badState }
+                return t.pointee.exceptionReport
+            }
+            try single(report, MemoryLayout<croi_exception_report_t>.size, a)
         case UInt32(CROI_INFO_THREAD_STATS) where version == 0:
             let ref = try table.get(handle, type: .thread, rights: .inspect)
             try single(try threadStats(ref.object), MemoryLayout<croi_info_thread_stats_t>.size, a)
@@ -32,8 +40,10 @@ extension Syscalls {
         case UInt32(CROI_INFO_JOB) where version == 0:
             let ref = try table.get(handle, type: .job, rights: .inspect)
             let job = JobPointer(object: ref.object)
-            let (code, dead) = ref.object.header.lock.withLock { (job.pointee.returnCode, job.pointee.dead) }
-            try single(croi_info_job_t(return_code: code, exited: dead ? 1 : 0, kill_on_oom: 0, debugger_attached: 0,
+            let (code, dead, debugged) = ref.object.header.lock.withLock {
+                (job.pointee.returnCode, job.pointee.dead, Exceptions.debuggerAttachedLocked(ref.object))
+            }
+            try single(croi_info_job_t(return_code: code, exited: dead ? 1 : 0, kill_on_oom: 0, debugger_attached: debugged ? 1 : 0,
                                        padding: (0, 0, 0, 0, 0)), MemoryLayout<croi_info_job_t>.size, a)
         case UInt32(CROI_INFO_JOB_CHILDREN) where version == 0, UInt32(CROI_INFO_JOB_PROCESSES) where version == 0:
             let ref = try table.get(handle, type: .job, rights: .enumerate)
@@ -163,6 +173,7 @@ extension Syscalls {
             case .running: flags = UInt32(CROI_INFO_PROCESS_FLAG_STARTED)
             case .dying, .dead: flags = UInt32(CROI_INFO_PROCESS_FLAG_STARTED) | UInt32(CROI_INFO_PROCESS_FLAG_EXITED)
             }
+            if Exceptions.debuggerAttachedLocked(object) { flags |= UInt32(CROI_INFO_PROCESS_FLAG_DEBUGGER_ATTACHED) }
             return croi_info_process_t(return_code: process.pointee.returnCode,
                                        start_time: Int64(bitPattern: process.pointee.startTime), flags: flags,
                                        padding: (0, 0, 0, 0))

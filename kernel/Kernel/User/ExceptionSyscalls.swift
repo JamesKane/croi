@@ -8,13 +8,17 @@ extension Syscalls {
                               _ table: borrowing HandleTable) throws(Status) {
         let handle = UInt32(truncatingIfNeeded: a[0])
         switch number {
-        case 100:  // task_create_exception_channel(task, options, out)
-            guard a[1] == 0 else { throw .invalidArgs }
+        case 100:  // task_create_exception_channel(task, options, out); Zircon's order (K13g)
+            guard a[1] & ~UInt64(CROI_EXCEPTION_CHANNEL_DEBUGGER) == 0 else { throw .invalidArgs }
+            let debugger = a[1] != 0
+            try Policy.check(UInt32(CROI_POL_NEW_CHANNEL))
             try check(a[2], 4)
-            let task = try table.get(handle, rights: .inspect | .write)
+            let task = try table.get(handle, rights: .inspect | .duplicate | .transfer | .manageThread)
+            if task.type == .thread, debugger { throw .invalidArgs }
             guard task.type == .thread || task.type == .process || task.type == .job else { throw .wrongType }
-            let channel = try Exceptions.createChannel(for: task.object)
-            try put(try table.add(channel, rights: .transfer | .wait | .read | .inspect), a[2])
+            if task.type != .thread, !(try table.rights(of: handle)).contains(.enumerate) { throw .accessDenied }
+            let channel = try Exceptions.createChannel(for: task.object, debugger: debugger)
+            try put(try table.add(channel, rights: .transfer | .wait | .read), a[2])
         case 101, 102:  // exception_get_thread / exception_get_process(exception, out)
             try check(a[1], 4)
             let exception = try table.get(handle, type: .exception)
@@ -77,6 +81,13 @@ extension Syscalls {
                 try put(try Sockets.threshold(socket.object, transmit: a[1] == UInt64(CROI_PROP_SOCKET_TX_THRESHOLD)), a[2])
                 return
             }
+            if a[1] == UInt64(CROI_PROP_EXCEPTION_STRATEGY) {  // K13g
+                guard a[3] >= 4 else { throw .bufferTooSmall }
+                try check(a[2], 4)
+                let exception = try table.get(handle, type: .exception, rights: .getProperty)
+                try put(exception.object.header.lock.withLock { ExceptionPointer(object: exception.object).pointee.strategy }, a[2])
+                return
+            }
             guard a[1] == UInt64(CROI_PROP_EXCEPTION_STATE) else { throw .notSupported }
             guard a[3] >= 4 else { throw .bufferTooSmall }
             try check(a[2], 4)
@@ -128,6 +139,20 @@ extension Syscalls {
                 guard copied == 0 else { throw .invalidArgs }
                 let socket = try table.get(handle, type: .socket, rights: .setProperty)
                 try Sockets.setThreshold(socket.object, transmit: a[1] == UInt64(CROI_PROP_SOCKET_TX_THRESHOLD), value)
+                return
+            }
+            if a[1] == UInt64(CROI_PROP_EXCEPTION_STRATEGY) {  // K13g: the process debugger's only
+                guard a[3] >= 4 else { throw .bufferTooSmall }
+                var strategy: UInt32 = 0
+                let copied = withUnsafeMutableBytes(of: &strategy) { unsafe UserCopy.from($0.baseAddress!, a[2], 4) }
+                guard copied == 0 else { throw .invalidArgs }
+                let exception = try table.get(handle, type: .exception, rights: .setProperty)
+                guard strategy <= UInt32(CROI_EXCEPTION_STRATEGY_SECOND_CHANCE) else { throw .invalidArgs }
+                try exception.object.header.lock.withLock { () throws(Status) in
+                    let e = ExceptionPointer(object: exception.object)
+                    guard e.pointee.channelType == UInt32(CROI_EXCEPTION_CHANNEL_TYPE_DEBUGGER) else { throw .badState }
+                    e.pointee.strategy = strategy
+                }
                 return
             }
             guard a[1] == UInt64(CROI_PROP_EXCEPTION_STATE) else { throw .notSupported }

@@ -44,7 +44,27 @@ enum : uint32_t {
   CROI_EXCP_UNDEFINED_INSTRUCTION = 0x208,
   CROI_EXCP_SW_BREAKPOINT = 0x308,
   CROI_EXCP_UNALIGNED_ACCESS = 0x508,
+  CROI_EXCP_HW_BREAKPOINT = 0x408,
+  CROI_EXCP_THREAD_STARTING = 0x8008,   // synthetic (K13g): process debugger only
+  CROI_EXCP_THREAD_EXITING = 0x8108,    // process debugger only; no registers, reply ignored
   CROI_EXCP_POLICY_ERROR = 0x8208,  // synthetic
+  CROI_EXCP_PROCESS_STARTING = 0x8308,  // job debuggers, the initial thread's
+
+  // task_create_exception_channel's option, and the channel types
+  // (croi_info_thread_t.wait_exception_channel_type).
+  CROI_EXCEPTION_CHANNEL_DEBUGGER = 1,
+  CROI_EXCEPTION_CHANNEL_TYPE_NONE = 0,
+  CROI_EXCEPTION_CHANNEL_TYPE_DEBUGGER = 1,
+  CROI_EXCEPTION_CHANNEL_TYPE_THREAD = 2,
+  CROI_EXCEPTION_CHANNEL_TYPE_PROCESS = 3,
+  CROI_EXCEPTION_CHANNEL_TYPE_JOB = 4,
+  CROI_EXCEPTION_CHANNEL_TYPE_JOB_DEBUGGER = 5,
+  CROI_EXCEPTION_CHANNEL_JOB_DEBUGGER_MAX_COUNT = 32,
+  CROI_PROP_EXCEPTION_STRATEGY = 18,    // uint32_t: FIRST_CHANCE 0 / SECOND_CHANCE 1
+  CROI_EXCEPTION_STRATEGY_FIRST_CHANCE = 0,
+  CROI_EXCEPTION_STRATEGY_SECOND_CHANCE = 1,
+  CROI_INFO_THREAD_EXCEPTION_REPORT_V1 = 11,
+  CROI_INFO_THREAD_EXCEPTION_REPORT = 11u | (1u << 28),  // croi_exception_report_t (INSPECT)
 
   // Properties (object_get/set_property). amd64 only, on the calling
   // thread's own handle: its TLS bases (arm64 TPIDR_EL0 and rv64 tp are
@@ -67,6 +87,43 @@ typedef struct {
   uint32_t type;
   uint32_t padding;
 } croi_exception_info_t;
+
+// zx_exception_report_t (40 bytes): the arch part as Zircon's union's
+// member for this architecture.
+typedef struct {
+  uint32_t size;
+  uint32_t type;
+} croi_exception_header_t;
+
+typedef struct {
+#if defined(__x86_64__)
+  struct {
+    uint64_t vector;
+    uint64_t err_code;
+    uint64_t cr2;
+  } arch;
+#elif defined(__aarch64__)
+  struct {
+    uint32_t esr;
+    uint8_t padding1[4];
+    uint64_t far;
+    uint8_t padding2[8];
+  } arch;
+#else
+  struct {
+    uint64_t cause;
+    uint64_t tval;
+    uint8_t padding1[8];
+  } arch;
+#endif
+  uint32_t synth_code;
+  uint32_t synth_data;
+} croi_exception_context_t;
+
+typedef struct {
+  croi_exception_header_t header;
+  croi_exception_context_t context;
+} croi_exception_report_t;
 
 // General registers (zx_thread_state_general_regs_t's layout per arch).
 // Writes keep only user-settable flags (amd64 arithmetic flags, arm64

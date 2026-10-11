@@ -118,6 +118,17 @@ enum ExceptionFrame {
         }
     }
     static func setSyscallResult(_ f: inout arch_exception_frame_t, _ value: UInt64) { f.rax = value }
+    /// A new thread's first registers as a frame (THREAD_STARTING, K13g),
+    /// and back: pc, sp and the three arguments.
+    static func startFrame(_ v: StartValues) -> arch_exception_frame_t {
+        var f = arch_exception_frame_t()
+        f.rip = v.pc; f.rsp = v.sp; f.rdi = v.arg0; f.rsi = v.arg1; f.rdx = v.arg2
+        f.cs = 0x2B; f.ss = 0x23; f.rflags = 0x202
+        return f
+    }
+    static func startValues(_ f: arch_exception_frame_t) -> StartValues {
+        StartValues(pc: f.rip, sp: f.rsp, arg0: f.rdi, arg1: f.rsi, arg2: f.rdx)
+    }
     /// Back over the SYSCALL (2 bytes), rax still the number (K13g).
     static func restartSyscall(_ f: inout arch_exception_frame_t) { f.rip -= 2 }
     static func setProgramCounter(_ f: inout arch_exception_frame_t, _ pc: UInt64) { f.rip = pc }
@@ -229,6 +240,14 @@ enum ExceptionFrame {
         withUnsafeBytes(of: f.x) { unsafe $0.load(fromByteOffset: 8 * i, as: UInt64.self) }
     }
     static func setSyscallResult(_ f: inout arch_exception_frame_t, _ value: UInt64) { f.x.0 = value }
+    static func startFrame(_ v: StartValues) -> arch_exception_frame_t {
+        var f = arch_exception_frame_t()
+        f.elr = v.pc; f.sp = v.sp; f.x.0 = v.arg0; f.x.1 = v.arg1; f.x.2 = v.arg2
+        return f
+    }
+    static func startValues(_ f: arch_exception_frame_t) -> StartValues {
+        StartValues(pc: f.elr, sp: f.sp, arg0: f.x.0, arg1: f.x.1, arg2: f.x.2)
+    }
     /// Back over the svc (ELR is past it), x0 still the first argument (K13g).
     static func restartSyscall(_ f: inout arch_exception_frame_t) { f.elr -= 4 }
     static func setProgramCounter(_ f: inout arch_exception_frame_t, _ pc: UInt64) { f.elr = pc }
@@ -332,6 +351,14 @@ enum ExceptionFrame {
     static func setSyscallResult(_ f: inout arch_exception_frame_t, _ value: UInt64) {
         f.x.10 = value
         f.sepc += 4
+    }
+    static func startFrame(_ v: StartValues) -> arch_exception_frame_t {
+        var f = arch_exception_frame_t()
+        f.sepc = v.pc; f.x.2 = v.sp; f.x.10 = v.arg0; f.x.11 = v.arg1; f.x.12 = v.arg2
+        return f
+    }
+    static func startValues(_ f: arch_exception_frame_t) -> StartValues {
+        StartValues(pc: f.sepc, sp: f.x.2, arg0: f.x.10, arg1: f.x.11, arg2: f.x.12)
     }
     /// sepc is still at the ecall, a0 the first argument (K13g).
     static func restartSyscall(_ f: inout arch_exception_frame_t) {}
@@ -445,6 +472,15 @@ enum SErrorPolicy {
 #endif
 
 /// A page fault, decoded from an exception frame.
+/// A new user thread's entry registers (K13g's THREAD_STARTING frame).
+struct StartValues {
+    var pc: UInt64
+    var sp: UInt64
+    var arg0: UInt64
+    var arg1: UInt64
+    var arg2: UInt64
+}
+
 struct PageFault {
     var address: UInt64
     var write: Bool

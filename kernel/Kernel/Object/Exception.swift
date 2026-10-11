@@ -20,6 +20,7 @@ struct ExceptionWait: ~Copyable {
     let queue = QueuePointer.allocate()
     var done = false
     var state = UInt32(CROI_EXCEPTION_STATE_TRY_NEXT)
+    var strategy = UInt32(CROI_EXCEPTION_STRATEGY_FIRST_CHANCE)
     let references = Atomic<Int>(2)
 }
 
@@ -54,6 +55,10 @@ struct ExceptionObject: ~Copyable {
     let type: UInt32
     var state = UInt32(CROI_EXCEPTION_STATE_TRY_NEXT)
     let wait: ExceptionWaitPointer
+    /// K13g: the kind of channel it went to, and the debugger's choice of
+    /// a second chance (ZX_PROP_EXCEPTION_STRATEGY; debugger channels only).
+    var channelType: UInt32 = 0
+    var strategy = UInt32(CROI_EXCEPTION_STRATEGY_FIRST_CHANCE)
 
     static var defaultRights: Rights { .transfer | .duplicate | .wait | .inspect | .getProperty | .setProperty }
 }
@@ -73,75 +78,193 @@ enum Exceptions {
     // MARK: Raising
 
     /// Offers the calling thread's exception (`type`, registers at
-    /// `frame`) to its handlers.
+    /// `frame`) to its handlers, Zircon's order (K13g): the process's
+    /// debugger first; the thread's, the process's channel; the debugger
+    /// again if it asked for a second chance; then each job's up the tree.
     static func raise(_ type: UInt32, frame: UnsafeMutablePointer<arch_exception_frame_t>) -> Disposition {
         let me = Scheduler.current
         guard me.pointee.object != 0 else { return .unhandled }  // a kernel test's bare user thread
         let thread = ObjectPointer(address: me.pointee.object)
         let threadObject = ThreadObjectPointer(object: thread)
         let process = threadObject.pointee.process
-        let frameAddress = UInt64(UInt(bitPattern: frame))
-        thread.header.lock.withLock { threadObject.pointee.exceptionFrame = frameAddress }
-        defer { thread.header.lock.withLock { threadObject.pointee.exceptionFrame = 0 } }
-
-        // The handlers, in order, each retained while we use it.
-        var channels = InlineArray<16, UInt64>(repeating: 0)
-        var kinds = InlineArray<16, UInt32>(repeating: 0)  // ZX_EXCEPTION_CHANNEL_TYPE_*
-        var count = 0
-        func take(_ endpoint: UInt64, _ kind: UInt32) {
-            guard endpoint != 0, count < channels.count else { return }
-            let channel = ObjectPointer(address: endpoint)
-            if channel.tryRetain() {
-                channels[count] = endpoint
-                kinds[count] = kind
-                count += 1
-            }
-        }
-        take(thread.header.lock.withLock { threadObject.pointee.exceptionChannel }, 2)
-        take(process.header.lock.withLock { ProcessPointer(object: process).pointee.exceptionChannel }, 3)
+        var handlers = Handlers()
+        handlers.take(process.header.lock.withLock { ProcessPointer(object: process).pointee.debugChannel },
+                      UInt32(CROI_EXCEPTION_CHANNEL_TYPE_DEBUGGER))
+        handlers.take(thread.header.lock.withLock { threadObject.pointee.exceptionChannel },
+                      UInt32(CROI_EXCEPTION_CHANNEL_TYPE_THREAD))
+        handlers.take(process.header.lock.withLock { ProcessPointer(object: process).pointee.exceptionChannel },
+                      UInt32(CROI_EXCEPTION_CHANNEL_TYPE_PROCESS))
         var job: ObjectPointer? = ProcessPointer(object: process).pointee.job
         while let current = job {
-            take(current.header.lock.withLock { JobPointer(object: current).pointee.exceptionChannel }, 4)
+            handlers.take(current.header.lock.withLock { JobPointer(object: current).pointee.exceptionChannel },
+                          UInt32(CROI_EXCEPTION_CHANNEL_TYPE_JOB))
             job = JobPointer(object: current).pointee.parent
         }
-        defer { thread.header.lock.withLock { threadObject.pointee.exceptionChannelType = 0 } }
+        return unsafe deliver(type, frame: UInt64(UInt(bitPattern: frame)), report: report(type, frame.pointee), handlers)
+    }
 
-        var disposition = Disposition.unhandled
-        for i in 0..<count where disposition == .unhandled {
-            let channel = ObjectPointer(address: channels[i])
-            thread.header.lock.withLock { threadObject.pointee.exceptionChannelType = kinds[i] }
-            switch offer(type, to: channel, thread: thread, process: process) {
-            case .some(UInt32(CROI_EXCEPTION_STATE_HANDLED)): disposition = .resume
-            case .some(UInt32(CROI_EXCEPTION_STATE_THREAD_EXIT)): disposition = .exitThread
-            case .none: disposition = .exitThread  // killed while waiting
-            default: break  // TRY_NEXT, or nobody listening
+    /// The synthetic exceptions (K13g): THREAD_STARTING to the process's
+    /// debugger with the first registers in `frame` (which it may change),
+    /// THREAD_EXITING with none (every handler's turn, the reply ignored),
+    /// PROCESS_STARTING to every job debugger from the process's job up.
+    /// The calling thread's.
+    static func raiseSynthetic(_ type: UInt32, frame: UInt64) {
+        let me = Scheduler.current
+        guard me.pointee.object != 0 else { return }
+        let thread = ObjectPointer(address: me.pointee.object)
+        let process = ThreadObjectPointer(object: thread).pointee.process
+        var handlers = Handlers()
+        if type == UInt32(CROI_EXCP_PROCESS_STARTING) {
+            var job: ObjectPointer? = ProcessPointer(object: process).pointee.job
+            while let current = job {
+                current.header.lock.withLock {
+                    let j = JobPointer(object: current)
+                    for i in 0..<j.pointee.debugChannels.count {
+                        handlers.take(j.pointee.debugChannels[i], UInt32(CROI_EXCEPTION_CHANNEL_TYPE_JOB_DEBUGGER))
+                    }
+                }
+                job = JobPointer(object: current).pointee.parent
+            }
+        } else {
+            handlers.take(process.header.lock.withLock { ProcessPointer(object: process).pointee.debugChannel },
+                          UInt32(CROI_EXCEPTION_CHANNEL_TYPE_DEBUGGER))
+        }
+        guard handlers.count > 0 else { return }
+        var report = croi_exception_report_t()
+        report.header = croi_exception_header_t(size: UInt32(MemoryLayout<croi_exception_report_t>.size), type: type)
+        if type == UInt32(CROI_EXCP_THREAD_EXITING) {
+            for i in 0..<handlers.count { _ = deliver(type, frame: frame, report: report, handlers.one(i)) }
+        } else {
+            _ = deliver(type, frame: frame, report: report, handlers)
+        }
+    }
+
+    /// Handlers in order, each channel retained.
+    struct Handlers: ~Copyable {
+        var channels = InlineArray<48, UInt64>(repeating: 0)
+        var kinds = InlineArray<48, UInt32>(repeating: 0)
+        var count = 0
+
+        mutating func take(_ endpoint: UInt64, _ kind: UInt32) {
+            guard endpoint != 0, count < 48 else { return }
+            guard ObjectPointer(address: endpoint).tryRetain() else { return }
+            channels[count] = endpoint
+            kinds[count] = kind
+            count += 1
+        }
+
+        /// A list of just the `i`th (its own reference).
+        func one(_ i: Int) -> Handlers {
+            var single = Handlers()
+            single.take(channels[i], kinds[i])
+            return single
+        }
+
+        deinit {
+            for i in 0..<count { ObjectPointer(address: channels[i]).release() }
+        }
+    }
+
+    /// Offers to each handler in turn until one resumes or ends the
+    /// thread; a debugger that asked for a second chance gets the
+    /// exception again after the process's channel (before the jobs').
+    private static func deliver(_ type: UInt32, frame: UInt64, report: croi_exception_report_t,
+                                _ handlers: borrowing Handlers) -> Disposition {
+        let me = Scheduler.current
+        let thread = ObjectPointer(address: me.pointee.object)
+        let threadObject = ThreadObjectPointer(object: thread)
+        let process = threadObject.pointee.process
+        thread.header.lock.withLock {
+            threadObject.pointee.exceptionFrame = frame
+            threadObject.pointee.exceptionReport = report
+            threadObject.pointee.inException = true
+        }
+        defer {
+            thread.header.lock.withLock {
+                threadObject.pointee.exceptionFrame = 0
+                threadObject.pointee.inException = false
+                threadObject.pointee.exceptionChannelType = 0
             }
         }
-        for i in 0..<count { ObjectPointer(address: channels[i]).release() }
+        let debuggerKind = UInt32(CROI_EXCEPTION_CHANNEL_TYPE_DEBUGGER)
+        var disposition = Disposition.unhandled
+        var secondChance: UInt64 = 0
+        var i = 0
+        while i < handlers.count, disposition == .unhandled {
+            let kind = handlers.kinds[i]
+            if secondChance != 0, kind == UInt32(CROI_EXCEPTION_CHANNEL_TYPE_JOB) {
+                disposition = offerOnce(type, ObjectPointer(address: secondChance), kind: debuggerKind,
+                                        thread: thread, process: process).0
+                secondChance = 0
+                continue
+            }
+            let (result, wantsSecond) = offerOnce(type, ObjectPointer(address: handlers.channels[i]), kind: kind,
+                                                  thread: thread, process: process)
+            disposition = result
+            if wantsSecond, kind == debuggerKind { secondChance = handlers.channels[i] }
+            i += 1
+        }
+        if disposition == .unhandled, secondChance != 0 {
+            disposition = offerOnce(type, ObjectPointer(address: secondChance), kind: debuggerKind,
+                                    thread: thread, process: process).0
+        }
         return disposition
     }
 
-    /// One handler's turn: the state it left, TRY_NEXT if the message
-    /// couldn't be sent, nil if the thread was killed meanwhile.
-    private static func offer(_ type: UInt32, to channel: ObjectPointer, thread: ObjectPointer,
-                              process: ObjectPointer) -> UInt32? {
+    private static func offerOnce(_ type: UInt32, _ channel: ObjectPointer, kind: UInt32, thread: ObjectPointer,
+                                  process: ObjectPointer) -> (Disposition, Bool) {
+        thread.header.lock.withLock { ThreadObjectPointer(object: thread).pointee.exceptionChannelType = kind }
+        let (state, strategy) = offer(type, to: channel, kind: kind, thread: thread, process: process)
+        switch state {
+        case .some(UInt32(CROI_EXCEPTION_STATE_HANDLED)): return (.resume, false)
+        case .some(UInt32(CROI_EXCEPTION_STATE_THREAD_EXIT)): return (.exitThread, false)
+        case .none: return (.exitThread, false)  // killed while waiting
+        default: return (.unhandled, strategy == UInt32(CROI_EXCEPTION_STRATEGY_SECOND_CHANCE))
+        }
+    }
+
+    /// An architectural exception's report (THREAD_EXCEPTION_REPORT):
+    /// Zircon's arch context from the frame.
+    private static func report(_ type: UInt32, _ f: arch_exception_frame_t) -> croi_exception_report_t {
+        var report = croi_exception_report_t()
+        report.header = croi_exception_header_t(size: UInt32(MemoryLayout<croi_exception_report_t>.size), type: type)
+        #if arch(x86_64)
+        report.context.arch.vector = f.vector
+        report.context.arch.err_code = f.error_code
+        if f.vector == 14 { report.context.arch.cr2 = arch_read_cr2() }
+        #elseif arch(arm64)
+        report.context.arch.esr = UInt32(truncatingIfNeeded: f.esr)
+        report.context.arch.far = f.far
+        #elseif arch(riscv64)
+        report.context.arch.cause = f.scause
+        report.context.arch.tval = f.stval
+        #endif
+        return report
+    }
+
+    /// One handler's turn: the state it left (TRY_NEXT if the message
+    /// couldn't be sent, nil if the thread was killed meanwhile) and the
+    /// strategy a debugger chose.
+    private static func offer(_ type: UInt32, to channel: ObjectPointer, kind: UInt32, thread: ObjectPointer,
+                              process: ObjectPointer) -> (UInt32?, UInt32) {
         let tryNext = UInt32(CROI_EXCEPTION_STATE_TRY_NEXT)
-        guard let wait = ExceptionWaitPointer.allocate() else { return tryNext }
+        let first = UInt32(CROI_EXCEPTION_STRATEGY_FIRST_CHANCE)
+        guard let wait = ExceptionWaitPointer.allocate() else { return (tryNext, first) }
         thread.retain()
         process.retain()
         guard let exception = Objects.allocate(ExceptionObject(thread: thread, process: process, type: type,
-                                                               wait: wait)) else {
+                                                               wait: wait, channelType: kind)) else {
             thread.release()
             process.release()
             wait.release()
             wait.release()
-            return tryNext
+            return (tryNext, first)
         }
         guard let message = MessagePointer.allocate(bytes: UInt32(MemoryLayout<croi_exception_info_t>.size),
                                                     handles: 1) else {
             exception.release()
             wait.release()
-            return tryNext
+            return (tryNext, first)
         }
         let info = croi_exception_info_t(pid: process.header.koid, tid: thread.header.koid, type: type, padding: 0)
         unsafe UnsafeMutablePointer<croi_exception_info_t>(bitPattern: UInt(message.data))!.pointee = info
@@ -150,20 +273,20 @@ enum Exceptions {
             try Channels.write(channel, message)
         } catch {
             wait.release()  // the message (and the exception) went with the failure
-            return tryNext
+            return (tryNext, first)
         }
         var interrupted = false
-        let state = Scheduler.locked { () -> UInt32 in
+        let (state, strategy) = Scheduler.locked { () -> (UInt32, UInt32) in
             while !wait.pointee.done {
                 if Scheduler.block(on: wait.pointee.queue, deadline: .max, interruptible: true) == .interrupted {
                     interrupted = true
-                    return tryNext
+                    return (tryNext, first)
                 }
             }
-            return wait.pointee.state
+            return (wait.pointee.state, wait.pointee.strategy)
         }
         wait.release()
-        return interrupted ? nil : state
+        return (interrupted ? nil : state, strategy)
     }
 
     /// The exception object's last reference went: its handler is done.
@@ -171,8 +294,10 @@ enum Exceptions {
         let exception = ExceptionPointer(object: object)
         let wait = exception.pointee.wait
         let state = exception.pointee.state
+        let strategy = exception.pointee.strategy
         Scheduler.locked {
             wait.pointee.state = state
+            wait.pointee.strategy = strategy
             wait.pointee.done = true
             Scheduler.wakeAll(wait.pointee.queue)
         }
@@ -185,24 +310,60 @@ enum Exceptions {
     // MARK: Channels
 
     /// task_create_exception_channel: a new channel whose kernel end the
-    /// task keeps. One per task while its user end is open.
-    static func createChannel(for task: ObjectPointer) throws(Status) -> ObjectPointer {
+    /// task keeps. One per task while its user end is open; with
+    /// `debugger` (K13g) the process's debugger channel (one) or one of a
+    /// job's (up to 32, closed ones pruned).
+    static func createChannel(for task: ObjectPointer, debugger: Bool = false) throws(Status) -> ObjectPointer {
         let (kernelEnd, userEnd) = try Channels.create()
-        var replaced: UInt64 = 0
-        let bound = task.header.lock.withLock { () -> Bool in
+        var replaced = UniqueArray<UInt64>()
+        let refused = task.header.lock.withLock { () -> Status? in
+            if debugger, task.header.type == .job {
+                let job = JobPointer(object: task)
+                var i = 0
+                while i < job.pointee.debugChannels.count {
+                    if live(job.pointee.debugChannels[i]) { i += 1 } else { replaced.append(job.pointee.debugChannels.remove(at: i)) }
+                }
+                guard job.pointee.debugChannels.count < Int(CROI_EXCEPTION_CHANNEL_JOB_DEBUGGER_MAX_COUNT) else {
+                    return .alreadyBound
+                }
+                job.pointee.debugChannels.append(kernelEnd.address)
+                return nil
+            }
+            if debugger {
+                let process = ProcessPointer(object: task)
+                guard process.pointee.state != .dead else { return .badState }
+                if live(process.pointee.debugChannel) { return .alreadyBound }
+                if process.pointee.debugChannel != 0 { replaced.append(process.pointee.debugChannel) }
+                process.pointee.debugChannel = kernelEnd.address
+                return nil
+            }
             let existing = channel(of: task)
-            if existing != 0, ChannelPointer(object: ObjectPointer(address: existing)).pointee.peer != 0 { return true }
-            replaced = existing
+            if live(existing) { return .alreadyBound }
+            if existing != 0 { replaced.append(existing) }
             setChannel(of: task, kernelEnd.address)
-            return false
+            return nil
         }
-        guard !bound else {
+        if let refused {
             kernelEnd.release()
             userEnd.release()
-            throw .alreadyBound
+            throw refused
         }
-        releaseChannel(replaced)
+        while let old = replaced.popLast() { releaseChannel(old) }
         return userEnd
+    }
+
+    /// A kernel end whose user end is still open.
+    private static func live(_ endpoint: UInt64) -> Bool {
+        endpoint != 0 && ChannelPointer(object: ObjectPointer(address: endpoint)).pointee.peer != 0
+    }
+
+    /// A live debugger channel: the process's (ZX_INFO_PROCESS's
+    /// DEBUGGER_ATTACHED), or any of a job's. Task lock held.
+    static func debuggerAttachedLocked(_ task: ObjectPointer) -> Bool {
+        if task.header.type == .process { return live(ProcessPointer(object: task).pointee.debugChannel) }
+        let job = JobPointer(object: task)
+        for i in 0..<job.pointee.debugChannels.count where live(job.pointee.debugChannels[i]) { return true }
+        return false
     }
 
     /// The task's kernel channel end (its lock held).
@@ -287,9 +448,10 @@ enum Exceptions {
     /// Its registers: in an exception, or parked suspended (K13g: the frame
     /// at its kernel stack top); else BAD_STATE.
     private static func frame(of thread: ObjectPointer) throws(Status) -> UnsafeMutablePointer<arch_exception_frame_t> {
-        let address = thread.header.lock.withLock { () -> UInt64 in
+        let address = try thread.header.lock.withLock { () throws(Status) -> UInt64 in
             let t = ThreadObjectPointer(object: thread)
             if t.pointee.exceptionFrame != 0 { return t.pointee.exceptionFrame }
+            if t.pointee.inException { throw .notSupported }  // THREAD_EXITING: no registers (Zircon's)
             guard t.pointee.suspended, t.pointee.thread != 0 else { return 0 }
             return UInt64(UInt(bitPattern: unsafe UserTraps.userFrame(of: ThreadPointer(address: t.pointee.thread))))
         }

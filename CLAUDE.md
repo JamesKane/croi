@@ -1465,6 +1465,39 @@ User/DebugSyscalls.swift, syscalls 230-232; task.h):
   refused; executable code written is synced for instruction fetch.
 - Mode 17's `debugging`.
 
+Debugger channels, K13g part 2 (Kernel/Object/Exception.swift; task.h):
+- task_create_exception_channel in Zircon's order: options (DEBUGGER 1),
+  NEW_CHANNEL policy, INSPECT | DUPLICATE | TRANSFER | MANAGE_THREAD,
+  a thread's debugger INVALID_ARGS, non-tasks WRONG_TYPE, a job or process
+  without ENUMERATE ACCESS_DENIED; the user end TRANSFER | WAIT | READ. A
+  process's debugger channel (`ProcessObject.debugChannel`, one:
+  ALREADY_BOUND while open) or a job's (`debugChannels`, up to 32, closed
+  ones pruned).
+- Routing (`Exceptions.raise` / `deliver`, a `Handlers` list of channel
+  and type): architectural and policy exceptions go to the process's
+  debugger, the thread's, the process's channel, the debugger again if it
+  set ZX_PROP_EXCEPTION_STRATEGY (18) to SECOND_CHANCE (debugger
+  exceptions only, else BAD_STATE), then each job's. Synthetic
+  (`raiseSynthetic`): PROCESS_STARTING to every job debugger up from the
+  job (the initial thread, `startsProcess`), THREAD_STARTING to the process
+  debugger with a frame of the entry registers it may change (read back
+  before entering user mode: pc, sp, three arguments), THREAD_EXITING
+  with no registers (state NOT_SUPPORTED) to each handler, the reply
+  ignored.
+- While an exception is offered the thread keeps its report (`inException`,
+  `exceptionReport`): ZX_INFO_THREAD_EXCEPTION_REPORT (11 | 1 << 28, V1
+  11), croi_exception_report_t with Zircon's arch part (amd64 vector,
+  error code, cr2; arm64 ESR, FAR; rv64 scause, stval); THREAD info gives
+  the channel type. ZX_INFO_PROCESS DEBUGGER_ATTACHED and ZX_INFO_JOB
+  debugger_attached while a debugger channel is open.
+- process_exit marks the caller killed before it exits (Zircon kills it
+  too), so its THREAD_EXITING doesn't wait for a debugger: a process that
+  was its own debugger hung there.
+- Not yet: single-step and hardware breakpoints (part 3), the debugger
+  channel's ZX_EXCP_USER (thread_raise_exception).
+- Mode 17's `debugger`: our own process's debugger sees a thread start
+  (registers) and exit, a breakpoint with a second chance.
+
 Randomness, K11b (Kernel/Random.swift, syscalls 181-182; handoff v5):
 - The loader reads 32 bytes from EFI_RNG_PROTOCOL if the firmware has
   one (edk2 over virtio-rng: qemu.sh adds `-device virtio-rng-pci`) into

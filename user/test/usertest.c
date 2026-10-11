@@ -3352,6 +3352,131 @@ static int64_t debugging(const startup_t *s) {
   return 0;
 }
 
+// K13g part 2: a debugger channel on our own process. A thread that hits
+// a breakpoint.
+static void breaker(uint64_t arg) {
+  (void)arg;
+#if defined(__x86_64__)
+  __asm__ volatile("int3");
+#elif defined(__aarch64__)
+  __asm__ volatile("brk #0");
+#else
+  __asm__ volatile(".4byte 0x00100073");  // ebreak (uncompressed)
+#endif
+  sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
+}
+
+static void quiet(uint64_t arg) {
+  (void)arg;
+  sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
+}
+
+// The next exception on `channel`: its type, thread koid and handle.
+static int next_exception(uint32_t channel, croi_exception_info_t *info, uint32_t *exception) {
+  uint32_t actual[2];
+  if (!(wait_for(channel, CROI_SIGNAL_READABLE, 3000000000ull) & CROI_SIGNAL_READABLE)) return 0;
+  return chan_read(channel, info, exception, sizeof *info, 1, actual) == 0 && actual[1] == 1;
+}
+
+// The checks, with the debugger channel made (`channel`, our own
+// process's), which the caller closes. (A failed CHECK exits the process,
+// whose exit doesn't wait for its debugger: K13g's exitProcess.)
+static int64_t debugger_checks(const startup_t *s, uint32_t *channel_out);
+
+static int64_t debugger(const startup_t *s) {
+  uint32_t channel = 0;
+  int64_t result = debugger_checks(s, &channel);
+  if (channel != 0) sys(CROI_SYS_HANDLE_CLOSE, channel, 0, 0, 0, 0);
+  return result;
+}
+
+static int64_t debugger_checks(const startup_t *s, uint32_t *channel_out) {
+  uint32_t channel = 0, second = 0, exception = 0, job = 0, jobchannel = 0;
+  croi_exception_info_t info;
+  croi_info_process_t process;
+  uint64_t counts[2];
+  CHECK(550, sys(CROI_SYS_TASK_CREATE_EXCEPTION_CHANNEL, s->process, 2, (uint64_t)&channel, 0, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_TASK_CREATE_EXCEPTION_CHANNEL, s->process, CROI_EXCEPTION_CHANNEL_DEBUGGER, (uint64_t)&channel,
+                     0, 0) == 0 && (*channel_out = channel) &&
+                 sys(CROI_SYS_TASK_CREATE_EXCEPTION_CHANNEL, s->process, CROI_EXCEPTION_CHANNEL_DEBUGGER, (uint64_t)&second,
+                     0, 0) == ERR_ALREADY_BOUND &&
+                 sys6(CROI_SYS_OBJECT_GET_INFO, s->process, CROI_INFO_PROCESS, (uint64_t)&process, sizeof process,
+                      (uint64_t)&counts[0], (uint64_t)&counts[1]) == 0 &&
+                 (process.flags & CROI_INFO_PROCESS_FLAG_DEBUGGER_ATTACHED));
+  // A thread starting: THREAD_STARTING, its entry registers readable, the
+  // report's type; then exiting: THREAD_EXITING, no registers.
+  uint32_t thread = start_thread(s, quiet, 0);
+  croi_thread_state_general_regs_t regs;
+  croi_exception_report_t report;
+  croi_info_thread_t state;
+  uint32_t handled = CROI_EXCEPTION_STATE_HANDLED;
+  CHECK(551, next_exception(channel, &info, &exception) && info.type == CROI_EXCP_THREAD_STARTING &&
+                 info.tid == koid_of(thread) &&
+                 sys(CROI_SYS_THREAD_READ_STATE, thread, CROI_THREAD_STATE_GENERAL_REGS, (uint64_t)&regs, sizeof regs, 0) == 0 &&
+#if defined(__x86_64__)
+                 regs.rip == (uint64_t)quiet &&
+#elif defined(__aarch64__)
+                 regs.pc == (uint64_t)quiet &&
+#else
+                 regs.pc == (uint64_t)quiet &&
+#endif
+                 sys6(CROI_SYS_OBJECT_GET_INFO, thread, CROI_INFO_THREAD_EXCEPTION_REPORT, (uint64_t)&report, sizeof report,
+                      (uint64_t)&counts[0], (uint64_t)&counts[1]) == 0 &&
+                 report.header.type == CROI_EXCP_THREAD_STARTING && report.header.size == sizeof report &&
+                 sys6(CROI_SYS_OBJECT_GET_INFO, thread, CROI_INFO_THREAD, (uint64_t)&state, sizeof state, (uint64_t)&counts[0],
+                      (uint64_t)&counts[1]) == 0 &&
+                 state.state == CROI_THREAD_STATE_BLOCKED_EXCEPTION &&
+                 state.wait_exception_channel_type == CROI_EXCEPTION_CHANNEL_TYPE_DEBUGGER &&
+                 sys(CROI_SYS_OBJECT_SET_PROPERTY, exception, CROI_PROP_EXCEPTION_STATE, (uint64_t)&handled, 4, 0) == 0 &&
+                 sys(CROI_SYS_HANDLE_CLOSE, exception, 0, 0, 0, 0) == 0);
+  CHECK(552, next_exception(channel, &info, &exception) && info.type == CROI_EXCP_THREAD_EXITING &&
+                 sys(CROI_SYS_THREAD_READ_STATE, thread, CROI_THREAD_STATE_GENERAL_REGS, (uint64_t)&regs, sizeof regs, 0) ==
+                     ERR_NOT_SUPPORTED &&
+                 sys(CROI_SYS_HANDLE_CLOSE, exception, 0, 0, 0, 0) == 0);
+  join(thread);
+  // A breakpoint: the debugger first (the report's arch part); it asks
+  // for a second chance and gets it back after the thread's and process's
+  // turns (no channels), then ends the thread.
+  uint32_t second_chance = CROI_EXCEPTION_STRATEGY_SECOND_CHANCE, exit_state = CROI_EXCEPTION_STATE_THREAD_EXIT;
+  thread = start_thread(s, breaker, 0);
+  CHECK(553, next_exception(channel, &info, &exception) && info.type == CROI_EXCP_THREAD_STARTING &&
+                 sys(CROI_SYS_OBJECT_SET_PROPERTY, exception, CROI_PROP_EXCEPTION_STATE, (uint64_t)&handled, 4, 0) == 0 &&
+                 sys(CROI_SYS_HANDLE_CLOSE, exception, 0, 0, 0, 0) == 0 &&
+                 next_exception(channel, &info, &exception) && info.type == CROI_EXCP_SW_BREAKPOINT &&
+                 sys6(CROI_SYS_OBJECT_GET_INFO, thread, CROI_INFO_THREAD_EXCEPTION_REPORT, (uint64_t)&report, sizeof report,
+                      (uint64_t)&counts[0], (uint64_t)&counts[1]) == 0 &&
+#if defined(__x86_64__)
+                 report.context.arch.vector == 3 &&
+#elif defined(__aarch64__)
+                 (report.context.arch.esr >> 26) == 0x3C &&
+#else
+                 report.context.arch.cause == 3 &&
+#endif
+                 sys(CROI_SYS_OBJECT_SET_PROPERTY, exception, CROI_PROP_EXCEPTION_STRATEGY, (uint64_t)&second_chance, 4, 0) == 0 &&
+                 sys(CROI_SYS_HANDLE_CLOSE, exception, 0, 0, 0, 0) == 0 &&
+                 next_exception(channel, &info, &exception) && info.type == CROI_EXCP_SW_BREAKPOINT &&
+                 sys(CROI_SYS_OBJECT_SET_PROPERTY, exception, CROI_PROP_EXCEPTION_STATE, (uint64_t)&exit_state, 4, 0) == 0 &&
+                 sys(CROI_SYS_HANDLE_CLOSE, exception, 0, 0, 0, 0) == 0 &&
+                 next_exception(channel, &info, &exception) && info.type == CROI_EXCP_THREAD_EXITING &&
+                 sys(CROI_SYS_HANDLE_CLOSE, exception, 0, 0, 0, 0) == 0);
+  join(thread);
+  // Refusals: a thread can't have a debugger channel; jobs take several.
+  CHECK(554, sys(CROI_SYS_TASK_CREATE_EXCEPTION_CHANNEL, s->vmar, 0, (uint64_t)&second, 0, 0) == ERR_ACCESS_DENIED &&
+                 sys(CROI_SYS_JOB_CREATE, s->job, 0, (uint64_t)&job, 0, 0) == 0 &&
+                 sys(CROI_SYS_TASK_CREATE_EXCEPTION_CHANNEL, job, CROI_EXCEPTION_CHANNEL_DEBUGGER, (uint64_t)&jobchannel, 0, 0) == 0 &&
+                 sys(CROI_SYS_TASK_CREATE_EXCEPTION_CHANNEL, job, CROI_EXCEPTION_CHANNEL_DEBUGGER, (uint64_t)&second, 0, 0) == 0);
+  croi_info_job_t jinfo;
+  CHECK(555, sys6(CROI_SYS_OBJECT_GET_INFO, job, CROI_INFO_JOB, (uint64_t)&jinfo, sizeof jinfo, (uint64_t)&counts[0],
+                  (uint64_t)&counts[1]) == 0 && jinfo.debugger_attached == 1 &&
+                 sys(CROI_SYS_HANDLE_CLOSE, channel, 0, 0, 0, 0) == 0 && (*channel_out = 0, 1) &&
+                 sys6(CROI_SYS_OBJECT_GET_INFO, s->process, CROI_INFO_PROCESS, (uint64_t)&process, sizeof process,
+                      (uint64_t)&counts[0], (uint64_t)&counts[1]) == 0 &&
+                 !(process.flags & CROI_INFO_PROCESS_FLAG_DEBUGGER_ATTACHED));
+  uint32_t rest[3] = {jobchannel, second, job};
+  sys(CROI_SYS_HANDLE_CLOSE_MANY, (uint64_t)rest, 3, 0, 0, 0);
+  return 0;
+}
+
 // K13b: FIFOs (Zircon's: records into the peer's ring, READABLE /
 // WRITABLE / PEER_CLOSED, user signals to the peer) and
 // vmo_replace_as_executable (a VMEX resource; the handle consumed).
@@ -3679,6 +3804,8 @@ static int64_t extensions(const startup_t *s) {
   if (clk != 0) return clk;
   int64_t dbg = debugging(s);
   if (dbg != 0) return dbg;
+  int64_t attached = debugger(s);
+  if (attached != 0) return attached;
   int64_t random = cprng_checks();
   if (random != 0) return random;
 
