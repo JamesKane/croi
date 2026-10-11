@@ -738,6 +738,21 @@ the SMC resource.
 - **K12f and on:** interrupt remapping for all of them (amd64's MSIs to
   APIC ids above 255 wait on it).
 
+### K13a (agreed with Todhchai, 2026-10-11): VMO slices and ZERO_CHILDREN
+
+Todhchai's GPU driver host (M5g) hands clients VMOs over windows of
+virtio-gpu's shared-memory BAR and must not reuse a window while any
+client can still reach it, by handle or by mapping. A handle count
+(ZX_INFO_HANDLE_COUNT) misses mappings, so the agreed interface is
+Zircon's: the host keeps one physical VMO per window and gives clients
+`vmo_create_child` SLICE children (physical parents included: the same
+pages and the parent's cache policy, no copy); the parent raises
+ZX_VMO_ZERO_CHILDREN when its last child goes (mappings hold children),
+which the host waits for (wait_async on its port) before reuse.
+ZX_INFO_HANDLE_COUNT (topic 7) comes along for parity; Todhchai won't
+depend on it. Until then the host holds windows until the context
+closes (safe). Scheduled after the IOMMU work.
+
 ### After M3 (requirements 14–19 and the remaining extensions)
 - IOMMUs: VT-d first, then AMD-Vi, SMMUv3 (Fuchsia reference code) and
   the RISC-V IOMMU, with the BTI properties above, RMR/RMRR identity
