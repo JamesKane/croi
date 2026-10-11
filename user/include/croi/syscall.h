@@ -134,6 +134,11 @@ enum : uint64_t {
 
   // Power control (K10e; Zircon's, power.h).
   CROI_SYS_SYSTEM_POWERCTL = 180,       // (power resource, cmd, const croi_system_powerctl_arg_t *)
+
+  // The kernel's CPRNG (K11b; Zircon's): at most CROI_CPRNG_MAX_LEN bytes.
+  CROI_SYS_CPRNG_DRAW = 181,            // (void *buffer, length)
+  CROI_SYS_CPRNG_ADD_ENTROPY = 182,     // (const void *buffer, length)
+  CROI_CPRNG_MAX_LEN = 256,
 };
 
 enum : uint32_t {  // timer_create options (Zircon's ZX_TIMER_SLACK_*)

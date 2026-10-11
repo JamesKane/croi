@@ -170,6 +170,8 @@ enum Syscalls {
         case 5:
             reported.store(a[0], ordering: .relaxed)
             return 0
+        case 181, 182:  // cprng_draw(buffer, length), cprng_add_entropy(buffer, length): K11b
+            return Random.call(number, a)
         default:
             break
         }

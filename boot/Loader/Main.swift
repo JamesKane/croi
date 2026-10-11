@@ -137,6 +137,18 @@ func croi_loader_main(
     console.write(hex: framebuffer.base)
     console.write("\n")
 
+    // A CPRNG seed from the firmware, if it has an RNG (edk2 with a
+    // virtio-rng device, most real firmware): optional.
+    var entropy: (UInt64, UInt64, UInt64, UInt64) = (0, 0, 0, 0)
+    var entropySize: UInt64 = 0
+    if let rng = try? unsafe boot.locateProtocol(.rng, as: EFI_RNG_PROTOCOL.self) {
+        let status = withUnsafeMutableBytes(of: &entropy) { bytes in
+            unsafe croi_efi_get_rng(rng, 32, bytes.baseAddress!.assumingMemoryBound(to: UInt8.self))
+        }
+        if status == EFI_SUCCESS { entropySize = 32 }
+    }
+    console.write(entropySize == 32 ? "entropy: 32 bytes from EFI_RNG_PROTOCOL\n" : "entropy: no EFI_RNG_PROTOCOL\n")
+
     // RISC-V S-mode can't read its own hart ID; firmware knows it.
     var bootHartId: UInt64 = 0
     #if arch(riscv64)
@@ -242,7 +254,9 @@ func croi_loader_main(
         cmdline: cmdlineSize > 0 ? cmdlinePhys : 0,
         cmdline_size: UInt64(cmdlineSize),
         framebuffer: framebuffer,
-        smbios: smbios)
+        smbios: smbios,
+        entropy: entropy,
+        entropy_size: entropySize)
 
     // Everything the kernel reads early must be visible with the MMU off.
     for i in 0..<rangeCount {

@@ -36,6 +36,10 @@ static_assert(sizeof(croi_time_page_t) == 40);
 // The raw counter, ordered against surrounding instructions.
 uint64_t arch_counter_read(void);
 
+// Assembly (arch/<arch>/cpu.S). 64 bits from the CPU's RNG instruction
+// (amd64 RDSEED/RDRAND, arm64 RNDR); 0 if there is none (rv64: always).
+int arch_hw_random(uint64_t *_Nonnull out);
+
 #if defined(__aarch64__)
 // CNTFRQ_EL0.
 uint64_t arch_counter_frequency(void);

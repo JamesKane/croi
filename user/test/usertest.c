@@ -2444,6 +2444,28 @@ static int64_t vmo_children(void) {
   return 0;
 }
 
+// K11b: the kernel's CPRNG.
+static int64_t cprng_checks(void) {
+  uint8_t a[256], b[256];
+  for (int i = 0; i < 256; i++) a[i] = b[i] = 0;
+  if (sys(CROI_SYS_CPRNG_DRAW, (uint64_t)a, 256, 0, 0, 0) != 0 ||
+      sys(CROI_SYS_CPRNG_DRAW, (uint64_t)b, 32, 0, 0, 0) != 0)
+    return 430;
+  int same = 0, zero = 0;
+  for (int i = 0; i < 32; i++) {
+    same += a[i] == b[i];
+    zero += a[i] == 0;
+  }
+  if (same > 8 || zero > 8) return 431;  // two draws alike, or mostly zero
+  if (sys(CROI_SYS_CPRNG_DRAW, (uint64_t)a, 257, 0, 0, 0) != ERR_INVALID_ARGS ||
+      sys(CROI_SYS_CPRNG_DRAW, 0x10, 16, 0, 0, 0) != ERR_INVALID_ARGS ||
+      sys(CROI_SYS_CPRNG_ADD_ENTROPY, (uint64_t)b, 64, 0, 0, 0) != 0 ||
+      sys(CROI_SYS_CPRNG_ADD_ENTROPY, (uint64_t)b, 257, 0, 0, 0) != ERR_INVALID_ARGS ||
+      sys(CROI_SYS_CPRNG_DRAW, (uint64_t)a, 0, 0, 0, 0) != 0)
+    return 432;
+  return 0;
+}
+
 static int64_t extensions(const startup_t *s) {
   // A thread's trace id: task << 12 | index, distinct per thread.
   // They spin until told to stop (5 s at most): on a slow emulator a fixed
@@ -2530,6 +2552,8 @@ static int64_t extensions(const startup_t *s) {
 
   int64_t children = vmo_children();
   if (children != 0) return children;
+  int64_t random = cprng_checks();
+  if (random != 0) return random;
 
   // system_powerctl's refusals (K10e; the real thing ends the boot, under
   // userboot.shutdown=): the resource, then the command, then its argument.

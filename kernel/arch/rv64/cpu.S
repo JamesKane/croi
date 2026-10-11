@@ -475,3 +475,13 @@ arch_rv_lcofi_enable:
     csrs    sie, t0
     ret
 .size arch_rv_lcofi_enable, . - arch_rv_lcofi_enable
+
+// int arch_hw_random(uint64_t *out): 0. Zkr's seed CSR traps in S-mode
+// unless M-mode set mseccfg.SSEED, which S-mode can't check.
+.section .text.arch_hw_random, "ax", @progbits
+.globl arch_hw_random
+.type arch_hw_random, @function
+arch_hw_random:
+    li      a0, 0
+    ret
+.size arch_hw_random, . - arch_hw_random

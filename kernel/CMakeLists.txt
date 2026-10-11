@@ -17,6 +17,7 @@ add_library(kernel-swift OBJECT
   Kernel/Main.swift
   Kernel/Panic.swift
   Kernel/Power.swift
+  Kernel/Random.swift
   Kernel/Pmm.swift
   Kernel/Ref.swift
   Kernel/Smp.swift

@@ -81,7 +81,8 @@ case $arch in
     ;;
 esac
 
-qemu+=(-m 512M -smp 4 -net none "${disk[@]}")
+# virtio-rng: edk2 offers EFI_RNG_PROTOCOL over it, the CPRNG's seed (K11b).
+qemu+=(-m 512M -smp 4 -net none "${disk[@]}" -device virtio-rng-pci)
 
 if [[ -n $expect ]]; then
   monitor=(-monitor none)

@@ -103,7 +103,7 @@ mapped RWX, UART as device, kernel segments W^X at CROI_KERNEL_BASE; Sv39
 on rv64, TTBR0/TTBR1 on arm64) ->
 ExitBootServices -> memory map converted into the handoff, framebuffer
 range overlaid as CROI_MEM_FRAMEBUFFER (holes in it filled: q35's is a
-PCI BAR no firmware range covers) -> handoff v4 ->
+PCI BAR no firmware range covers) -> handoff v5 (EFI_RNG_PROTOCOL entropy since v5) ->
 `croi_arch_enter_kernel` (boot/arch/<arch>/enter.S). Loader allocations
 use OS-defined memory types 0x80000001 (kernel) / 0x80000002 (handoff and
 page tables) / 0x80000003 (bootfs) so they show up as CROI_MEM_KERNEL /
@@ -951,6 +951,21 @@ VMO children, K11a (Vmo.swift `init(childOf:)`, VmoObject
   removed unless NO_WRITE removes WRITE. SNAPSHOT, SLICE, REFERENCE,
   SNAPSHOT_MODIFIED, RESIZABLE: NOT_SUPPORTED; physical or contiguous
   parents: NOT_SUPPORTED. Mode 17 checks it (`vmo_children`).
+
+Randomness, K11b (Kernel/Random.swift, syscalls 181-182; handoff v5):
+- The loader reads 32 bytes from EFI_RNG_PROTOCOL if the firmware has
+  one (edk2 over virtio-rng: qemu.sh adds `-device virtio-rng-pci`) into
+  the handoff (`entropy`, `entropy_size`; v5, 232 bytes). The kernel's
+  CPRNG is ChaCha20 (RFC 8439 block, known-answer checked at boot) with
+  fast key erasure, seeded first thing in kernel_main from that, the
+  CPU's RNG instruction (`arch_hw_random`: amd64 RDSEED, else RDRAND;
+  arm64 RNDR when ID_AA64ISAR0_EL1 says so; rv64 none, Zkr's seed CSR
+  traps unless M-mode opened it) and counter jitter; the boot line names
+  the sources and warns when jitter is all there was. The handoff's copy
+  of the seed is cleared.
+- `cprng_draw(buffer, length)` (181) and `cprng_add_entropy` (182):
+  Zircon's, at most 256 bytes (CROI_CPRNG_MAX_LEN), INVALID_ARGS beyond
+  or for a bad buffer. `Random.word()` for kernel use (ASLR).
 
 Memory statistics (Todhchai's M3 resident-memory budget; task.h,
 resource.h, UserAspace.taskStats, Kernel/Object/KernelMemory.swift):

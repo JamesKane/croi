@@ -695,3 +695,24 @@ arch_user_tls_write:
     msr     tpidr_el0, x0
     ret
 .size arch_user_tls_write, . - arch_user_tls_write
+
+// int arch_hw_random(uint64_t *out): 64 bits from RNDR (FEAT_RNG), retried;
+// 0 without it. Assembly: the system register and its NZCV result.
+.section .text.arch_hw_random, "ax", %progbits
+.globl arch_hw_random
+.type arch_hw_random, %function
+arch_hw_random:
+    mrs     x1, id_aa64isar0_el1
+    ubfx    x1, x1, #60, #4         // RNDR
+    cbz     x1, 2f
+    mov     x2, #16
+1:  mrs     x1, s3_3_c2_c4_0        // RNDR: Z set on failure
+    b.ne    3f
+    subs    x2, x2, #1
+    b.ne    1b
+2:  mov     w0, #0
+    ret
+3:  str     x1, [x0]
+    mov     w0, #1
+    ret
+.size arch_hw_random, . - arch_hw_random

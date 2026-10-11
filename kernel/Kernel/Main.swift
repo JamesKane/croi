@@ -49,6 +49,8 @@ func kernel_main(_ handoffAddress: UInt64) -> Never {
     bootHandoff = handoff
     var console = unsafe Uart(handoff.uart)
     panicConsole = console
+    guard Random.selfTest() else { panic("random: ChaCha20 known answer wrong") }
+    Random.seed(&bootHandoff, console)
     arch_init_exceptions()
     console.write("croi kernel (")
     console.write(archName)

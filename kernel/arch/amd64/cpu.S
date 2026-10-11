@@ -451,3 +451,42 @@ arch_xstate_restore:
 1:  fxrstor64 (%rdi)
     ret
 .size arch_xstate_restore, . - arch_xstate_restore
+
+// int arch_hw_random(uint64_t *out): 64 bits from RDSEED (preferred: true
+// entropy) or RDRAND, retried; 0 if the CPU has neither or they kept failing.
+// Assembly: CPUID and the RNG instructions' carry-flag results.
+.section .text.arch_hw_random, "ax", @progbits
+.globl arch_hw_random
+.type arch_hw_random, @function
+arch_hw_random:
+    push    %rbx
+    mov     %rdi, %r8
+    mov     $7, %eax
+    xor     %ecx, %ecx
+    cpuid
+    bt      $18, %ebx               // RDSEED
+    jnc     2f
+    mov     $16, %edx
+1:  rdseed  %rax
+    jc      4f
+    pause
+    dec     %edx
+    jnz     1b
+2:  mov     $1, %eax
+    cpuid
+    bt      $30, %ecx               // RDRAND
+    jnc     5f
+    mov     $16, %edx
+3:  rdrand  %rax
+    jc      4f
+    dec     %edx
+    jnz     3b
+    jmp     5f
+4:  mov     %rax, (%r8)
+    mov     $1, %eax
+    pop     %rbx
+    ret
+5:  xor     %eax, %eax
+    pop     %rbx
+    ret
+.size arch_hw_random, . - arch_hw_random

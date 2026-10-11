@@ -339,6 +339,18 @@ static inline EFI_STATUS croi_efi_locate_protocol(EFI_BOOT_SERVICES *bs, const E
   return bs->LocateProtocol(protocol, nullptr, interface);
 }
 
+// 3152BCA5-EADE-433D-862E-C01CDC291F44
+typedef struct EFI_RNG_PROTOCOL EFI_RNG_PROTOCOL;
+struct EFI_RNG_PROTOCOL {
+  EFI_STATUS (EFIAPI *GetInfo)(EFI_RNG_PROTOCOL *self, UINTN *list_size, EFI_GUID *list);
+  EFI_STATUS (EFIAPI *GetRNG)(EFI_RNG_PROTOCOL *self, EFI_GUID *algorithm, UINTN length, uint8_t *value);
+};
+
+// The default algorithm (null).
+static inline EFI_STATUS croi_efi_get_rng(EFI_RNG_PROTOCOL *protocol, UINTN length, uint8_t *value) {
+  return protocol->GetRNG(protocol, nullptr, length, value);
+}
+
 static inline EFI_STATUS croi_efi_boot_hart_id(RISCV_EFI_BOOT_PROTOCOL *protocol, UINTN *hart_id) {
   return protocol->GetBootHartId(protocol, hart_id);
 }

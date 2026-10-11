@@ -1,4 +1,4 @@
-// Boot handoff from the croi loader to the kernel (version 4).
+// Boot handoff from the croi loader to the kernel (version 5).
 //
 // The loader fills one croi_handoff_t and passes its physical address to the
 // kernel entry point. All addresses here are physical. On entry the boot
@@ -13,7 +13,7 @@
 
 // Enum constants rather than macros so Swift imports them.
 enum : uint64_t { CROI_HANDOFF_MAGIC = 0x31464f444e414843 };  // "CHANDOF1"
-enum : uint32_t { CROI_HANDOFF_VERSION = 4 };
+enum : uint32_t { CROI_HANDOFF_VERSION = 5 };
 
 // Physical memory range types.
 enum : uint32_t {
@@ -108,9 +108,14 @@ typedef struct {
   // The SMBIOS entry point from the UEFI configuration table (SMBIOS 3.x
   // "_SM3_" preferred, else 2.x "_SM_"), 0 if none.
   uint64_t smbios;
+
+  // Up to 32 bytes from the firmware's EFI_RNG_PROTOCOL (v5, K11b): a seed
+  // for the kernel's CPRNG. entropy_size 0 if the firmware has none.
+  uint64_t entropy[4];
+  uint64_t entropy_size;
 } croi_handoff_t;
 
 static_assert(sizeof(croi_mem_range_t) == 24);
 static_assert(sizeof(croi_uart_t) == 24);
 static_assert(sizeof(croi_framebuffer_t) == 48);
-static_assert(sizeof(croi_handoff_t) == 192);
+static_assert(sizeof(croi_handoff_t) == 232);
