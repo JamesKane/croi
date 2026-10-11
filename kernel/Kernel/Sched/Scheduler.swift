@@ -250,6 +250,20 @@ enum Scheduler {
         Ipi.requestReschedule(cpu)
     }
 
+    /// CPUs running a thread of process `process` (lockup reports), as a
+    /// bit set iterated by the caller.
+    static func cpusRunning(processOf process: ObjectPointer) -> UniqueArray<Int> {
+        var result = UniqueArray<Int>()
+        locked {
+            for cpu in 0..<Smp.count where cpus[cpu].ready {
+                guard let current = cpus[cpu].current, current.pointee.object != 0 else { continue }
+                let thread = ThreadObjectPointer(object: ObjectPointer(address: current.pointee.object))
+                if thread.pointee.process == process { result.append(cpu) }
+            }
+        }
+        return result
+    }
+
     /// Context switches CPU `cpu` has made (read racily; CPU stats).
     static func switchCount(_ cpu: Int) -> UInt64 { cpus[cpu].switches }
 
@@ -410,10 +424,13 @@ enum Scheduler {
         }
         // Waiting again for the same deadline (a condition loop) keeps the
         // timer already armed, and with it the generation it checks.
-        if deadline == .max || thread.pointee.timeoutTimer == 0 || thread.pointee.timeoutDeadline != deadline {
+        // Zircon's ZX_TIME_INFINITE is INT64_MAX: as good as never, and
+        // no timer (each one held a slot in the CPU's queue for good).
+        let never = deadline >= UInt64(Int64.max)
+        if never || thread.pointee.timeoutTimer == 0 || thread.pointee.timeoutDeadline != deadline {
             dropTimeout(thread, me)
             thread.pointee.waitGeneration &+= 1
-            if deadline != .max {
+            if !never {
                 guard let id = Timers.arm(deadline: deadline, timeoutFired, thread.address,
                                           context: thread.pointee.waitGeneration) else {
                     panic("sched: no timer slot for a timeout")

@@ -86,16 +86,31 @@ enum Sampler {
     /// Writes one sample of the interrupted context `frame` (this CPU, in
     /// interrupt context).
     static func sample(_ frame: UnsafePointer<arch_exception_frame_t>, _ thread: ThreadPointer, source: UInt64) {
-        let f = unsafe frame.pointee
         var frames = InlineArray<16, UInt64>(repeating: 0)
+        let (pc, count) = unsafe backtrace(frame, thread, &frames, encode: true)
+        Trace.write(CROI_TRACE_SAMPLE, UInt16(CROI_TK_SAMPLE), pc, UInt64(count) << 8 | source)
+        var i = 0
+        while i < count {
+            Trace.write(CROI_TRACE_SAMPLE, UInt16(CROI_TK_FRAMES), frames[i], i + 1 < count ? frames[i + 1] : 0)
+            i += 2
+        }
+    }
+
+    /// The interrupted context's PC and return addresses (kernel ones as
+    /// image offsets with CROI_SAMPLE_KERNEL when `encode`, else as they
+    /// are: lockup reports print them for llvm-symbolizer).
+    static func backtrace(_ frame: UnsafePointer<arch_exception_frame_t>, _ thread: ThreadPointer,
+                          _ frames: inout InlineArray<16, UInt64>, encode: Bool) -> (pc: UInt64, count: Int) {
+        let f = unsafe frame.pointee
         var count = 0
         let pc: UInt64
         if ExceptionFrame.fromUser(f) {
             pc = ExceptionFrame.programCounter(f)
             walkUser(ExceptionFrame.framePointer(f), &frames, &count)
         } else {
-            pc = encodeKernel(ExceptionFrame.programCounter(f))
-            walkKernel(ExceptionFrame.framePointer(f), stack: ExceptionFrame.stackPointer(f), &frames, &count)
+            pc = encode ? encodeKernel(ExceptionFrame.programCounter(f)) : ExceptionFrame.programCounter(f)
+            walkKernel(ExceptionFrame.framePointer(f), stack: ExceptionFrame.stackPointer(f), &frames, &count,
+                       encode: encode)
             // A user thread in a syscall: its user context is the frame at
             // the top of its kernel stack.
             if thread.pointee.aspace != nil, count < frames.count {
@@ -109,12 +124,7 @@ enum Sampler {
                 }
             }
         }
-        Trace.write(CROI_TRACE_SAMPLE, UInt16(CROI_TK_SAMPLE), pc, UInt64(count) << 8 | source)
-        var i = 0
-        while i < count {
-            Trace.write(CROI_TRACE_SAMPLE, UInt16(CROI_TK_FRAMES), frames[i], i + 1 < count ? frames[i + 1] : 0)
-            i += 2
-        }
+        return (pc, count)
     }
 
     private static func encodeKernel(_ address: UInt64) -> UInt64 {
@@ -134,7 +144,7 @@ enum Sampler {
     /// Kernel frames: only within the 16 KiB stack `stack` points into (by
     /// the stack geometry, stack.h), each frame above the last.
     private static func walkKernel(_ start: UInt64, stack: UInt64, _ frames: inout InlineArray<16, UInt64>,
-                                   _ count: inout Int) {
+                                   _ count: inout Int, encode: Bool) {
         let size = UInt64(CROI_KERNEL_STACK_SIZE)
         let base = stack & ~(2 * size - 1)
         var fp = start
@@ -144,7 +154,7 @@ enum Sampler {
             let words = unsafe UnsafePointer<UInt64>(bitPattern: UInt(record))!
             let (previous, ret) = unsafe (words[0], words[1])
             guard ret != 0 else { break }
-            frames[count] = encodeKernel(ret)
+            frames[count] = encode ? encodeKernel(ret) : ret
             count += 1
             guard previous > fp else { break }
             fp = previous

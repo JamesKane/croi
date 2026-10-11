@@ -561,6 +561,14 @@ enum Processes {
                 }
             }
             console.write("\n")
+            // Where each of its threads that is running elsewhere is.
+            let masked = arch_interrupts_save()
+            let running = Scheduler.cpusRunning(processOf: object)
+            for i in 0..<running.count where running[i] != Int(Cpu.current) {
+                Ipi.requestReport(running[i])
+            }
+            arch_interrupts_restore(masked)
+            Scheduler.sleep(until: Clock.now() + 50_000_000)  // let them print
             let saved = arch_interrupts_save()  // dump takes the scheduler lock masked
             Scheduler.dump(to: console)
             arch_interrupts_restore(saved)

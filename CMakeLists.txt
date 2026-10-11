@@ -118,6 +118,20 @@ add_test(NAME boot-lean
           ${CROI_ARCH} ${_esp_lean} ${CMAKE_BINARY_DIR}/qemu-lean ${CROI_EDK2_DIR})
 set_tests_properties(boot-lean PROPERTIES TIMEOUT 120)
 
+if(CROI_ARCH STREQUAL arm64 OR CROI_ARCH STREQUAL rv64)
+  # Guest time from instruction counts (QEMU -icount; sleep=off skips idle
+  # time), so a loaded host can't stretch it: m2's timed paths run in a
+  # time that doesn't depend on the machine. The RTCs follow guest time.
+  # Not amd64 (QEMU 10.2 aborts: "Bad icount read" during interrupt
+  # controller and clock setup), and not the full boots: icount runs the
+  # CPUs in turn, a steady steal the deadline self-tests can't absorb.
+  add_test(NAME boot-lean-icount
+    COMMAND ${CROI_QEMU} --test "${CROI_BOOT_DONE}" ${CROI_EXITS}
+            ${CROI_ARCH} ${_esp_lean} ${CMAKE_BINARY_DIR}/qemu-lean-icount ${CROI_EDK2_DIR}
+            -icount shift=auto,sleep=off -rtc clock=vm)
+  set_tests_properties(boot-lean-icount PROPERTIES TIMEOUT 120)
+endif()
+
 # Reboot (K10e): the machine resets; -no-reboot makes QEMU exit on it.
 set(_esp_reboot ${CMAKE_BINARY_DIR}/esp-reboot)
 file(CONFIGURE OUTPUT ${CMAKE_BINARY_DIR}/cmdline-reboot

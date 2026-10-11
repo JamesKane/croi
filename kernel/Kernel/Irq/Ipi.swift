@@ -1,4 +1,5 @@
 import CKernel
+import Fmt
 import Synchronization
 
 /// Inter-processor interrupts: a per-CPU mailbox of pending kinds, and a
@@ -17,6 +18,8 @@ enum Ipi {
     static var reschedule: UInt32 { 1 << 1 }
     /// Halt for good (power off and reset, K10e).
     static var stop: UInt32 { 1 << 2 }
+    /// Print where this CPU was interrupted (lockup reports).
+    static var report: UInt32 { 1 << 3 }
 
     typealias Function = @convention(c) (UInt64) -> Void
 
@@ -117,6 +120,40 @@ enum Ipi {
         return stopped.load(ordering: .acquiring)
     }
 
+    /// Asks `cpu` to print the context its IPI interrupts and a backtrace
+    /// (no waiting: a CPU running masked never answers).
+    static func requestReport(_ cpu: Int) {
+        let record = unsafe UnsafePointer<PerCpu>(bitPattern: UInt(Smp.records[cpu]))!
+        _ = unsafe record.pointee.ipiPending.bitwiseOr(report, ordering: .releasing)
+        unsafe Interrupts.sendIpi(record)
+    }
+
+    private static func reportHere(_ percpu: UnsafePointer<PerCpu>) {
+        guard let console = panicConsole else { return }
+        ConsoleLock.withLock { unsafe report(percpu, console) }  // one line, whole
+    }
+
+    private static func report(_ percpu: UnsafePointer<PerCpu>, _ console: Uart) {
+        let frameAddress = unsafe percpu.pointee.interruptFrame
+        console.write("cpu ")
+        console.write(decimal: UInt64(Cpu.current))
+        guard frameAddress != 0 else {
+            console.write(": no interrupted context (drained outside an interrupt)\n")
+            return
+        }
+        let frame = unsafe UnsafePointer<arch_exception_frame_t>(bitPattern: UInt(frameAddress))!
+        var frames = InlineArray<16, UInt64>(repeating: 0)
+        let (pc, count) = unsafe Sampler.backtrace(frame, Scheduler.current, &frames, encode: false)
+        console.write(unsafe ExceptionFrame.fromUser(frame.pointee) ? " interrupted in user mode at " : " interrupted in the kernel at ")
+        console.write(hex: pc)
+        console.write(", frames:")
+        for i in 0..<count {
+            console.write(" ")
+            console.write(hex: frames[i])
+        }
+        console.write("\n")
+    }
+
     /// The IPI interrupt handler.
     static func handle() {
         // One count per IPI interrupt (CPU stats), by what it carries: a
@@ -141,6 +178,7 @@ enum Ipi {
             function(argument)
             remaining.subtract(1, ordering: .releasing)
         }
+        if pending & report != 0 { unsafe reportHere(percpu) }
         if pending & stop != 0 {
             stopped.add(1, ordering: .releasing)
             arch_halt()

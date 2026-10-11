@@ -85,13 +85,13 @@ struct M2 {
                                                        UInt64(CROI_SIGNAL_READABLE), 0))
         try Sys.check("watching the timer", Sys.call(CROI_SYS_OBJECT_WAIT_ASYNC, UInt64(timer), UInt64(port), 2,
                                                      UInt64(CROI_SIGNAL_SIGNALED), 0))
-        let deadline = Sys.now() + 5_000_000
-        try Sys.check("setting the timer", Sys.call(CROI_SYS_TIMER_SET, UInt64(timer), deadline, 0))
-
-        // The VMO crosses the channel.
+        // The VMO crosses the channel, then the timer is set: its packet
+        // comes second however slowly the emulator runs (it raced the write).
         var message: UInt64 = 0x4D32  // "M2"
         try Sys.check("sending the VMO", Sys.call(CROI_SYS_CHANNEL_WRITE, UInt64(near), 0, Sys.address(&message), 8,
                                                   Sys.address(&vmo), 1))
+        let deadline = Sys.now() + 5_000_000
+        try Sys.check("setting the timer", Sys.call(CROI_SYS_TIMER_SET, UInt64(timer), deadline, 0))
         var packet = croi_port_packet_t()
         try Sys.check("waiting on the port", Sys.call(CROI_SYS_PORT_WAIT, UInt64(port), Sys.now() + 1_000_000_000,
                                                       Sys.address(&packet)))

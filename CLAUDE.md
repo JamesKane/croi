@@ -855,9 +855,15 @@ Todhchai M4's shutdown):
   (`Uart.drain`: an emulator drops what it still holds at power off), and
   the hardware is asked twice, a second apart, before "didn't act".
 - `croi.kill_watch=1` (lockup reports): 1 s after a task_kill of a
-  process, a kernel thread holding it prints its threads and
-  `Scheduler.dump` if it isn't dead (it holds the process that second,
-  so self-tests' leak checks see it later). Everything else
+  process, a kernel thread holding it prints its threads,
+  `Scheduler.dump` (with eligibility timers, period starts, kill marks)
+  and, from each CPU running one of its threads, where it was
+  interrupted plus a frame-pointer backtrace (`Ipi.requestReport`, a
+  mailbox kind that doesn't wait; addresses as they are, for
+  llvm-symbolizer) if it isn't dead. It holds the process that second,
+  so self-tests' leak checks see it later.
+- Deadlines at or past INT64_MAX (Zircon's ZX_TIME_INFINITE) arm no
+  timer in `Scheduler.block`; each used to hold a timer-queue slot. Everything else
   (suspend, hotplug, PL1, bootloader/recovery) is NOT_SUPPORTED.
 - amd64: no SHUTDOWN (NOT_SUPPORTED): user space passes \_S5's sleep
   types (ACPI_TRANSITION_S_STATE, target 5), written to PM1a/b control
@@ -929,6 +935,11 @@ resource.h, UserAspace.taskStats, Kernel/Object/KernelMemory.swift):
 
 Boot budgets, K9f (Kernel/Trace/Budgets.swift, BootOptions.swift's
 `SelfTests`, tools/bench.py):
+- `boot-lean-icount` (arm64, rv64): the lean boot under QEMU
+  `-icount shift=auto,sleep=off -rtc clock=vm`, guest time from
+  instruction counts, so host load can't stretch it. Not amd64 (QEMU
+  10.2 aborts, "Bad icount read") and not full boots: icount runs the
+  CPUs in turn, a steady steal the deadline self-tests can't absorb.
 - `croi.selftest=off` skips the self-test suite (early PMM/heap/VM/SMP
   tests, the framebuffer pattern, everything after the scheduler is up;
   the APs skip their lock-contention run). Todhchai boots with it;
