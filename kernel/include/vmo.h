@@ -79,3 +79,36 @@ typedef struct {
   uint64_t content_size;
 } croi_info_stream_t;
 
+// The user pager (K13d, Zircon's): pager_create_vmo options, page request
+// packets (type 9: payload command | flags << 16, offset, length),
+// pager_op_range ops, query structures.
+enum : uint32_t {
+  CROI_VMO_RESIZABLE = 1u << 1,
+  CROI_VMO_DISCARDABLE = 1u << 2,
+  CROI_VMO_TRAP_DIRTY = 1u << 3,
+  CROI_VMO_UNBOUNDED = 1u << 4,
+  CROI_PKT_TYPE_PAGE_REQUEST = 9,
+  CROI_PAGER_VMO_READ = 0,
+  CROI_PAGER_VMO_COMPLETE = 1,
+  CROI_PAGER_VMO_DIRTY = 2,
+  CROI_PAGER_OP_FAIL = 1,
+  CROI_PAGER_OP_DIRTY = 2,
+  CROI_PAGER_OP_WRITEBACK_BEGIN = 3,
+  CROI_PAGER_OP_WRITEBACK_END = 4,
+  CROI_VMO_DIRTY_RANGE_IS_ZERO = 1,
+  CROI_PAGER_VMO_STATS_MODIFIED = 1,
+  CROI_PAGER_RESET_VMO_STATS = 1,
+};
+
+// zx_vmo_dirty_range_t.
+typedef struct {
+  uint64_t offset;
+  uint64_t length;
+  uint64_t options;
+} croi_vmo_dirty_range_t;
+
+// zx_pager_vmo_stats_t.
+typedef struct {
+  uint32_t modified;
+} croi_pager_vmo_stats_t;
+

@@ -536,8 +536,12 @@ enum UserAspaces {
 
     /// A page fault at a user address in the running thread's address
     /// space: maps the page if a mapping allows the access (committing an
-    /// anonymous page on first touch). False if it doesn't.
-    static func handleFault(at virt: UInt64, write: Bool, execute: Bool, protectionKey: Bool = false) -> Bool {
+    /// anonymous page on first touch). False if it doesn't. A page a
+    /// pager must supply (K13d) is waited for outside the aspace lock, then
+    /// the fault is retried; unless `mayBlock` is false (the faulting code
+    /// had interrupts masked), which refuses it.
+    static func handleFault(at virt: UInt64, write: Bool, execute: Bool, protectionKey: Bool = false,
+                            mayBlock: Bool = true) -> Bool {
         // A protection-key fault is this thread's PKRU saying no: final.
         guard !protectionKey else {
             Trace.event(CROI_TRACE_VM, UInt16(CROI_TK_FAULT), virt, write ? CROI_VM_FAULT_WRITE : 0)
@@ -547,28 +551,47 @@ enum UserAspaces {
               let aspace = Scheduler.current.pointee.aspace else { return false }
         let page = virt & ~(KernelLayout.pageSize - 1)
         let flags = (write ? CROI_VM_FAULT_WRITE : 0) | (execute ? CROI_VM_FAULT_EXECUTE : 0)
-        let resolved = aspace.pointee.lock.withLock { () -> Bool in
-            var found: Mapping? = nil
-            for i in 0..<aspace.pointee.mappings.count where aspace.pointee.mappings[i].contains(page) {
-                found = aspace.pointee.mappings[i]
+        var resolved = false
+        while true {
+            var paged: (VmoPointer, UInt64)? = nil
+            resolved = aspace.pointee.lock.withLock { () -> Bool in
+                var found: Mapping? = nil
+                for i in 0..<aspace.pointee.mappings.count where aspace.pointee.mappings[i].contains(page) {
+                    found = aspace.pointee.mappings[i]
+                }
+                guard let mapping = found, mapping.rights.contains(.read),
+                      !write || mapping.rights.contains(.write), !execute || mapping.rights.contains(.execute) else {
+                    return false
+                }
+                if let present = aspace.pointee.arch.query(page) {
+                    // Another CPU paged it in first, or a permission fault the
+                    // rights would allow: nothing to do but retry.
+                    return !write || present.attributes.writable
+                }
+                let offset = mapping.offset + (page - mapping.base)
+                if mapping.vmo.pointee.pager != nil || mapping.vmo.pointee.readsFromPager,
+                   mapping.vmo.pagerGap(at: offset) != nil {
+                    mapping.vmo.retain()  // the mapping may go while we wait
+                    paged = (mapping.vmo, offset)
+                    return false
+                }
+                guard let phys = mapping.vmo.commit(at: mapping.offset + (page - mapping.base)) else { return false }
+                do throws(VmError) {
+                    try aspace.pointee.arch.map(virt: page, phys: phys, size: KernelLayout.pageSize,
+                                                attributes(mapping.rights, mapping.vmo.pointee.cache, key: mapping.key))
+                } catch {
+                    return false
+                }
+                return true
             }
-            guard let mapping = found, mapping.rights.contains(.read),
-                  !write || mapping.rights.contains(.write), !execute || mapping.rights.contains(.execute) else {
-                return false
-            }
-            if let present = aspace.pointee.arch.query(page) {
-                // Another CPU paged it in first, or a permission fault the
-                // rights would allow: nothing to do but retry.
-                return !write || present.attributes.writable
-            }
-            guard let phys = mapping.vmo.commit(at: mapping.offset + (page - mapping.base)) else { return false }
-            do throws(VmError) {
-                try aspace.pointee.arch.map(virt: page, phys: phys, size: KernelLayout.pageSize,
-                                            attributes(mapping.rights, mapping.vmo.pointee.cache, key: mapping.key))
+            guard let (vmo, offset) = paged else { break }
+            defer { vmo.release() }
+            guard mayBlock else { break }
+            do throws(Status) {
+                try Pagers.ensure(vmo, offset)
             } catch {
-                return false
+                break
             }
-            return true
         }
         Trace.event(CROI_TRACE_VM, UInt16(CROI_TK_FAULT), virt, flags | (resolved ? CROI_VM_FAULT_RESOLVED : 0))
         if resolved { faultsResolved.add(1, ordering: .relaxed) }

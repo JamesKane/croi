@@ -51,7 +51,7 @@ func arch_exception(_ frame: UnsafeMutablePointer<arch_exception_frame_t>) {
         let enable = unsafe ExceptionFrame.interruptsWereEnabled(frame.pointee)
         if enable { arch_interrupts_enable() }
         let resolved = UserAspaces.handleFault(at: fault.address, write: fault.write, execute: fault.execute,
-                                               protectionKey: fault.protectionKey)
+                                               protectionKey: fault.protectionKey, mayBlock: enable)
         if enable { _ = arch_interrupts_save() }
         if !resolved {
             unsafe ExceptionFrame.setProgramCounter(&frame.pointee, recovery)

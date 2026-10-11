@@ -345,6 +345,8 @@ enum Syscalls {
             try socketCall(number, a, table)
         case 194...201:
             try streamCall(number, a, table)
+        case 202...206:
+            try pagerCall(number, a, table)
         case 180:  // system_powerctl
             try Power.call(a, table)
         case 120...129:
@@ -467,6 +469,9 @@ enum Syscalls {
         var done: UInt64 = 0
         while done < length {
             let at = offset + done
+            // A pager's page (K13d): requested and waited for, with the
+            // rest of the copy as read-ahead.
+            try Pagers.ensure(vmo, at, readAhead: length - done)
             // Reading a child's untouched page reads its parent's (no copy).
             guard let phys = toUser ? (vmo.content(at: at) ?? vmo.commit(at: at)) : vmo.commit(at: at) else { throw .noMemory }
             let within = at % KernelLayout.pageSize

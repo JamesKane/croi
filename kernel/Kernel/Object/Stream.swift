@@ -81,6 +81,13 @@ enum Streams {
 
     private static func zero(_ vmo: VmoPointer, _ offset: UInt64, _ length: UInt64) throws(Status) {
         guard length > 0 else { return }
+        if vmo.pointee.pager != nil || vmo.pointee.readsFromPager {  // zeroed in place: the pages first
+            var at = offset & ~(KernelLayout.pageSize - 1)
+            while at < offset + length {
+                try Pagers.ensure(vmo, at, readAhead: offset + length - at)
+                at += KernelLayout.pageSize
+            }
+        }
         do throws(VmError) {
             try Vmo.withBorrowed(vmo) { (v: borrowing Vmo) throws(VmError) in try v.zero(offset: offset, size: length) }
         } catch {
@@ -123,6 +130,7 @@ enum Streams {
                 let at = offset + moved
                 let within = at % KernelLayout.pageSize
                 let chunk = min(length - done, limit - moved, KernelLayout.pageSize - within)
+                try Pagers.ensure(vmo, at, readAhead: limit - moved)
                 var failed: Int32
                 if toUser {
                     if let phys = vmo.content(at: at) {

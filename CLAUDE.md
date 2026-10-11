@@ -1291,6 +1291,43 @@ syscalls 194-201; vmo.h):
   the stream size (as Zircon).
 - Mode 17's `streams`.
 
+The user pager, K13d (Kernel/Object/Pager.swift, User/PagerSyscalls.swift,
+syscalls 202-206; vmo.h; Todhchai's page cache and mmap for Taisce):
+- Zircon's pager (type 28; INSPECT, TRANSFER, ATTACH_VMO 1 << 23,
+  MANAGE_VMO; NEW_PAGER policy 14, pager_create_vmo checks NEW_VMO):
+  pager_create, pager_create_vmo(pager, options, port, key, size), with
+  the size rounded to pages and an unaligned one as the stream size;
+  RESIZABLE / UNBOUNDED NOT_SUPPORTED (no resizable VMOs).
+  pager_detach_vmo, pager_supply_pages (pages moved from an anonymous aux
+  VMO with no parent, `Vmo.take`; aux gaps supplied as zeros; pages the
+  VMO has kept), pager_op_range FAIL (IO, IO_DATA_INTEGRITY, BAD_STATE,
+  NO_SPACE, BUFFER_TOO_SMALL, sign-extended). Pager checks in the pinned
+  tree's order (pager.rs); the koid check is INVALID_ARGS.
+- A pager VMO is anonymous with `VmoRecord.pager` (a `PagerSource`: port,
+  key, outstanding ranges, waiters); its snapshot children have
+  `readsFromPager`. `commit(at:)` never zero-fills a page a pager owes;
+  `VmoPointer.pagerGap(at:)` finds the pager VMO and offset a read would
+  wait for, and `Pagers.ensure(vmo, offset, readAhead:)` requests (one
+  READ packet, type 9, per new range: from the page up to the read-ahead,
+  cut at a present page or the next outstanding range, at most 256 pages)
+  and waits (interruptible; 300 s, Zircon's overtime: TIMED_OUT). Callers:
+  the fault handler (retains the mapping's VMO and waits outside the
+  aspace lock, then retries; a fault taken with interrupts masked doesn't
+  wait), vmo_read/write (the rest of the copy as read-ahead), streams,
+  vmo_op_range COMMIT/PREFETCH/ZERO, bti_pin. ZERO on a pager VMO zeroes
+  in place (no decommit; Zircon makes a zero interval); DECOMMIT is
+  NOT_SUPPORTED.
+- FAIL: waiters whose page is in the range get the status (vmo_read
+  returns it; a fault is refused: exception); others on an overlapping
+  request ask again. Detach (pager_detach_vmo, or the VMO's last
+  reference): waiters wake to BAD_STATE, one COMPLETE packet; supplied
+  pages stay. The pager's last handle detaches its VMOs without COMPLETE.
+- Differences from Zircon: a packet per request (Zircon: one in flight
+  per VMO), none withdrawn when a request resolves before it is read; the
+  source holds its port.
+- Mode 17's `pager`: a pager thread serving a fault, a two-page vmo_read
+  (one request), a FAIL, a snapshot child reading through, detach.
+
 Randomness, K11b (Kernel/Random.swift, syscalls 181-182; handoff v5):
 - The loader reads 32 bytes from EFI_RNG_PROTOCOL if the firmware has
   one (edk2 over virtio-rng: qemu.sh adds `-device virtio-rng-pci`) into

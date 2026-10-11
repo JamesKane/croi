@@ -29,6 +29,7 @@ add_library(kernel-swift OBJECT
   Kernel/User/IpcSyscalls.swift
   Kernel/User/SocketSyscalls.swift
   Kernel/User/StreamSyscalls.swift
+  Kernel/User/PagerSyscalls.swift
   Kernel/User/DriverSyscalls.swift
   Kernel/User/DmaSyscalls.swift
   Kernel/User/CounterSyscalls.swift
@@ -54,6 +55,7 @@ add_library(kernel-swift OBJECT
   Kernel/Object/Fifo.swift
   Kernel/Object/Socket.swift
   Kernel/Object/Stream.swift
+  Kernel/Object/Pager.swift
   Kernel/Object/Futex.swift
   Kernel/Object/TimerObject.swift
   Kernel/Object/Exception.swift

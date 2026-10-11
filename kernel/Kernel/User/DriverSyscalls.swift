@@ -183,6 +183,7 @@ extension Syscalls {
             try inRange()
             guard size > 0 else { return }
             let start = offset & ~(page - 1), end = (offset + size + page - 1) & ~(page - 1)
+            try Pagers.ensureRange(record, start, end - start)
             try vm { () throws(VmError) in
                 try Vmo.withBorrowed(record) { (vmo: borrowing Vmo) throws(VmError) in
                     try vmo.commit(offset: start, size: end - start)
@@ -205,6 +206,7 @@ extension Syscalls {
             try need(.write)
             try inRange()
             guard record.inPhysmap else { throw .notSupported }
+            try Pagers.ensureRange(record, offset & ~(page - 1), ((offset + size + page - 1) & ~(page - 1)) - (offset & ~(page - 1)))
             try vm { () throws(VmError) in
                 try Vmo.withBorrowed(record) { (vmo: borrowing Vmo) throws(VmError) in
                     try vmo.zero(offset: offset, size: size)

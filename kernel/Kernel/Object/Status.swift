@@ -19,7 +19,10 @@ enum Status: Int32, Error, Equatable {
     case alreadyExists = -26
     case alreadyBound = -27
     case accessDenied = -30
+    case io = -40
+    case ioDataIntegrity = -42
     case fileBig = -53
+    case noSpace = -54
 }
 
 /// Option-set bit flags for the kernel, without OptionSet's array-literal
@@ -75,6 +78,7 @@ struct Rights: BitFlags {
     static var manageThread: Rights { Rights(rawValue: 1 << 18) }
     static var applyProfile: Rights { Rights(rawValue: 1 << 19) }
     static var manageSocket: Rights { Rights(rawValue: 1 << 20) }
+    static var attachVmo: Rights { Rights(rawValue: 1 << 23) }
     static var manageVmo: Rights { Rights(rawValue: 1 << 24) }
     /// duplicate/replace: keep the source handle's rights.
     static var sameRights: Rights { Rights(rawValue: 1 << 31) }
@@ -115,6 +119,7 @@ enum ObjectType: UInt32 {
     case eventpair = 16
     case socket = 14
     case stream = 31
+    case pager = 28
     case fifo = 19
     case job = 17
     case vmar = 18

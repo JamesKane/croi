@@ -66,6 +66,10 @@ struct VmoRecord: ~Copyable {
     /// K13c: the stream ("content") size, byte-granular, shared by every
     /// stream over this VMO; nil until set, reading as the VMO's size.
     var streamSize: UInt64? = nil
+    /// K13d: a pager VMO's source (pages come from user space: Pagers),
+    /// and, for a snapshot child, whether an ancestor is a pager VMO.
+    var pager: PagerSourcePointer? = nil
+    var readsFromPager = false
 
     var pageCount: Int { Int(size / KernelLayout.pageSize) }
 }
@@ -86,6 +90,7 @@ struct VmoRecord: ~Copyable {
     /// Drops an owner; the last frees the VMO and the pages it owns.
     func release() {
         guard pointee.references.subtract(1, ordering: .acquiringAndReleasing).newValue == 0 else { return }
+        if let source = pointee.pager { Pagers.vmoGone(source) }
         if let account = pointee.account {
             switch pointee.kind {
             case .anonymous: account.uncharge(pointee.committedPages * KernelLayout.pageSize)
@@ -159,9 +164,16 @@ struct VmoRecord: ~Copyable {
         case .physical(let base), .contiguous(let base):
             return base + UInt64(index) * KernelLayout.pageSize
         case .anonymous:
+            // A pager VMO's missing page comes from its pager, and a child
+            // reading through to one waits for it too (Pagers.ensure first).
+            if pointee.readsFromPager, let parent = pointee.parent, lookup(at: offset) == nil,
+               parent.pagerGap(at: pointee.parentOffset + offset) != nil {
+                return nil
+            }
             return pointee.lock.withLock { () -> UInt64? in
                 let present = pointee.pages.lookup(index)
                 if present != 0 { return present }
+                if pointee.pager != nil { return nil }
                 if let account = pointee.account, !account.charge(KernelLayout.pageSize) { return nil }
                 // A child's first touch: what it reads now, copied in.
                 let source = pointee.parent.flatMap { $0.content(at: pointee.parentOffset + offset) }
@@ -377,6 +389,7 @@ struct Vmo: ~Copyable {
         parent.retain()
         made.pointee.parent = parent
         made.pointee.parentOffset = offset
+        made.pointee.readsFromPager = parent.pointee.pager != nil || parent.pointee.readsFromPager
         parent.childAdded()
         record = made
     }
@@ -457,6 +470,24 @@ struct Vmo: ~Copyable {
         // A child's decommitted page would read as its parent's again, not
         // zero (Zircon: NOT_SUPPORTED on snapshot children).
         guard record.pointee.parent == nil else { throw .notSupported }
+        // A pager VMO's page would come back from the pager, not zero.
+        guard record.pointee.pager == nil else { throw .notSupported }
+        let freed = try take(offset: offset, size: size)
+        var count: UInt64 = 0
+        for i in 0..<freed.count where freed[i] != 0 {
+            pmm.free(freed[i])
+            count += 1
+        }
+        record.pointee.account?.uncharge(count * KernelLayout.pageSize)
+    }
+
+    /// Takes the pages of [offset, offset+size) out of an anonymous VMO
+    /// with no parent (decommit; pager_supply_pages's aux VMO): one entry
+    /// per page, 0 where none was committed. Every mapping of them is
+    /// unmapped. The caller frees them (or gives them on) and uncharges.
+    func take(offset: UInt64, size: UInt64) throws(VmError) -> UniqueArray<UInt64> {
+        try checkRange(offset, size)
+        guard case .anonymous = record.pointee.kind, record.pointee.parent == nil else { throw .notSupported }
         var freed = UniqueArray<UInt64>()
         var aspaces = UniqueArray<UInt64>()
         try record.pointee.lock.withLock { () throws(VmError) in
@@ -464,9 +495,8 @@ struct Vmo: ~Copyable {
             let first = Int(offset / KernelLayout.pageSize), count = Int(size / KernelLayout.pageSize)
             for i in first..<(first + count) {
                 let phys = record.pointee.pages.clear(i)
-                guard phys != 0 else { continue }
                 freed.append(phys)
-                record.pointee.committedPages -= 1
+                if phys != 0 { record.pointee.committedPages -= 1 }
             }
             for i in 0..<record.pointee.mappers.count {
                 let aspace = record.pointee.mappers[i]
@@ -495,8 +525,7 @@ struct Vmo: ~Copyable {
             }
             aspace.release()
         }
-        for i in 0..<freed.count { pmm.free(freed[i]) }
-        record.pointee.account?.uncharge(UInt64(freed.count) * KernelLayout.pageSize)
+        return freed
     }
 
     /// Cache maintenance over the committed bytes of [offset, offset+size)
@@ -555,9 +584,10 @@ struct Vmo: ~Copyable {
             let pageStart = at & ~(page - 1)
             let length = min(end, pageStart + page) - at
             if case .anonymous = record.pointee.kind, length == page, record.pointee.parent == nil,
-               !record.pointee.lock.withLock({ record.pinnedLocked(pageStart, page) }) {
+               record.pointee.pager == nil, !record.pointee.lock.withLock({ record.pinnedLocked(pageStart, page) }) {
                 try decommit(offset: pageStart, size: page)
-            } else if let phys = record.pointee.parent != nil ? record.commit(at: pageStart) : record.lookup(at: pageStart) {
+            } else if let phys = record.pointee.parent != nil || record.pointee.pager != nil
+                        ? record.commit(at: pageStart) : record.lookup(at: pageStart) {
                 let address = KernelLayout.physmap(phys) + (at - pageStart)
                 unsafe UnsafeMutableRawPointer(bitPattern: UInt(address))!
                     .initializeMemory(as: UInt8.self, repeating: 0, count: Int(length))

@@ -149,6 +149,11 @@ enum : uint64_t {
   CROI_SYS_STREAM_SEEK = 199,           // (stream, whence, int64_t offset, uint64_t *out)
   CROI_SYS_VMO_GET_STREAM_SIZE = 200,   // (vmo, uint64_t *out)
   CROI_SYS_VMO_SET_STREAM_SIZE = 201,   // (vmo, size)
+  CROI_SYS_PAGER_CREATE = 202,          // (options, out), K13d
+  CROI_SYS_PAGER_CREATE_VMO = 203,      // (pager, options, port, key, size, out)
+  CROI_SYS_PAGER_DETACH_VMO = 204,      // (pager, vmo)
+  CROI_SYS_PAGER_SUPPLY_PAGES = 205,    // (pager, vmo, offset, length, aux_vmo, aux_offset)
+  CROI_SYS_PAGER_OP_RANGE = 206,        // (pager, op, vmo, offset, length, data)
   CROI_SYS_SYSTEM_POWERCTL = 180,       // (power resource, cmd, const croi_system_powerctl_arg_t *)
 
   // The kernel's CPRNG (K11b; Zircon's): at most CROI_CPRNG_MAX_LEN bytes.

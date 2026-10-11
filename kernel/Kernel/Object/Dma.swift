@@ -282,6 +282,7 @@ enum Dma {
                     writable: Bool) throws(Status) -> ObjectPointer {
         let bti = BtiPointer(object: object)
         guard size > 0 else { throw .invalidArgs }
+        try Pagers.ensureRange(vmo, offset, size)
         do throws(VmError) {
             try Vmo.withBorrowed(vmo) { (v: borrowing Vmo) throws(VmError) in try v.pin(offset: offset, size: size) }
         } catch {

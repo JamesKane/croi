@@ -2746,6 +2746,99 @@ static int64_t streams(void) {
   return 0;
 }
 
+// K13d: the user pager. A pager thread serves READ requests from a port:
+// each page filled with 'A' + its index, except page 3, which it fails
+// with IO; it records requests and the COMPLETE. slot: [0] port, [1]
+// pager, [2] vmo, [3] reads, [4] last read's length, [5] COMPLETE seen.
+static void pager_server(uint64_t arg) {
+  volatile uint64_t *slot = (volatile uint64_t *)arg;
+  croi_port_packet_t packet;
+  char page[PAGE];
+  while (sys(CROI_SYS_PORT_WAIT, (uint32_t)slot[0], now_ns() + 5000000000ull, (uint64_t)&packet, 0, 0) == 0) {
+    uint64_t *req = (uint64_t *)&packet.payload;
+    if (packet.type != CROI_PKT_TYPE_PAGE_REQUEST || packet.key != 77) break;
+    uint16_t command = (uint16_t)req[0];
+    if (command == CROI_PAGER_VMO_COMPLETE) {
+      slot[5] = 1;
+      break;
+    }
+    uint64_t offset = req[1], length = req[2];
+    slot[3]++;
+    slot[4] = length;
+    if (offset <= 3 * PAGE && 3 * PAGE < offset + length) {
+      sys6(CROI_SYS_PAGER_OP_RANGE, (uint32_t)slot[1], CROI_PAGER_OP_FAIL, (uint32_t)slot[2], 3 * PAGE, PAGE,
+           (uint64_t)(int64_t)-40);
+      if (offset == 3 * PAGE) continue;
+      length = 3 * PAGE - offset;
+    }
+    uint32_t aux = 0;
+    sys(CROI_SYS_VMO_CREATE, length, 0, (uint64_t)&aux, 0, 0);
+    for (uint64_t at = 0; at < length; at += PAGE) {
+      for (int i = 0; i < PAGE; i++) page[i] = (char)('A' + (offset + at) / PAGE);
+      sys(CROI_SYS_VMO_WRITE, aux, (uint64_t)page, at, PAGE, 0);
+    }
+    sys6(CROI_SYS_PAGER_SUPPLY_PAGES, (uint32_t)slot[1], (uint32_t)slot[2], offset, length, aux, 0);
+    sys(CROI_SYS_HANDLE_CLOSE, aux, 0, 0, 0, 0);
+  }
+  sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
+}
+
+static int64_t pager(const startup_t *s) {
+  uint32_t pg = 0, port = 0, vmo = 0, other = 0, child = 0;
+  uint64_t size = 0;
+  CHECK(470, sys(CROI_SYS_PAGER_CREATE, 1, (uint64_t)&pg, 0, 0, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_PAGER_CREATE, 0, (uint64_t)&pg, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_PORT_CREATE, 0, (uint64_t)&port, 0, 0, 0) == 0 &&
+                 sys6(CROI_SYS_PAGER_CREATE_VMO, pg, CROI_VMO_RESIZABLE | CROI_VMO_UNBOUNDED, port, 77, PAGE,
+                      (uint64_t)&vmo) == ERR_INVALID_ARGS &&
+                 sys6(CROI_SYS_PAGER_CREATE_VMO, pg, 0, port, 77, 4 * PAGE + 100, (uint64_t)&vmo) == 0 &&
+                 sys(CROI_SYS_VMO_GET_SIZE, vmo, (uint64_t)&size, 0, 0, 0) == 0 && size == 5 * PAGE &&
+                 sys(CROI_SYS_VMO_GET_STREAM_SIZE, vmo, (uint64_t)&size, 0, 0, 0) == 0 && size == 4 * PAGE + 100 &&
+                 sys(CROI_SYS_VMO_CREATE, PAGE, 0, (uint64_t)&other, 0, 0) == 0);
+  // Refusals: misaligned, a status FAIL won't take, a VMO not the pager's.
+  CHECK(471, sys6(CROI_SYS_PAGER_SUPPLY_PAGES, pg, vmo, 1, PAGE, other, 0) == ERR_INVALID_ARGS &&
+                 sys6(CROI_SYS_PAGER_OP_RANGE, pg, CROI_PAGER_OP_FAIL, vmo, 0, PAGE, (uint64_t)(int64_t)-10) ==
+                     ERR_INVALID_ARGS &&
+                 sys6(CROI_SYS_PAGER_OP_RANGE, pg, CROI_PAGER_OP_FAIL, vmo, 0, PAGE, 0xFFFFFFD8ull) ==
+                     ERR_INVALID_ARGS &&  // -40 zero-extended
+                 sys6(CROI_SYS_PAGER_OP_RANGE, pg, CROI_PAGER_OP_FAIL, other, 0, PAGE, (uint64_t)(int64_t)-40) ==
+                     ERR_INVALID_ARGS &&
+                 sys6(CROI_SYS_PAGER_OP_RANGE, pg, 99, vmo, 0, PAGE, 0) == ERR_NOT_SUPPORTED);
+  volatile uint64_t slot[6] = {port, pg, vmo, 0, 0, 0};
+  uint32_t server = start_thread(s, pager_server, (uint64_t)slot);
+  // A fault: one request, one page.
+  uint64_t at = 0;
+  CHECK(472, sys6(CROI_SYS_VMAR_MAP, s->vmar | (uint64_t)CROI_VM_PERM_READ << 32, 0, vmo, 0, 5 * PAGE,
+                  (uint64_t)&at) == 0 &&
+                 *(volatile char *)at == 'A' && *(volatile char *)(at + PAGE - 1) == 'A' && slot[3] == 1 &&
+                 slot[4] == PAGE);
+  // vmo_read across pages 1-2: one request for both.
+  char buf[16];
+  CHECK(473, sys(CROI_SYS_VMO_READ, vmo, (uint64_t)buf, PAGE + PAGE - 4, 8, 0) == 0 && buf[0] == 'B' &&
+                 buf[4] == 'C' && slot[3] == 2 && slot[4] == 2 * PAGE &&
+                 *(volatile char *)(at + 2 * PAGE) == 'C' && slot[3] == 2);
+  // Page 3 fails: vmo_read gets the pager's status.
+  CHECK(474, sys(CROI_SYS_VMO_READ, vmo, (uint64_t)buf, 3 * PAGE, 4, 0) == -40);
+  // A snapshot child reads page 4 through to the pager.
+  CHECK(475, sys6(CROI_SYS_VMO_CREATE_CHILD, vmo, CROI_VMO_CHILD_SNAPSHOT_AT_LEAST_ON_WRITE, 4 * PAGE, PAGE,
+                  (uint64_t)&child, 0) == 0 &&
+                 sys(CROI_SYS_VMO_READ, child, (uint64_t)buf, 0, 4, 0) == 0 && buf[0] == 'E');
+  // Detach: COMPLETE; supplied pages stay; missing ones are BAD_STATE.
+  CHECK(476, sys(CROI_SYS_PAGER_DETACH_VMO, pg, vmo, 0, 0, 0) == 0 &&
+                 wait_for(server, CROI_SIGNAL_TASK_TERMINATED, 3000000000ull) && slot[5] == 1 &&
+                 sys(CROI_SYS_VMO_READ, vmo, (uint64_t)buf, 3 * PAGE, 4, 0) == ERR_BAD_STATE &&
+                 sys(CROI_SYS_VMO_READ, vmo, (uint64_t)buf, 0, 4, 0) == 0 && buf[0] == 'A' &&
+                 sys6(CROI_SYS_PAGER_SUPPLY_PAGES, pg, vmo, 0, PAGE, other, 0) == ERR_BAD_STATE);
+  sys(CROI_SYS_HANDLE_CLOSE, server, 0, 0, 0, 0);
+  sys(CROI_SYS_VMAR_UNMAP, s->vmar, at, 5 * PAGE, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, child, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, vmo, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, other, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, port, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, pg, 0, 0, 0, 0);
+  return 0;
+}
+
 // K13b: FIFOs (Zircon's: records into the peer's ring, READABLE /
 // WRITABLE / PEER_CLOSED, user signals to the peer) and
 // vmo_replace_as_executable (a VMEX resource; the handle consumed).
@@ -3063,6 +3156,8 @@ static int64_t extensions(const startup_t *s) {
   if (socks != 0) return socks;
   int64_t strs = streams();
   if (strs != 0) return strs;
+  int64_t pg = pager(s);
+  if (pg != 0) return pg;
   int64_t random = cprng_checks();
   if (random != 0) return random;
 

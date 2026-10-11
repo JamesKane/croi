@@ -25,6 +25,8 @@ struct PortPacket: Equatable {
     /// Ext 6: a memory account crossed its pressure level (bytes charged in
     /// payload[1], count in payload[2]).
     static var memoryPressure: UInt32 { 0x81 }
+    /// K13d: a pager VMO's request (payload: command, offset, length).
+    static var pageRequest: UInt32 { 9 }
 
     // Signal payload: trigger (low 32 of [0]), observed (high 32 of [0]), count, timestamp.
     var trigger: UInt32 { UInt32(truncatingIfNeeded: payload[0]) }
