@@ -55,6 +55,7 @@ add_library(kernel-swift OBJECT
   Kernel/Object/Dma.swift
   Kernel/Object/KernelMemory.swift
   Kernel/Object/Counter.swift
+  Kernel/Object/Timeline.swift
   Kernel/Object/ProcessSelfTest.swift
   Kernel/Object/VmoObject.swift
   Kernel/Object/ObjectSelfTest.swift

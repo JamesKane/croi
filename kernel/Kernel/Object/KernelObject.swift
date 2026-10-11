@@ -122,6 +122,7 @@ enum Objects {
         case .bti: Dma.destroyBti(object)
         case .pmt: Dma.destroyPmt(object)
         case .counter: free(object, as: CounterObject.self)
+        case .timeline: Timelines.destroy(object)
         case .none: panic("object: destroying an untyped object")
         }
         live.subtract(1, ordering: .relaxed)

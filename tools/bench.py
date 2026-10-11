@@ -59,6 +59,8 @@ RULES = {
     "counter.wake_median": (0.25, 300),
     "counter.wake_p99": (0.50, 5_000),
     "timer.wake_error_p99": (0.50, 20_000),
+    "timeline.wake_median": (0.50, 5_000),
+    "timeline.wake_p99": (0.50, 20_000),
     "process.spawn_to_main": (0.50, 30_000),
     "trace.probe_enabled": (0.25, 5),
     "irq.wait_wake_median": (0.25, 3_000),

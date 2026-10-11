@@ -99,7 +99,8 @@ enum Observers {
     /// observers fire once and go. Object lock held.
     static func notify(_ object: ObjectPointer) {
         let signals = object.header.signals
-        let value = object.header.type == .counter ? Counters.valueLocked(object) : 0
+        let type = object.header.type
+        let value = type == .counter || type == .timeline ? Counters.valueLocked(object) : 0
         var previous: ObserverPointer? = nil
         var cursor = object.header.observers
         while let observer = cursor {

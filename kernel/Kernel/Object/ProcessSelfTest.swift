@@ -246,6 +246,21 @@ enum ProcessSelfTest {
         console.write("a close, port packets (at once, later, cancelled)\n")
     }
 
+    /// K10b: display timelines from user mode (mode 15).
+    static func runTimelines(_ console: Uart) {
+        let before = Counts()
+        let exitCode = runInProcess(mode: 15)
+        guard exitCode == 0x600D else {
+            console.write("  timeline: user program failed check ")
+            console.write(decimal: UInt64(bitPattern: exitCode))
+            console.write("\n")
+            panic("timeline self-test: user side")
+        }
+        before.expectUnchanged(console)
+        console.write("  timeline: synthetic (page, next-vblank waits by thread and port, period change), driven ")
+        console.write("(advance wakes a waiter), rights\n")
+    }
+
     /// Live processes, address spaces and objects, to check nothing leaked.
     struct Counts {
         let processes = Processes.live.load(ordering: .relaxed)

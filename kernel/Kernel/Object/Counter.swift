@@ -33,11 +33,21 @@ enum Counters {
         return object
     }
 
-    /// The value (object lock held: Observers.notify's view).
-    static func valueLocked(_ object: ObjectPointer) -> Int64 { CounterPointer(object: object).pointee.value }
+    /// The value (object lock held: Observers.notify's view). A display
+    /// timeline's is its vblank count (K10b), waited on the same way.
+    static func valueLocked(_ object: ObjectPointer) -> Int64 {
+        object.header.type == .timeline ? Timelines.valueLocked(object) : CounterPointer(object: object).pointee.value
+    }
 
     static func read(_ object: ObjectPointer) -> Int64 {
         object.header.lock.withLock { valueLocked(object) }
+    }
+
+    /// A handle that can be waited on at a value: a counter or a timeline.
+    static func waitable(_ table: borrowing HandleTable, _ handle: UInt32, rights: Rights) throws(Status) -> ObjectRef {
+        let ref = try table.get(handle, rights: rights)
+        guard ref.type == .counter || ref.type == .timeline else { throw .wrongType }
+        return ref
     }
 
     /// counter_add: OUT_OF_RANGE (and no change) on overflow.
@@ -67,7 +77,7 @@ enum Counters {
     /// (TIMED_OUT), or the handle is closed (CANCELED).
     static func wait(_ table: borrowing HandleTable, _ handle: UInt32, target: Int64,
                      deadline: UInt64) throws(Status) {
-        let ref = try table.get(handle, type: .counter, rights: [.wait, .read])
+        let ref = try waitable(table, handle, rights: [.wait, .read])
         let object = ref.object
         let state = try WaitStatePointer.forCurrentThread()
         let observer = try object.header.lock.withLock { () throws(Status) -> ObserverPointer? in
@@ -76,7 +86,16 @@ enum Counters {
                                   handle: handle)
             waiter.byValue = true
             waiter.atValue = target
-            return try Observers.add(object, waiter)
+            let added = try Observers.add(object, waiter)
+            if object.header.type == .timeline {
+                do throws(Status) {
+                    try Timelines.watchLocked(object)
+                } catch {
+                    Observers.remove(object, added)
+                    throw error
+                }
+            }
+            return added
         }
         guard let observer else { return }
         // One scheduler-lock pass: wait, and read how it ended.
@@ -101,7 +120,7 @@ enum Counters {
     /// `key` once the value is at least `target` (now, if it is).
     static func waitAsync(_ table: borrowing HandleTable, _ handle: UInt32, port portHandle: UInt32, key: UInt64,
                           target: Int64) throws(Status) {
-        let object = try table.get(handle, type: .counter, rights: [.wait, .read])
+        let object = try waitable(table, handle, rights: [.wait, .read])
         let port = try table.get(portHandle, type: .port, rights: .write)
         let record = try QueuedPacketPointer.allocate(PortPacket(key: key, type: UInt32(CROI_PKT_TYPE_COUNTER)),
                                                       table: table.address, handle: handle)
@@ -118,7 +137,15 @@ enum Counters {
                                         trigger: 0, table: table.address, handle: handle)
                 observer.byValue = true
                 observer.atValue = target
-                _ = try Observers.add(object.object, observer)
+                let added = try Observers.add(object.object, observer)
+                if object.object.header.type == .timeline {
+                    do throws(Status) {
+                        try Timelines.watchLocked(object.object)
+                    } catch {
+                        Observers.remove(object.object, added)  // its packet is freed below
+                        throw error
+                    }
+                }
             }
         } catch {
             record.free()

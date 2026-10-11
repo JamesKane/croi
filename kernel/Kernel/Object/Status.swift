@@ -91,4 +91,5 @@ enum ObjectType: UInt32 {
     case exception = 29
     case msi = 32
     case counter = 34
+    case timeline = 48  // croi's (K10b)
 }

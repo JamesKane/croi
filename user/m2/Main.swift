@@ -157,6 +157,9 @@ struct M2 {
         budget("counter.wake_median", r.counterWakeMedian, limit: budgets.portWake)
         budget("counter.wake_p99", r.counterWakeP99)
         budget("timer.wake_error_p99", r.wakeErrorP99, limit: budgets.wakeErrorP99)
+        // K10b: a synthetic vblank to the deadline thread waiting for it.
+        budget("timeline.wake_median", r.timelineWakeMedian)
+        budget("timeline.wake_p99", r.timelineWakeP99, limit: budgets.wakeErrorP99)
         if let spawned = environmentNumber("croi.spawn_ns="), entered > spawned {
             print("m2: spawn to main \((entered - spawned) / 1000) us (budget \(spawnToMainLimit / 1000))")
             budget("process.spawn_to_main", entered - spawned, limit: spawnToMainLimit)

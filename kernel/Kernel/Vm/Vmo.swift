@@ -442,6 +442,7 @@ struct Vmo: ~Copyable {
     func setCachePolicy(_ policy: CachePolicy) throws(VmError) {
         try record.pointee.lock.withLock { () throws(VmError) in
             guard !record.pointee.cachedFirmware || policy == .cached else { throw .denied(0) }
+            guard !record.pointee.sharedReadOnly else { throw .denied(0) }  // the kernel writes it cached
             guard record.pointee.mappers.count == 0 else { throw .alreadyMapped(0) }
             guard record.pointee.pins.count == 0 else { throw .pinned }
         }

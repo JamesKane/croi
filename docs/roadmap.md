@@ -557,7 +557,9 @@ if K10 splits (nothing else in M4 depends on it).
   Vulkan timeline semaphores in M5, so the semantics follow them
   (monotonic use, 64-bit values). Budget: signal to a waiter on another
   core running, as port wake.
-- **K10b: the display timeline (ext 1).** A kernel object a display
+- **K10b: the display timeline (ext 1).** **Done** (2026-10-10): syscalls
+  170-173, object type 48, display system resource base 16; vblank to
+  the waiting deadline thread ~10 µs median, p99 under 40 µs (KVM). A kernel object a display
   driver advances (`timeline_advance` with the vblank's hardware
   timestamp, under a display resource), counting vblanks; waitable at a
   value like a counter and through ports; and a read-only page per

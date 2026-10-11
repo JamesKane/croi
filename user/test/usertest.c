@@ -2101,6 +2101,87 @@ static int64_t counters(const startup_t *s) {
   return 0x600D;
 }
 
+// Mode 15 (K10b): display timelines. A synthetic one (the kernel's,
+// from the time): its page, waits for the next vblank (blocking and by
+// port), a period change; a driven one, advanced at a timestamp; rights.
+static int64_t page_count(volatile const croi_timeline_page_t *page, uint64_t t) {
+  return page->base_count + (int64_t)((t - page->base_time_ns) / page->period_ns);
+}
+
+static int64_t timelines(const startup_t *s) {
+  uint32_t t = 0, tracing = 0, page_vmo = 0, port = 0, weak = 0, driven = 0;
+  uint64_t at = 0;
+  CHECK(360, resource_create(s->resource, CROI_RSRC_KIND_SYSTEM, CROI_RSRC_SYSTEM_TRACING_BASE, 1, &tracing) == 0 &&
+                 sys(CROI_SYS_TIMELINE_CREATE, tracing, CROI_TIMELINE_SYNTHETIC, 2000000, (uint64_t)&t, 0) ==
+                     ERR_OUT_OF_RANGE &&
+                 sys(CROI_SYS_TIMELINE_CREATE, s->resource, 1u << 5, 2000000, (uint64_t)&t, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_TIMELINE_CREATE, s->resource, CROI_TIMELINE_SYNTHETIC, 1000, (uint64_t)&t, 0) ==
+                     ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_TIMELINE_CREATE, s->resource, CROI_TIMELINE_SYNTHETIC, 2000000, (uint64_t)&t, 0) == 0);
+  sys(CROI_SYS_HANDLE_CLOSE, tracing, 0, 0, 0, 0);
+  // The page: read only, cached only, and what it says.
+  CHECK(361, sys(CROI_SYS_TIMELINE_GET_PAGE, t, (uint64_t)&page_vmo, 0, 0, 0) == 0 &&
+                 sys6(CROI_SYS_VMAR_MAP, s->vmar | (uint64_t)(CROI_VM_PERM_READ | CROI_VM_PERM_WRITE) << 32, 0,
+                      page_vmo, 0, PAGE, (uint64_t)&at) != 0 &&
+                 sys(CROI_SYS_VMO_SET_CACHE_POLICY, page_vmo, CROI_CACHE_POLICY_UNCACHED, 0, 0, 0) == ERR_ACCESS_DENIED_ &&
+                 sys6(CROI_SYS_VMAR_MAP, s->vmar | (uint64_t)CROI_VM_PERM_READ << 32, 0, page_vmo, 0, PAGE,
+                      (uint64_t)&at) == 0);
+  volatile const croi_timeline_page_t *page = (volatile const croi_timeline_page_t *)at;
+  int64_t value = -1;
+  CHECK(362, page->version == CROI_TIMELINE_PAGE_VERSION && (page->flags & CROI_TIMELINE_PAGE_SYNTHESIZED) &&
+                 page->period_ns == 2000000 && (page->sequence & 1) == 0 &&
+                 sys(CROI_SYS_COUNTER_READ, t, (uint64_t)&value, 0, 0, 0) == 0 &&
+                 value >= page_count(page, now_ns()) - 1 && value <= page_count(page, now_ns()) &&
+                 sys(CROI_SYS_COUNTER_ADD, t, 1, 0, 0, 0) == ERR_WRONG_TYPE &&
+                 sys(CROI_SYS_TIMELINE_ADVANCE, t, 5, 0, 0, 0) == ERR_BAD_STATE);
+  // The next vblank: not before its time, not much after.
+  for (int i = 0; i < 3; i++) {
+    CHECK(363, sys(CROI_SYS_COUNTER_READ, t, (uint64_t)&value, 0, 0, 0) == 0);
+    uint64_t due = page->base_time_ns + (uint64_t)(value + 1 - page->base_count) * page->period_ns;
+    CHECK(364, sys(CROI_SYS_COUNTER_WAIT, t, (uint64_t)(value + 1), now_ns() + 100000000, 0, 0) == 0);
+    uint64_t woke = now_ns();
+    CHECK(365, woke >= due && woke - due < 5000000);
+  }
+  // By port, two vblanks ahead.
+  croi_port_packet_t p;
+  CHECK(366, sys(CROI_SYS_PORT_CREATE, 0, (uint64_t)&port, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_COUNTER_READ, t, (uint64_t)&value, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_COUNTER_WAIT_ASYNC, t, port, 5, (uint64_t)(value + 2), 0) == 0 &&
+                 port_next(port, 100000000, &p) == 0 && p.type == CROI_PKT_TYPE_COUNTER && p.key == 5 &&
+                 (int64_t)p.payload[1] >= value + 2);
+  // A new period: the count carries on.
+  int64_t before = 0, after = 0;
+  CHECK(367, sys(CROI_SYS_COUNTER_READ, t, (uint64_t)&before, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_TIMELINE_SET_PERIOD, t, 4000000, 0, 0, 0) == 0 && page->period_ns == 4000000 &&
+                 sys(CROI_SYS_COUNTER_READ, t, (uint64_t)&after, 0, 0, 0) == 0 && after >= before &&
+                 after <= before + 1 && sys(CROI_SYS_COUNTER_WAIT, t, (uint64_t)(after + 1), now_ns() + 100000000, 0, 0) == 0);
+  // Rights: a client's handle (READ, WAIT) can't drive it.
+  CHECK(368, sys(CROI_SYS_HANDLE_DUPLICATE, t, 1u << 2 | 1u << 14, (uint64_t)&weak, 0, 0) == 0 &&
+                 sys(CROI_SYS_TIMELINE_SET_PERIOD, weak, 3000000, 0, 0, 0) == ERR_ACCESS_DENIED_ &&
+                 sys(CROI_SYS_COUNTER_WAIT, weak, 0, 0, 0, 0) == 0);
+  // Driven: a waiter wakes when the driver counts a vblank.
+  CHECK(369, sys(CROI_SYS_TIMELINE_CREATE, s->resource, 0, 16666666, (uint64_t)&driven, 0) == 0 &&
+                 sys(CROI_SYS_COUNTER_READ, driven, (uint64_t)&value, 0, 0, 0) == 0 && value == 0);
+  counter_waiter_t w = {.handle = driven, .target = 1, .status = 1};
+  uint32_t worker = start_thread(s, counter_waiter, (uint64_t)&w);
+  sleep_ns(10000000);
+  CHECK(370, w.status == 1 && sys(CROI_SYS_TIMELINE_ADVANCE, driven, 12345678, 0, 0, 0) == 0);
+  join_checked(worker);
+  uint32_t driven_page = 0;
+  uint64_t driven_at = 0;
+  CHECK(371, w.status == 0 && sys(CROI_SYS_TIMELINE_GET_PAGE, driven, (uint64_t)&driven_page, 0, 0, 0) == 0 &&
+                 sys6(CROI_SYS_VMAR_MAP, s->vmar | (uint64_t)CROI_VM_PERM_READ << 32, 0, driven_page, 0, PAGE,
+                      (uint64_t)&driven_at) == 0 &&
+                 ((volatile const croi_timeline_page_t *)driven_at)->base_count == 1 &&
+                 ((volatile const croi_timeline_page_t *)driven_at)->base_time_ns == 12345678 &&
+                 ((volatile const croi_timeline_page_t *)driven_at)->flags == 0);
+  sys(CROI_SYS_VMAR_UNMAP, s->vmar, at, PAGE, 0, 0);
+  sys(CROI_SYS_VMAR_UNMAP, s->vmar, driven_at, PAGE, 0, 0);
+  uint32_t handles[] = {t, page_vmo, port, weak, driven, driven_page};
+  for (int i = 0; i < 6; i++) sys(CROI_SYS_HANDLE_CLOSE, handles[i], 0, 0, 0, 0);
+  return 0x600D;
+}
+
 // Mode 4: something to sample. Three frames deep, spin for `ns`, with a
 // clock syscall every 64 iterations (so some samples land in the kernel
 // and must continue into these frames).
@@ -2144,6 +2225,7 @@ __attribute__((section(".text.start"))) [[noreturn]] void _start(uint64_t mode, 
             : mode == 12 ? dma((const startup_t *)handle)
             : mode == 13 ? memory_stats((const startup_t *)handle)
             : mode == 14 ? counters((const startup_t *)handle)
+            : mode == 15 ? timelines((const startup_t *)handle)
             : mode >= 0x400 ? child((uint32_t)mode, handle, vdso_base)
                         : objects());
 }

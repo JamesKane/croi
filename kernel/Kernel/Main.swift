@@ -310,6 +310,7 @@ private func runSelfTests(_ console: Uart) {
     ProcessSelfTest.runDma(console)
     ProcessSelfTest.runMemoryStats(console)
     ProcessSelfTest.runCounters(console)
+    ProcessSelfTest.runTimelines(console)
     ProgramSelfTest.run(console)
     SelfTestDeadman.done.store(true, ordering: .relaxed)
 }

@@ -316,7 +316,7 @@ enum Syscalls {
             try driverCall(number, a, table)
         case 150...159:
             try dmaCall(number, a, table)
-        case 160...169:
+        case 160...179:
             try counterCall(number, a, table)
         case 120...129:
             try Profiles.call(number, a, table)

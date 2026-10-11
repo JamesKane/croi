@@ -17,6 +17,7 @@ module CroiAbi {
   header "interrupt.h"
   header "dma.h"
   header "counter.h"
+  header "timeline.h"
   export *
 }
 

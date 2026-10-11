@@ -758,6 +758,31 @@ include/counter.h, syscalls 160-165):
   CPU 1 to counter_wait's exit on CPU 2; limit 2 µs): KVM ~1.6 µs.
 - Boot test mode 14 (`ProcessSelfTest.runCounters`).
 
+Display timelines, K10b (Kernel/Object/Timeline.swift, include/timeline.h,
+syscalls 170-173 in User/CounterSyscalls.swift; Todhchai ext 1):
+- croi's object (type 48), created under the display system resource
+  (base 16, croi's): a vblank count, waited on with the counter calls
+  (`Counters.waitable` takes a counter or a timeline; value observers;
+  `Observers.notify` asks `Counters.valueLocked` for both types).
+- Driven: `timeline_advance(timeline, timestamp)` counts a vblank at the
+  hardware's time. Synthetic (`CROI_TIMELINE_SYNTHETIC`, the GOP
+  framebuffer): the value is base_count + (now - base_time) / period, and
+  `Timelines.watchLocked` (after a value observer is added) arms one
+  kernel timer, zero slack, for the earliest vblank any waiter needs; the
+  firing notifies and re-arms for the next. Nothing waiting, nothing
+  armed: a static screen makes no wakeups. The armed timer holds a
+  reference; a generation makes a superseded one a no-op.
+- `timeline_set_period` re-bases at the current vblank (the count carries
+  on). `timeline_get_page`: a read-only handle to a one-page contiguous
+  VMO (`sharedReadOnly`: mappings read only, cache policy fixed) holding
+  croi_timeline_page_t under a seqlock (period, base count and time,
+  synthesized flag), written only at creation, period changes and
+  advances.
+- Budget `timeline.wake_p99` (m2: the deadline thread on its own CPU
+  waiting for each next vblank of a 1 ms synthetic timeline, from the
+  page's vblank time; limit 100 µs): KVM median ~10 µs, p99 17-35 µs.
+- Boot test mode 15 (`ProcessSelfTest.runTimelines`).
+
 Memory statistics (Todhchai's M3 resident-memory budget; task.h,
 resource.h, UserAspace.taskStats, Kernel/Object/KernelMemory.swift):
 - object_get_info(process, CROI_INFO_TASK_STATS = 12 | 1 << 28, or _V1 =
