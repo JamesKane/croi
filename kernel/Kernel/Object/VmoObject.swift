@@ -29,6 +29,7 @@ struct VmoObject: ~Copyable {
         }
         let none = vmo.pointee.lock.withLock { () -> Bool in
             if vmo.pointee.object == 0 { vmo.pointee.object = object.address }
+            if vmo.pointee.koid == 0 { vmo.pointee.koid = object.header.koid }
             return vmo.pointee.children == 0
         }
         if none { object.header.signals = UInt32(CROI_VMO_ZERO_CHILDREN) }

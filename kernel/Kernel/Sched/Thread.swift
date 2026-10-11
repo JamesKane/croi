@@ -119,6 +119,10 @@ struct Thread: ~Copyable {
     var allNext: ThreadPointer?
     /// CPUs it has run on, one bit each (tests, observability).
     var cpusSeen: UInt64 = 0
+    /// K13e: time run and time spent ready but waiting for a CPU
+    /// (TASK_RUNTIME, THREAD_STATS); runtime grows at each `charge`.
+    var totalRuntime: UInt64 = 0
+    var queueTime: UInt64 = 0
     var switchesIn: UInt64 = 0
 
     enum RunQueue { case none, fair, deadline, throttled }

@@ -30,6 +30,7 @@ add_library(kernel-swift OBJECT
   Kernel/User/SocketSyscalls.swift
   Kernel/User/StreamSyscalls.swift
   Kernel/User/PagerSyscalls.swift
+  Kernel/User/InfoTopics.swift
   Kernel/User/DriverSyscalls.swift
   Kernel/User/DmaSyscalls.swift
   Kernel/User/CounterSyscalls.swift

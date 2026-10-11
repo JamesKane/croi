@@ -526,6 +526,32 @@ struct UserAspace: ~Copyable {
     }
 }
 
+extension UserAspacePointer {
+    /// vmar_op_range's map step (K13e): every page of [base, base+size)
+    /// whose VMO has it (its own: a child's untouched pages still fault)
+    /// gets its entry now; a pager VMO's clean pages read only.
+    func mapPresent(_ base: UInt64, _ size: UInt64) {
+        let page = KernelLayout.pageSize
+        pointee.lock.withLock {
+            guard !pointee.dead else { return }
+            var at = base
+            while at < base + size {
+                defer { at += page }
+                guard pointee.arch.query(at) == nil else { continue }
+                var found: Mapping? = nil
+                for i in 0..<pointee.mappings.count where pointee.mappings[i].contains(at) { found = pointee.mappings[i] }
+                guard let m = found else { continue }
+                let offset = m.offset + (at - m.base)
+                guard let phys = m.vmo.lookup(at: offset) else { continue }
+                let clean = m.vmo.pointee.pager != nil
+                    && m.vmo.pointee.lock.withLock { m.vmo.dirtLocked(offset) } != PageDirt.dirty
+                let rights = clean ? m.rights.subtracting(.write) : m.rights
+                try? pointee.arch.map(virt: at, phys: phys, size: page, attributes(rights, m.vmo.pointee.cache, key: m.key))
+            }
+        }
+    }
+}
+
 /// Page tables attributes for a mapping's rights (and JIT key).
 func attributes(_ rights: VmRights, _ cache: CachePolicy, key: UInt8 = 0) -> MapAttributes {
     MapAttributes(writable: rights.contains(.write), executable: rights.contains(.execute), cache: cache,

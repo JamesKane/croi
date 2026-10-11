@@ -22,6 +22,11 @@ import Synchronization
 struct JobObject: ~Copyable {
     var header = ObjectHeader(type: .job)
     var name = ObjectName(repeating: 0)
+    /// K13e: ZX_INFO_JOB's return code (task_kill's), and the runtime of
+    /// the processes and jobs that have gone from it (TASK_RUNTIME).
+    var returnCode: Int64 = 0
+    var deadCpu: UInt64 = 0
+    var deadQueue: UInt64 = 0
     /// Retained; nil for the root job.
     let parent: ObjectPointer?
     /// Child processes and jobs (not retained: each removes itself).
@@ -58,6 +63,11 @@ struct ProcessObject: ~Copyable {
 
     var header = ObjectHeader(type: .process)
     var name = ObjectName(repeating: 0)
+    /// K13e: when its first thread started (ZX_INFO_PROCESS), and the
+    /// runtime of its threads that have exited (TASK_RUNTIME).
+    var startTime: UInt64 = 0
+    var deadCpu: UInt64 = 0
+    var deadQueue: UInt64 = 0
     /// Retained.
     let job: ObjectPointer
     var state = State.initial
@@ -101,6 +111,12 @@ struct ThreadObject: ~Copyable {
 
     var header = ObjectHeader(type: .thread)
     var name = ObjectName(repeating: 0)
+    /// K13e: the exception channel it waits on (ZX_EXCEPTION_CHANNEL_TYPE_*),
+    /// and once dead its runtime and last CPU (THREAD_STATS, TASK_RUNTIME).
+    var exceptionChannelType: UInt32 = 0
+    var finalCpuTime: UInt64 = 0
+    var finalQueueTime: UInt64 = 0
+    var lastCpu: UInt32 = 0xFFFF_FFFF
     /// Retained.
     let process: ObjectPointer
     var state = State.initial
@@ -239,6 +255,11 @@ enum Processes {
             try? Scheduler.setReservation(mask: 0, previous: job.pointee.reservedCpus, tag: job.pointee.reservation)
         }
         if let parent = job.pointee.parent {
+            let (cpu, queue) = (job.pointee.deadCpu, job.pointee.deadQueue)
+            parent.header.lock.withLock {
+                JobPointer(object: parent).pointee.deadCpu += cpu
+                JobPointer(object: parent).pointee.deadQueue += queue
+            }
             removeChild(object, from: parent)
             parent.release()
         }
@@ -314,6 +335,11 @@ enum Processes {
     static func destroyProcess(_ object: ObjectPointer) {
         let process = ProcessPointer(object: object)
         teardown(object)
+        let (cpu, queue) = (process.pointee.deadCpu, process.pointee.deadQueue)  // every thread has exited
+        process.pointee.job.header.lock.withLock {
+            JobPointer(object: process.pointee.job).pointee.deadCpu += cpu
+            JobPointer(object: process.pointee.job).pointee.deadQueue += queue
+        }
         removeChild(object, from: process.pointee.job)
         process.pointee.job.release()
         process.pointee.aspaceRecord.release()
@@ -402,6 +428,7 @@ enum Processes {
                 thread.pointee.arg0 = arg0
                 thread.pointee.arg1 = arg1
             }
+            if p.pointee.state == .initial { p.pointee.startTime = Clock.now() }
             p.pointee.state = .running
             p.pointee.running += 1
         }
@@ -457,9 +484,18 @@ enum Processes {
         guard me.pointee.object != 0 else { Scheduler.exit(code) }  // a kernel test's user thread
         let object = ObjectPointer(address: me.pointee.object)
         let thread = ThreadObjectPointer(object: object)
+        let (cpuTime, queueTime) = Scheduler.runtime(me)
         object.header.lock.withLock {
             thread.pointee.state = .dead
             thread.pointee.thread = 0
+            thread.pointee.finalCpuTime = cpuTime
+            thread.pointee.finalQueueTime = queueTime
+            thread.pointee.lastCpu = UInt32(me.pointee.cpu)
+        }
+        let owner = thread.pointee.process
+        owner.header.lock.withLock {
+            ProcessPointer(object: owner).pointee.deadCpu += cpuTime
+            ProcessPointer(object: owner).pointee.deadQueue += queueTime
         }
         object.updateSignals(clear: Signals.threadRunning, set: Signals.taskTerminated)
         Scheduler.dropOwnership()  // calls it received and never answered
@@ -650,6 +686,7 @@ enum Processes {
         let job = JobPointer(object: object)
         var children = UniqueArray<UInt64>()
         object.header.lock.withLock {
+            if !job.pointee.dead { job.pointee.returnCode = TaskReturnCode.syscallKill }
             job.pointee.dead = true
             for i in 0..<job.pointee.children.count {
                 let child = ObjectPointer(address: job.pointee.children[i])

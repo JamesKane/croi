@@ -112,3 +112,52 @@ typedef struct {
   uint32_t modified;
 } croi_pager_vmo_stats_t;
 
+// zx_info_vmo_t (ZX_INFO_VMO, ZX_INFO_PROCESS_VMOS; K13e). Flags as
+// Zircon's: TYPE_PAGED 1 (physical: 0), RESIZABLE 2, IS_COW_CLONE 4,
+// VIA_HANDLE 8, VIA_MAPPING 0x10, PAGER_BACKED 0x20, CONTIGUOUS 0x40.
+// cache_policy: CROI_CACHE_POLICY_*.
+enum : uint32_t {
+  CROI_INFO_VMO_TYPE_PAGED = 1u << 0,
+  CROI_INFO_VMO_RESIZABLE = 1u << 1,
+  CROI_INFO_VMO_IS_COW_CLONE = 1u << 2,
+  CROI_INFO_VMO_VIA_HANDLE = 1u << 3,
+  CROI_INFO_VMO_VIA_MAPPING = 1u << 4,
+  CROI_INFO_VMO_PAGER_BACKED = 1u << 5,
+  CROI_INFO_VMO_CONTIGUOUS = 1u << 6,
+};
+
+typedef struct {
+  uint64_t koid;
+  char name[32];
+  uint64_t size_bytes;
+  uint64_t parent_koid;
+  uint64_t num_children;
+  uint64_t num_mappings;
+  uint64_t share_count;
+  uint32_t flags;
+  uint8_t padding1[4];
+  uint64_t committed_bytes;
+  uint32_t handle_rights;
+  uint32_t cache_policy;
+  uint64_t metadata_bytes;
+  uint64_t committed_change_events;
+  uint64_t populated_bytes;
+  uint64_t committed_private_bytes;
+  uint64_t populated_private_bytes;
+  uint64_t committed_scaled_bytes;
+  uint64_t populated_scaled_bytes;
+  uint64_t committed_fractional_scaled_bytes;
+  uint64_t populated_fractional_scaled_bytes;
+} croi_info_vmo_t;
+
+// vmar_op_range ops (K13e, Zircon's values).
+enum : uint32_t {
+  CROI_VMAR_OP_COMMIT = 1,
+  CROI_VMAR_OP_DECOMMIT = 2,
+  CROI_VMAR_OP_MAP_RANGE = 3,
+  CROI_VMAR_OP_ZERO = 10,
+  CROI_VMAR_OP_DONT_NEED = 12,
+  CROI_VMAR_OP_ALWAYS_NEED = 13,
+  CROI_VMAR_OP_PREFETCH = 14,
+};
+

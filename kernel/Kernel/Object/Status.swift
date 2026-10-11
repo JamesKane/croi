@@ -78,6 +78,7 @@ struct Rights: BitFlags {
     static var manageThread: Rights { Rights(rawValue: 1 << 18) }
     static var applyProfile: Rights { Rights(rawValue: 1 << 19) }
     static var manageSocket: Rights { Rights(rawValue: 1 << 20) }
+    static var opChildren: Rights { Rights(rawValue: 1 << 21) }
     static var attachVmo: Rights { Rights(rawValue: 1 << 23) }
     static var manageVmo: Rights { Rights(rawValue: 1 << 24) }
     /// duplicate/replace: keep the source handle's rights.

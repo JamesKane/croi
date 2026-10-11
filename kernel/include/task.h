@@ -160,3 +160,139 @@ static_assert(sizeof(croi_info_thread_trace_t) == 8);
 // reserved (INVALID_ARGS); a CPU another job holds is ALREADY_BOUND, one
 // with deadline reservations admitted for others NO_RESOURCES. Mask 0
 // releases; the job's destruction releases too.
+
+// Task and VMO info topics (K13e, Zircon's numbers and layouts).
+// object_get_info(handle, topic, buffer, buffer_size, size_t *actual,
+// size_t *avail): fixed-size topics write actual 1 (0 and
+// BUFFER_TOO_SMALL if the buffer is short) and avail 1; list topics fill
+// what fits and report how many there are, never BUFFER_TOO_SMALL.
+enum : uint32_t {
+  CROI_INFO_PROCESS = 3u | (1u << 28),        // croi_info_process_t (INSPECT)
+  CROI_INFO_PROCESS_THREADS = 4u,             // koids (ENUMERATE)
+  CROI_INFO_JOB_CHILDREN = 8u,                // koids (ENUMERATE)
+  CROI_INFO_JOB_PROCESSES = 9u,               // koids (ENUMERATE)
+  CROI_INFO_THREAD = 10u,                     // croi_info_thread_t (INSPECT)
+  CROI_INFO_PROCESS_MAPS_V1 = 13u,            // croi_info_maps_t, 96-byte entries
+  CROI_INFO_PROCESS_MAPS_V2 = 13u | (1u << 28),  // 104-byte entries
+  CROI_INFO_PROCESS_MAPS = 13u | (2u << 28),  // croi_info_maps_t (INSPECT)
+  CROI_INFO_PROCESS_VMOS_V1 = 14u,            // croi_info_vmo_t prefixes: 104,
+  CROI_INFO_PROCESS_VMOS_V2 = 14u | (1u << 28),  // 120,
+  CROI_INFO_PROCESS_VMOS_V3 = 14u | (2u << 28),  // 128 bytes
+  CROI_INFO_PROCESS_VMOS = 14u | (3u << 28),  // croi_info_vmo_t (INSPECT)
+  CROI_INFO_THREAD_STATS = 15u,               // croi_info_thread_stats_t (INSPECT)
+  CROI_INFO_VMO_V1 = 23u,
+  CROI_INFO_VMO_V2 = 23u | (1u << 28),
+  CROI_INFO_VMO_V3 = 23u | (2u << 28),
+  CROI_INFO_VMO = 23u | (3u << 28),           // croi_info_vmo_t (no rights needed)
+  CROI_INFO_JOB = 24u,                        // croi_info_job_t (INSPECT)
+  CROI_INFO_HANDLE_TABLE = 27u,               // croi_info_handle_extended_t (INSPECT | MANAGE_PROCESS | MANAGE_THREAD)
+  CROI_INFO_TASK_RUNTIME_V1 = 30u,            // 16 bytes
+  CROI_INFO_TASK_RUNTIME = 30u | (1u << 28),  // croi_info_task_runtime_t (INSPECT)
+
+  CROI_INFO_PROCESS_FLAG_STARTED = 1u << 0,
+  CROI_INFO_PROCESS_FLAG_EXITED = 1u << 1,
+  CROI_INFO_PROCESS_FLAG_DEBUGGER_ATTACHED = 1u << 2,
+
+  CROI_THREAD_STATE_NEW = 0x0000,
+  CROI_THREAD_STATE_RUNNING = 0x0001,
+  CROI_THREAD_STATE_SUSPENDED = 0x0002,
+  CROI_THREAD_STATE_BLOCKED = 0x0003,
+  CROI_THREAD_STATE_DYING = 0x0004,
+  CROI_THREAD_STATE_DEAD = 0x0005,
+  CROI_THREAD_STATE_BLOCKED_EXCEPTION = 0x0103,
+  CROI_THREAD_STATE_BLOCKED_SLEEPING = 0x0203,
+  CROI_THREAD_STATE_BLOCKED_FUTEX = 0x0303,
+  CROI_THREAD_STATE_BLOCKED_PORT = 0x0403,
+  CROI_THREAD_STATE_BLOCKED_CHANNEL = 0x0503,
+  CROI_THREAD_STATE_BLOCKED_WAIT_ONE = 0x0603,
+  CROI_THREAD_STATE_BLOCKED_WAIT_MANY = 0x0703,
+  CROI_THREAD_STATE_BLOCKED_INTERRUPT = 0x0803,
+  CROI_THREAD_STATE_BLOCKED_PAGER = 0x0903,
+
+  CROI_INFO_MAPS_TYPE_NONE = 0,
+  CROI_INFO_MAPS_TYPE_ASPACE = 1,
+  CROI_INFO_MAPS_TYPE_VMAR = 2,
+  CROI_INFO_MAPS_TYPE_MAPPING = 3,
+
+  CROI_INFO_INVALID_CPU = 0xFFFFFFFFu,
+};
+
+// zx_info_process_t.
+typedef struct {
+  int64_t return_code;
+  int64_t start_time;
+  uint32_t flags;
+  uint8_t padding[4];
+} croi_info_process_t;
+
+// zx_info_thread_t (cpu_affinity_mask: zx_cpu_set_t, 512 CPUs).
+typedef struct {
+  uint32_t state;
+  uint32_t wait_exception_channel_type;
+  uint64_t cpu_affinity_mask[8];
+} croi_info_thread_t;
+
+// zx_info_thread_stats_t.
+typedef struct {
+  int64_t total_runtime;
+  uint32_t last_scheduled_cpu;
+  uint8_t padding[4];
+} croi_info_thread_stats_t;
+
+// zx_info_task_runtime_t.
+typedef struct {
+  int64_t cpu_time;
+  int64_t queue_time;
+  int64_t page_fault_time;
+  int64_t lock_contention_time;
+} croi_info_task_runtime_t;
+
+// zx_info_job_t.
+typedef struct {
+  int64_t return_code;
+  uint8_t exited;
+  uint8_t kill_on_oom;
+  uint8_t debugger_attached;
+  uint8_t padding[5];
+} croi_info_job_t;
+
+// zx_info_handle_extended_t.
+typedef struct {
+  uint32_t type;
+  uint32_t handle_value;
+  uint32_t rights;
+  uint32_t reserved;
+  uint64_t koid;
+  uint64_t related_koid;
+  uint64_t peer_owner_koid;
+} croi_info_handle_extended_t;
+
+// zx_info_maps_mapping_t.
+typedef struct {
+  uint32_t mmu_flags;  // CROI_VM_PERM_*
+  uint8_t padding1[4];
+  uint64_t vmo_koid;
+  uint64_t vmo_offset;
+  uint64_t committed_bytes;
+  uint64_t populated_bytes;
+  uint64_t committed_private_bytes;
+  uint64_t populated_private_bytes;
+  uint64_t committed_scaled_bytes;
+  uint64_t populated_scaled_bytes;
+  uint64_t committed_fractional_scaled_bytes;
+  uint64_t populated_fractional_scaled_bytes;
+} croi_info_maps_mapping_t;
+
+// zx_info_maps_t: depth-first, pre-order (aspace at depth 0).
+typedef struct {
+  char name[32];
+  uint64_t base;
+  uint64_t size;
+  uint64_t depth;
+  uint32_t type;  // CROI_INFO_MAPS_TYPE_*
+  uint8_t padding1[4];
+  union {
+    croi_info_maps_mapping_t mapping;
+    uint8_t reserved[88];
+  } u;
+} croi_info_maps_t;

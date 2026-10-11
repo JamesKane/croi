@@ -1174,12 +1174,26 @@ enum Scheduler {
 
     // MARK: Run queues (lock held)
 
+    /// A thread's time run (including the stretch running now) and time
+    /// queued (K13e). Racy for another CPU's thread: a diagnostic.
+    static func runtime(_ thread: ThreadPointer) -> (cpu: UInt64, queue: UInt64) {
+        locked { () -> (UInt64, UInt64) in
+            var cpu = thread.pointee.totalRuntime
+            if thread.pointee.state == .running {
+                let now = Clock.now()
+                if now > thread.pointee.runStart { cpu &+= now - thread.pointee.runStart }
+            }
+            return (cpu, thread.pointee.queueTime)
+        }
+    }
+
     /// Charges the running thread for the time since `runStart`: virtual
     /// runtime for fair threads, capacity-scaled budget for deadline ones.
     private static func charge(_ thread: ThreadPointer, _ cpu: Int, _ now: UInt64) {
         guard !thread.pointee.isIdle, now > thread.pointee.runStart else { return }
         let elapsed = now - thread.pointee.runStart
         thread.pointee.runStart = now
+        thread.pointee.totalRuntime &+= elapsed
         switch thread.pointee.effective.discipline {
         case .fair:
             thread.pointee.vruntime &+= elapsed * SchedScale.capacityOne / max(1, thread.pointee.effective.weight)
@@ -1454,6 +1468,9 @@ enum Scheduler {
         // before this switch chose.
         if current.pointee.isIdle, next != current {
             _ = pollingCpus.bitwiseAnd(~(1 << UInt64(me)), ordering: .sequentiallyConsistent)
+        }
+        if next != current, next.pointee.readySince != 0, now > next.pointee.readySince {
+            next.pointee.queueTime &+= now - next.pointee.readySince
         }
         next.pointee.state = .running
         next.pointee.runStart = now

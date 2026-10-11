@@ -1380,6 +1380,36 @@ Kernel/Object/Names.swift; ipc.h, task.h; the pinned tree's semantics):
   theirs.
 - Mode 17's `small_calls`.
 
+Info topics and vmar_op_range, K13e part 2 (User/InfoTopics.swift,
+TaskSyscalls `vmarOpRange`, syscall 76; task.h, vmo.h):
+- object_get_info takes Zircon's actual and avail (fifth and sixth
+  arguments, optional). Fixed-size topics: actual 1 (0 and BUFFER_TOO_
+  SMALL when short), avail 1; lists fill what fits and give the total.
+  Topics are matched on bits 27:0 with the version in 31:28.
+- PROCESS (STARTED / EXITED, `ProcessObject.startTime`), THREAD (state
+  from ThreadObject and the scheduler; a blocked thread's BLOCKED_* reason
+  from the syscall in its user frame, a page fault's PAGER;
+  `exceptionChannelType` while an exception is offered; affinity in
+  mask[0]), THREAD_STATS (BAD_STATE once dead), TASK_RUNTIME (cpu and
+  queue time: `Thread.totalRuntime` grows in `charge`, `queueTime` at
+  switch-in from `readySince`; exiting threads add theirs to the process,
+  dying processes and jobs to their job), JOB (return code -1024 after
+  task_kill), JOB_CHILDREN / JOB_PROCESSES / PROCESS_THREADS (koids,
+  ENUMERATE), VMO (no rights needed; koid kept on the VmoRecord, flags,
+  committed/private/scaled bytes; V1-V3 prefixes), PROCESS_VMOS (VMO
+  handles then one entry per mapping; running processes only),
+  PROCESS_MAPS (aspace, then regions and mappings depth first; V1/V2
+  entries), HANDLE_TABLE (INSPECT | MANAGE_PROCESS | MANAGE_THREAD;
+  `HandleTable.snapshot`). Not tracked: page-fault and lock-contention
+  time, debugger attachment.
+- vmar_op_range (76): COMMIT, DECOMMIT, MAP_RANGE, ZERO, DONT_NEED (a
+  no-op: no eviction), ALWAYS_NEED, PREFETCH; rights by op on the VMAR
+  handle, then per mapping; gaps BAD_STATE; mappings of sub-VMARs only
+  with OP_CHILDREN (never for COMMIT/DECOMMIT/PREFETCH). Checked whole
+  under the aspace lock, then done piece by piece without it (pagers may
+  be waited for); `UserAspacePointer.mapPresent` maps what the VMO has.
+- Mode 17's `info_topics`.
+
 Randomness, K11b (Kernel/Random.swift, syscalls 181-182; handoff v5):
 - The loader reads 32 bytes from EFI_RNG_PROTOCOL if the firmware has
   one (edk2 over virtio-rng: qemu.sh adds `-device virtio-rng-pci`) into

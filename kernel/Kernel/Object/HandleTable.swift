@@ -182,6 +182,22 @@ struct HandleTable: ~Copyable {
         }
     }
 
+    typealias Entry = (value: UInt32, object: UInt64, rights: Rights)
+
+    /// Every live handle of the table at `address` (a process's, read
+    /// under its lock so it can't go): value, object (retained: the caller
+    /// releases), rights (ZX_INFO_HANDLE_TABLE, PROCESS_VMOS; K13e).
+    static func snapshot(address: UInt64, into entries: inout UniqueArray<Entry>) {
+        let table = HandleTablePointer(address: address)
+        table.pointee.lock.withLock {
+            for i in 0..<table.pointee.slots.count where table.pointee.slots[i].object != 0 {
+                let slot = table.pointee.slots[i]
+                ObjectPointer(address: slot.object).retain()
+                entries.append((Self.value(i, slot.generation), slot.object, slot.rights))
+            }
+        }
+    }
+
     private func slot(_ handle: UInt32) throws(Status) -> Int {
         guard handle & 3 == 3 else { throw .badHandle }
         let index = Int(handle >> 10) - 1

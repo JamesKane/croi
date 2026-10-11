@@ -86,26 +86,30 @@ enum Exceptions {
 
         // The handlers, in order, each retained while we use it.
         var channels = InlineArray<16, UInt64>(repeating: 0)
+        var kinds = InlineArray<16, UInt32>(repeating: 0)  // ZX_EXCEPTION_CHANNEL_TYPE_*
         var count = 0
-        func take(_ endpoint: UInt64) {
+        func take(_ endpoint: UInt64, _ kind: UInt32) {
             guard endpoint != 0, count < channels.count else { return }
             let channel = ObjectPointer(address: endpoint)
             if channel.tryRetain() {
                 channels[count] = endpoint
+                kinds[count] = kind
                 count += 1
             }
         }
-        take(thread.header.lock.withLock { threadObject.pointee.exceptionChannel })
-        take(process.header.lock.withLock { ProcessPointer(object: process).pointee.exceptionChannel })
+        take(thread.header.lock.withLock { threadObject.pointee.exceptionChannel }, 2)
+        take(process.header.lock.withLock { ProcessPointer(object: process).pointee.exceptionChannel }, 3)
         var job: ObjectPointer? = ProcessPointer(object: process).pointee.job
         while let current = job {
-            take(current.header.lock.withLock { JobPointer(object: current).pointee.exceptionChannel })
+            take(current.header.lock.withLock { JobPointer(object: current).pointee.exceptionChannel }, 4)
             job = JobPointer(object: current).pointee.parent
         }
+        defer { thread.header.lock.withLock { threadObject.pointee.exceptionChannelType = 0 } }
 
         var disposition = Disposition.unhandled
         for i in 0..<count where disposition == .unhandled {
             let channel = ObjectPointer(address: channels[i])
+            thread.header.lock.withLock { threadObject.pointee.exceptionChannelType = kinds[i] }
             switch offer(type, to: channel, thread: thread, process: process) {
             case .some(UInt32(CROI_EXCEPTION_STATE_HANDLED)): disposition = .resume
             case .some(UInt32(CROI_EXCEPTION_STATE_THREAD_EXIT)): disposition = .exitThread

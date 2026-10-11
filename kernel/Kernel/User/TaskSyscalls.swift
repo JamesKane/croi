@@ -80,6 +80,8 @@ extension Syscalls {
         case 71: try vmarMap(table, a)
         case 72:  // vmar_unmap(vmar, addr, len)
             try vmarUnmap(table, a)
+        case 76:  // vmar_op_range(vmar, op, addr, len, buffer, buffer_size), K13e
+            try vmarOpRange(table, a)
         case 73:  // vmar_protect(vmar | options << 32, addr, len)
             let rights = try vmRights(UInt32(truncatingIfNeeded: a[0] >> 32))
             let vmar = try table.get(handle, type: .vmar, rights: handleRights(rights))
@@ -216,6 +218,94 @@ extension Syscalls {
 
     static func vm<R>(_ body: () throws(VmError) -> R) throws(Status) -> R {
         try vmStatus(body)
+    }
+
+    /// vmar_op_range (K13e, Zircon's order of checks): COMMIT, DECOMMIT,
+    /// MAP_RANGE, ZERO, DONT_NEED (nothing: no eviction), ALWAYS_NEED,
+    /// PREFETCH over the mappings of [addr, addr+len), which must leave no
+    /// gap (BAD_STATE) and, unless the handle has OP_CHILDREN (and for
+    /// COMMIT, DECOMMIT and PREFETCH always), be the VMAR's own. Checked
+    /// whole under the aspace lock, then done piece by piece without it
+    /// (pagers may be waited for); the first error stops it.
+    private static func vmarOpRange(_ table: borrowing HandleTable, _ a: InlineArray<6, UInt64>) throws(Status) {
+        let handle = UInt32(truncatingIfNeeded: a[0])
+        let vmar = try table.get(handle, type: .vmar)
+        let rights = try table.rights(of: handle)
+        let op = a[1]
+        let commitOp = UInt64(CROI_VMO_OP_COMMIT), decommitOp = UInt64(CROI_VMO_OP_DECOMMIT)
+        let mapRangeOp: UInt64 = 3, zeroOp = UInt64(CROI_VMO_OP_ZERO), dontNeedOp: UInt64 = 12, alwaysNeedOp: UInt64 = 13
+        let prefetchOp = UInt64(CROI_VMO_OP_PREFETCH)
+        let needed: Rights
+        switch op {
+        case commitOp, decommitOp, zeroOp: needed = .write
+        case prefetchOp, mapRangeOp: needed = .read
+        case dontNeedOp, alwaysNeedOp: needed = Rights()
+        default: throw .invalidArgs
+        }
+        guard rights.contains(needed) else { throw .accessDenied }
+        guard a[4] == 0, a[5] == 0 else { throw .invalidArgs }
+        let page = KernelLayout.pageSize
+        guard a[3] <= UInt64.max - (page - 1) else { throw .invalidArgs }
+        let length = (a[3] + page - 1) & ~(page - 1)
+        guard length > 0, a[2] % page == 0 else { throw .invalidArgs }
+        let v = VmarPointer(object: vmar.object).info
+        guard inside(a[2], length, v.base, v.size) else { throw .outOfRange }
+        let start = a[2], end = a[2] + length
+        let directOnly = op == commitOp || op == decommitOp || op == prefetchOp || !rights.contains(.opChildren)
+        struct Piece { let vmo: VmoPointer; let offset: UInt64; let size: UInt64; let base: UInt64 }
+        var pieces = UniqueArray<Piece>()
+        defer { for i in 0..<pieces.count { pieces[i].vmo.release() } }
+        try v.aspace.pointee.lock.withLock { () throws(Status) in
+            guard !v.aspace.pointee.dead else { throw .badState }
+            var expected = start
+            for i in 0..<v.aspace.pointee.mappings.count {
+                let m = v.aspace.pointee.mappings[i]
+                guard m.base < end, start < m.base + m.size else { continue }
+                if pieces.count > 0 || m.base > start { guard m.base == expected else { throw .badState } }
+                guard !directOnly || m.region == v.region else { throw .invalidArgs }
+                switch op {
+                case commitOp, decommitOp, zeroOp: guard m.rights.contains(.write) else { throw .accessDenied }
+                case prefetchOp: guard m.rights.contains(.read) else { throw .accessDenied }
+                default: break
+                }
+                let from = max(m.base, start), to = min(m.base + m.size, end)
+                m.vmo.retain()
+                pieces.append(Piece(vmo: m.vmo, offset: m.offset + (from - m.base), size: to - from, base: from))
+                expected = to
+            }
+            guard expected == end, pieces.count > 0 || start == end else { throw .badState }
+        }
+        for i in 0..<pieces.count {
+            let p = pieces[i]
+            switch op {
+            case commitOp:
+                try Pagers.ensureRange(p.vmo, p.offset, p.size)
+                try vm { () throws(VmError) in
+                    try Vmo.withBorrowed(p.vmo) { (vmo: borrowing Vmo) throws(VmError) in try vmo.commit(offset: p.offset, size: p.size) }
+                }
+                v.aspace.mapPresent(p.base, p.size)
+            case decommitOp:
+                guard case .anonymous = p.vmo.pointee.kind else { throw .notSupported }
+                try vm { () throws(VmError) in
+                    try Vmo.withBorrowed(p.vmo) { (vmo: borrowing Vmo) throws(VmError) in try vmo.decommit(offset: p.offset, size: p.size) }
+                }
+            case zeroOp:
+                try Pagers.ensureWritableRange(p.vmo, p.offset, p.size)
+                try vm { () throws(VmError) in
+                    try Vmo.withBorrowed(p.vmo) { (vmo: borrowing Vmo) throws(VmError) in try vmo.zero(offset: p.offset, size: p.size) }
+                }
+            case prefetchOp:
+                try Pagers.ensureRange(p.vmo, p.offset, p.size)
+                v.aspace.mapPresent(p.base, p.size)
+            case alwaysNeedOp:
+                try? Pagers.ensureRange(p.vmo, p.offset, p.size)  // errors ignored (Zircon's)
+                v.aspace.mapPresent(p.base, p.size)
+            case mapRangeOp:
+                v.aspace.mapPresent(p.base, p.size)
+            default:
+                break  // DONT_NEED: croi doesn't evict
+            }
+        }
     }
 
     private static func vmarUnmap(_ table: borrowing HandleTable, _ a: InlineArray<6, UInt64>) throws(Status) {

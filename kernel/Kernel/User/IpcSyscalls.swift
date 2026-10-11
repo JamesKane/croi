@@ -182,7 +182,8 @@ extension Syscalls {
             let object = try table.get(handle, rights: .signalPeer)
             try Channels.signalPeer(object.object, clear: UInt32(truncatingIfNeeded: a[1]),
                                     set: UInt32(truncatingIfNeeded: a[2]))
-        case 86:  // object_get_info(handle, topic, buffer, buffer_size)
+        case 86:  // object_get_info(handle, topic, buffer, buffer_size, size_t *actual, size_t *avail)
+            if try taskInfo(a, table) { return }  // K13e's topics (InfoTopics.swift)
             if a[1] == UInt64(CROI_INFO_VMAR) {
                 guard a[3] >= UInt64(MemoryLayout<croi_info_vmar_t>.size) else { throw .bufferTooSmall }
                 try check(a[2], MemoryLayout<croi_info_vmar_t>.size)

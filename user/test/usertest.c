@@ -3029,6 +3029,144 @@ static int64_t small_calls(const startup_t *s) {
   return 0;
 }
 
+// K13e part 2: info topics and vmar_op_range. A thread to inspect while
+// it waits on a port.
+static void port_sleeper(uint64_t port) {
+  croi_port_packet_t packet;
+  sys(CROI_SYS_PORT_WAIT, (uint32_t)port, now_ns() + 5000000000ull, (uint64_t)&packet, 0, 0);
+  sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
+}
+
+static int get_info(uint32_t handle, uint32_t topic, void *buffer, uint64_t size, uint64_t counts[2]) {
+  return (int)sys6(CROI_SYS_OBJECT_GET_INFO, handle, topic, (uint64_t)buffer, size, (uint64_t)&counts[0],
+                   (uint64_t)&counts[1]);
+}
+
+static int64_t info_topics(const startup_t *s) {
+  uint64_t counts[2] = {9, 9};
+  croi_info_process_t process = {0};
+  CHECK(510, get_info(s->process, CROI_INFO_PROCESS, &process, 8, counts) == ERR_BUFFER_TOO_SMALL &&
+                 counts[0] == 0 && counts[1] == 1 &&
+                 get_info(s->process, CROI_INFO_PROCESS, &process, sizeof process, counts) == 0 &&
+                 counts[0] == 1 && counts[1] == 1 && process.flags == CROI_INFO_PROCESS_FLAG_STARTED &&
+                 process.start_time > 0 && process.start_time <= (int64_t)now_ns());
+  // A thread waiting on a port: BLOCKED_PORT; its process's thread list
+  // has it; once it exits DEAD, and THREAD_STATS BAD_STATE.
+  uint32_t port = 0;
+  CHECK(511, sys(CROI_SYS_PORT_CREATE, 0, (uint64_t)&port, 0, 0, 0) == 0);
+  uint32_t sleeper = start_thread(s, port_sleeper, port);
+  croi_info_thread_t thread;  // filled by the kernel (a zero initializer would need memset on rv64)
+  thread.state = 0;
+  uint64_t give_up = now_ns() + 2000000000ull;
+  do {
+    get_info(sleeper, CROI_INFO_THREAD, &thread, sizeof thread, counts);
+  } while (thread.state != CROI_THREAD_STATE_BLOCKED_PORT && now_ns() < give_up);
+  uint64_t koids[64];
+  int listed = 0;
+  CHECK(512, thread.state == CROI_THREAD_STATE_BLOCKED_PORT && thread.cpu_affinity_mask[0] != 0 &&
+                 get_info(s->process, CROI_INFO_PROCESS_THREADS, koids, sizeof koids, counts) == 0 &&
+                 counts[0] == counts[1] && counts[1] >= 2);
+  for (uint64_t i = 0; i < counts[0]; i++) listed |= koids[i] == koid_of(sleeper);
+  croi_info_thread_stats_t stats = {0};
+  croi_port_packet_t wake = {0};
+  CHECK(513, listed && get_info(sleeper, CROI_INFO_THREAD_STATS, &stats, sizeof stats, counts) == 0 &&
+                 stats.last_scheduled_cpu != CROI_INFO_INVALID_CPU &&
+                 sys(CROI_SYS_PORT_QUEUE, port, (uint64_t)&wake, 0, 0, 0) == 0 &&
+                 (wait_for(sleeper, CROI_SIGNAL_TASK_TERMINATED, 3000000000ull) & CROI_SIGNAL_TASK_TERMINATED) &&
+                 get_info(sleeper, CROI_INFO_THREAD, &thread, sizeof thread, counts) == 0 &&
+                 thread.state == CROI_THREAD_STATE_DEAD &&
+                 get_info(sleeper, CROI_INFO_THREAD_STATS, &stats, sizeof stats, counts) == ERR_BAD_STATE);
+  sys(CROI_SYS_HANDLE_CLOSE, sleeper, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, port, 0, 0, 0, 0);
+  // Runtime: ours, and the job's at least as much; V1 is the first half.
+  croi_info_task_runtime_t mine, jobs;
+  CHECK(514, get_info(s->process, CROI_INFO_TASK_RUNTIME, &mine, sizeof mine, counts) == 0 && mine.cpu_time > 0 &&
+                 get_info(s->job, CROI_INFO_TASK_RUNTIME_V1, &jobs, 16, counts) == 0 &&
+                 jobs.cpu_time >= mine.cpu_time);
+  // Jobs: a child job listed, ZX_INFO_JOB not exited.
+  uint32_t child = 0;
+  croi_info_job_t job = {0};
+  CHECK(515, sys(CROI_SYS_JOB_CREATE, s->job, 0, (uint64_t)&child, 0, 0) == 0 &&
+                 get_info(s->job, CROI_INFO_JOB_CHILDREN, koids, sizeof koids, counts) == 0 && counts[1] >= 1 &&
+                 get_info(child, CROI_INFO_JOB, &job, sizeof job, counts) == 0 && job.exited == 0 &&
+                 get_info(child, CROI_INFO_JOB_PROCESSES, koids, 0, counts) == 0 && counts[0] == 0 && counts[1] == 0);
+  listed = 0;
+  get_info(s->job, CROI_INFO_JOB_CHILDREN, koids, sizeof koids, counts);
+  for (uint64_t i = 0; i < counts[0]; i++) listed |= koids[i] == koid_of(child);
+  CHECK(516, listed && sys(CROI_SYS_TASK_KILL, child, 0, 0, 0, 0) == 0 &&
+                 get_info(child, CROI_INFO_JOB, &job, sizeof job, counts) == 0 && job.exited == 1 &&
+                 job.return_code == -1024);
+  sys(CROI_SYS_HANDLE_CLOSE, child, 0, 0, 0, 0);
+  // A VMO: koid, name, size, committed bytes, flags, rights.
+  uint32_t vmo = 0;
+  uint64_t at = 0;
+  croi_info_vmo_t v;
+  CHECK(517, sys(CROI_SYS_VMO_CREATE, 2 * PAGE, 0, (uint64_t)&vmo, 0, 0) == 0 &&
+                 sys(CROI_SYS_OBJECT_SET_PROPERTY, vmo, CROI_PROP_NAME, (uint64_t)"inspected", 9, 0) == 0 &&
+                 sys(CROI_SYS_VMO_WRITE, vmo, (uint64_t)"x", 0, 1, 0) == 0 &&
+                 get_info(vmo, CROI_INFO_VMO, &v, sizeof v, counts) == 0 && v.koid == koid_of(vmo) &&
+                 v.name[0] == 'i' && v.name[8] == 'd' && v.size_bytes == 2 * PAGE && v.committed_bytes == PAGE &&
+                 v.flags == (CROI_INFO_VMO_TYPE_PAGED | CROI_INFO_VMO_VIA_HANDLE) && v.handle_rights != 0 &&
+                 v.num_mappings == 0 && v.cache_policy == CROI_CACHE_POLICY_CACHED &&
+                 get_info(vmo, CROI_INFO_VMO_V1, &v, 104, counts) == 0);
+  // Mapped: vmar_op_range commits and decommits through the mapping; the
+  // maps list it under the root VMAR; PROCESS_VMOS lists it twice.
+  CHECK(518, sys6(CROI_SYS_VMAR_MAP, s->vmar | (uint64_t)(CROI_VM_PERM_READ | CROI_VM_PERM_WRITE) << 32, 0, vmo, 0,
+                  2 * PAGE, (uint64_t)&at) == 0 &&
+                 sys6(CROI_SYS_VMAR_OP_RANGE, s->vmar, 99, at, PAGE, 0, 0) == ERR_INVALID_ARGS &&
+                 sys6(CROI_SYS_VMAR_OP_RANGE, s->vmar, CROI_VMAR_OP_COMMIT, at + 1, PAGE, 0, 0) == ERR_INVALID_ARGS &&
+                 sys6(CROI_SYS_VMAR_OP_RANGE, s->vmar, CROI_VMAR_OP_COMMIT, at, PAGE, 1, 0) == ERR_INVALID_ARGS &&
+                 sys6(CROI_SYS_VMAR_OP_RANGE, s->vmar, CROI_VMAR_OP_COMMIT, at, 3 * PAGE, 0, 0) == ERR_BAD_STATE &&
+                 sys6(CROI_SYS_VMAR_OP_RANGE, s->vmar, CROI_VMAR_OP_COMMIT, at, 2 * PAGE - 5, 0, 0) == 0 &&
+                 get_info(vmo, CROI_INFO_VMO, &v, sizeof v, counts) == 0 && v.committed_bytes == 2 * PAGE &&
+                 v.num_mappings == 1 && v.share_count == 1 &&
+                 sys6(CROI_SYS_VMAR_OP_RANGE, s->vmar, CROI_VMAR_OP_DECOMMIT, at, PAGE, 0, 0) == 0 &&
+                 get_info(vmo, CROI_INFO_VMO, &v, sizeof v, counts) == 0 && v.committed_bytes == PAGE &&
+                 *(volatile char *)at == 0 &&
+                 sys6(CROI_SYS_VMAR_OP_RANGE, s->vmar, CROI_VMAR_OP_DONT_NEED, at, 2 * PAGE, 0, 0) == 0 &&
+                 sys6(CROI_SYS_VMAR_OP_RANGE, s->vmar, CROI_VMAR_OP_MAP_RANGE, at, 2 * PAGE, 0, 0) == 0);
+  // Big buffers in a scratch mapping (no writable statics here).
+  uint32_t scratch_vmo = 0;
+  uint64_t scratch = 0;
+  CHECK(523, sys(CROI_SYS_VMO_CREATE, 16 * PAGE, 0, (uint64_t)&scratch_vmo, 0, 0) == 0 &&
+                 sys6(CROI_SYS_VMAR_MAP, s->vmar | (uint64_t)(CROI_VM_PERM_READ | CROI_VM_PERM_WRITE) << 32, 0,
+                      scratch_vmo, 0, 16 * PAGE, (uint64_t)&scratch) == 0);
+  croi_info_maps_t *maps = (croi_info_maps_t *)scratch;
+  int found = 0;
+  CHECK(519, get_info(s->process, CROI_INFO_PROCESS_MAPS, maps, 16 * PAGE, counts) == 0 && counts[0] >= 3 &&
+                 maps[0].type == CROI_INFO_MAPS_TYPE_ASPACE && maps[0].depth == 0 &&
+                 maps[1].type == CROI_INFO_MAPS_TYPE_VMAR && maps[1].depth == 1 && maps[1].name[0] == 'r');
+  for (uint64_t i = 0; i < counts[0]; i++) {
+    if (maps[i].type == CROI_INFO_MAPS_TYPE_MAPPING && maps[i].base == at) {
+      found = maps[i].size == 2 * PAGE && maps[i].depth == 2 && maps[i].name[0] == 'i' &&
+              maps[i].u.mapping.vmo_koid == koid_of(vmo) &&
+              maps[i].u.mapping.mmu_flags == (CROI_VM_PERM_READ | CROI_VM_PERM_WRITE);
+    }
+  }
+  croi_info_vmo_t *vmos = (croi_info_vmo_t *)scratch;
+  int via_handle = 0, via_mapping = 0;
+  CHECK(520, found && get_info(s->process, CROI_INFO_PROCESS_VMOS, vmos, 16 * PAGE, counts) == 0);
+  for (uint64_t i = 0; i < counts[0]; i++) {
+    if (vmos[i].koid != koid_of(vmo)) continue;
+    via_handle += (vmos[i].flags & CROI_INFO_VMO_VIA_HANDLE) != 0;
+    via_mapping += (vmos[i].flags & CROI_INFO_VMO_VIA_MAPPING) != 0;
+  }
+  // The handle table: our VMO's handle with its koid and rights.
+  croi_info_handle_extended_t *handles = (croi_info_handle_extended_t *)scratch;
+  found = 0;
+  CHECK(521, via_handle == 1 && via_mapping == 1 &&
+                 get_info(s->process, CROI_INFO_HANDLE_TABLE, handles, 16 * PAGE, counts) == 0 && counts[1] >= 4);
+  for (uint64_t i = 0; i < counts[0]; i++) {
+    found |= handles[i].handle_value == vmo && handles[i].koid == koid_of(vmo) && handles[i].type == 3;
+  }
+  CHECK(522, found);
+  sys(CROI_SYS_VMAR_UNMAP, s->vmar, at, 2 * PAGE, 0, 0);
+  sys(CROI_SYS_VMAR_UNMAP, s->vmar, scratch, 16 * PAGE, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, vmo, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, scratch_vmo, 0, 0, 0, 0);
+  return 0;
+}
+
 // K13b: FIFOs (Zircon's: records into the peer's ring, READABLE /
 // WRITABLE / PEER_CLOSED, user signals to the peer) and
 // vmo_replace_as_executable (a VMEX resource; the handle consumed).
@@ -3350,6 +3488,8 @@ static int64_t extensions(const startup_t *s) {
   if (pg != 0) return pg;
   int64_t small = small_calls(s);
   if (small != 0) return small;
+  int64_t topics = info_topics(s);
+  if (topics != 0) return topics;
   int64_t random = cprng_checks();
   if (random != 0) return random;
 
