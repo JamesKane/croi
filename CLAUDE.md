@@ -694,7 +694,9 @@ include/interrupt.h; syscalls 147 msi_allocate, 148 msi_create):
   and masks its entry.
 - amd64: vectors 0xB0..<0xF0 per CPU (`DeviceIrqs.allocateMsi`), handler
   table by (CPU, vector), message 0xFEE00000 | APIC ID << 12 (IDs above
-  255 NOT_SUPPORTED until interrupt remapping). set_affinity moves an
+  255 NOT_SUPPORTED), or with interrupt remapping (K12f) the remappable
+  format naming the (CPU, vector) entry, written by `DeviceIrqs.prepareMsi`
+  at msi_create and retarget and cleared by `releaseMsi`. set_affinity moves an
   MSI-X vector: a vector on the new CPU, the entry rewritten under its
   mask, the old vector dropped; plain MSI is NOT_SUPPORTED (the driver
   owns the capability). arm64 (ITS) and rv64 (IMSIC): NOT_SUPPORTED.
@@ -777,11 +779,43 @@ Intel VT-d, K12a (Kernel/Iommu/IntelIommu.swift):
   blocked) and then releases its quarantine. Behind an IOMMU,
   vmo_create_contiguous(bti) doesn't constrain physical placement.
 - Lock order: unitsLock (a Mutex) -> unit -> table, domain -> unit.
-- QEMU amd64 runs `-device intel-iommu,intremap=off` (before edu). Boot
+- QEMU amd64 runs `-device intel-iommu` (before edu; intremap=on,eim=on
+  under TCG, off under KVM: see interrupt remapping below). Boot
   test mode 18 (`ProcessSelfTest.runIommu`; startup word 5 is the first
   DRHD, a driver reads the DMAR itself): edu's DMA engine copies through
   pinned IOVAs, a write to a read-only and to an unpinned IOVA fault
   (QEMU prints its own lines for those), re-claim and re-bind.
+
+VT-d interrupt remapping and queued invalidation, K12f (Kernel/Iommu/
+InterruptRemapping.swift, IntelIommu.swift):
+- `Vtd.boot` (right after `Dmar.initialize`) brings up every DMAR unit:
+  registers, firmware's enables turned off, the invalidation queue where
+  ECAP.QI (256 128-bit descriptors; batches end with a wait descriptor
+  writing a sequence number to a polled page; FSTS.IQE logged; the
+  register interface only on units without one), the fault event (the
+  unit's own MSI isn't remapped: compatibility format, FEUADDR for x2APIC
+  ids). Translation starts at the first iommu_create bind
+  (`enableTranslation`); `Vtd.create` only binds boot's units.
+- Remapping on when the DMAR's INTR_REMAP flag, every unit's IR and QI,
+  EIM if the CPUs use x2APIC, and no `croi.intremap=off`: one 8192-entry
+  table shared by every unit (IRTA, EIME, SIRTP, global IEC, IRE; CFI
+  clear, so compatibility-format interrupts are blocked). Fixed entries:
+  GSI g -> g (IOAPIC pins get remappable RTEs, `IoApic.programRemapped`,
+  verified against the IOAPIC's source id from the DMAR's IOAPIC scopes
+  and the MADT ids `IoApic` now keeps), MSI (cpu, vector) -> 128 + cpu x
+  64 + vector - 0xB0 (linear, so multi-message subhandles land right;
+  a plain MSI verifies the requester id `Mcfg.requesterId` gives its
+  capability's address; MSI-X entries are unverified). A change is
+  invalidated (IEC by index) on every unit. With EIME, 32-bit APIC ids
+  are destinations: the 255 limits fall away.
+- QEMU: TCG boots run `intel-iommu,intremap=on,eim=on` (eim=auto leaves
+  EIM off under TCG); KVM boots (the bench) keep intremap=off, since KVM
+  needs a split irqchip for it, which would move the IOAPIC into QEMU and
+  change every interrupt timing on record. QEMU never sets GSTS.CFIS
+  (CFI can't be turned on to contrast) and blocks compatibility-format
+  MSIs when EIM is on. Mode 11's checks read either format; check 297
+  (remapped only): an old-style MSI from edu is not delivered. Test
+  `boot-intremap-off` keeps the compatibility path covered.
 
 AMD-Vi, K12b (Kernel/Iommu/AmdIommu.swift; croi's type CROI_IOMMU_TYPE_AMD
 = 0x10000 with croi_iommu_desc_amd_t, Zircon has none):

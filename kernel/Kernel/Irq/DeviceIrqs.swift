@@ -99,6 +99,19 @@ enum DeviceIrqs {
     /// target.
     static func configure(_ number: UInt32, level: Bool, activeLow: Bool, cpu: Int) throws(Status) {
         let target = unsafe UnsafePointer<PerCpu>(bitPattern: UInt(Smp.records[cpu]))!.pointee.hardwareId
+        #if arch(x86_64)
+        if InterruptRemapping.enabled {
+            // The entry first (vector 0x30 + GSI, the IOAPIC's source id),
+            // then the pin pointing at it.
+            guard InterruptRemapping.reaches(target) else { throw .notSupported }
+            InterruptRemapping.set(InterruptRemapping.gsiIndex(number), vector: IoApic.firstVector + number,
+                                   apicId: target, level: level, source: IoApic.sourceId(number))
+            controllerLock.withLock {
+                IoApic.programRemapped(number, level: level, activeLow: activeLow, index: InterruptRemapping.gsiIndex(number))
+            }
+            return
+        }
+        #endif
         try controllerLock.withLock { () throws(Status) in
             #if arch(x86_64)
             guard target <= 0xFF else { throw .notSupported }  // 8-bit destinations without remapping
@@ -216,13 +229,37 @@ enum DeviceIrqs {
         }
     }
 
-    /// What a device writes to deliver `vector` to `cpu`: the local APIC
-    /// message address (physical destination) and data (fixed, edge).
-    /// Nil for an APIC ID MSI can't name without interrupt remapping.
+    static func apicId(cpu: Int) -> UInt64 {
+        unsafe UnsafePointer<PerCpu>(bitPattern: UInt(Smp.records[cpu]))!.pointee.hardwareId
+    }
+
+    /// What a device writes to deliver `vector` to `cpu`. With interrupt
+    /// remapping, the remappable format naming its entry (written by
+    /// `prepareMsi`); else the local APIC message address (physical
+    /// destination) and data (fixed, edge). Nil for an APIC ID the format
+    /// can't name.
     static func msiMessage(cpu: Int, vector: UInt32) -> (address: UInt64, data: UInt32)? {
-        let apicId = unsafe UnsafePointer<PerCpu>(bitPattern: UInt(Smp.records[cpu]))!.pointee.hardwareId
+        let apicId = apicId(cpu: cpu)
+        if InterruptRemapping.enabled {
+            guard InterruptRemapping.reaches(apicId) else { return nil }
+            return InterruptRemapping.message(InterruptRemapping.msiIndex(cpu: cpu, vector: vector))
+        }
         guard apicId <= 0xFF else { return nil }
         return (0xFEE0_0000 | apicId << 12, vector)
+    }
+
+    /// With interrupt remapping: the entry `msiMessage` names, delivering
+    /// `vector` to `cpu` (edge), verifying `source` when known.
+    static func prepareMsi(cpu: Int, vector: UInt32, source: UInt16?) {
+        guard InterruptRemapping.enabled else { return }
+        InterruptRemapping.set(InterruptRemapping.msiIndex(cpu: cpu, vector: vector), vector: vector,
+                               apicId: apicId(cpu: cpu), level: false, source: source)
+    }
+
+    /// The entry no longer delivers (a device still using it faults).
+    static func releaseMsi(cpu: Int, vector: UInt32) {
+        guard InterruptRemapping.enabled else { return }
+        InterruptRemapping.clear(InterruptRemapping.msiIndex(cpu: cpu, vector: vector))
     }
 
     /// Installs `object` for `vector` on `cpu` (0 removes it). Once it

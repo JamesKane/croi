@@ -29,6 +29,17 @@ enum Mcfg {
         }
     }
 
+    /// The requester id whose configuration space holds `physical`, if an
+    /// ECAM window covers it.
+    static func requesterId(_ physical: UInt64) -> UInt16? {
+        for i in 0..<count {
+            let size = (UInt64(windows[i].endBus) - UInt64(windows[i].startBus) + 1) << 20
+            guard physical >= windows[i].base, physical - windows[i].base < size else { continue }
+            return UInt16(truncatingIfNeeded: UInt64(windows[i].startBus) << 8 + ((physical - windows[i].base) >> 12))
+        }
+        return nil
+    }
+
     /// The physical address of a function's 4 KiB configuration space.
     static func configSpace(segment: UInt16, deviceId: UInt16) -> UInt64? {
         let bus = UInt8(deviceId >> 8)

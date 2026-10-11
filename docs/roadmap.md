@@ -735,8 +735,19 @@ the SMC resource.
   formats. Not yet: interrupts (IMSIC MSIs, wired lines), MSI page
   tables (interrupt remapping), ATS/PRI, process directories, second
   stage. QEMU 10.2 builds no RIMT for its platform IOMMU (`iommu-sys`).
-- **K12f and on:** interrupt remapping for all of them (amd64's MSIs to
-  APIC ids above 255 wait on it).
+- **K12f: VT-d interrupt remapping.** **Done** (2026-10-11). The
+  kernel brings VT-d units up at boot with queued invalidation and, where
+  the platform offers it, remaps every IOAPIC pin and MSI through one
+  shared table (fixed entries per GSI and per CPU and vector; source ids
+  verified for IOAPICs and plain MSIs; compatibility format blocked),
+  x2APIC destinations included: MSIs and IOAPIC routes to APIC ids above
+  255 work. iommu_create binds boot's units. Not yet: posted interrupts,
+  source verification for MSI-X, IOAPIC scopes behind bridges. Bench
+  (KVM) boots keep remapping off (QEMU needs a split irqchip for it).
+- **K12g: AMD-Vi interrupt remapping** (per-device remapping tables,
+  IOAPIC device ids from the IVRS, GA mode for x2APIC). The arm64 side
+  is the GICv3 ITS and the rv64 side the IMSIC (with the RISC-V IOMMU's
+  MSI page tables): both are their own steps.
 
 ### K13a (agreed with Todhchai, 2026-10-11): VMO slices and ZERO_CHILDREN
 

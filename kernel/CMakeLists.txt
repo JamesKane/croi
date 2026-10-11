@@ -58,6 +58,7 @@ add_library(kernel-swift OBJECT
   Kernel/Object/Dma.swift
   Kernel/Iommu/IoDomain.swift
   Kernel/Iommu/IntelIommu.swift
+  Kernel/Iommu/InterruptRemapping.swift
   Kernel/Iommu/AmdIommu.swift
   Kernel/Iommu/SmmuV3.swift
   Kernel/Iommu/SmmuV2.swift

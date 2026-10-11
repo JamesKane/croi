@@ -182,7 +182,11 @@ enum MsiInterrupts {
         let state = MsiStatePointer(address: UInt64(UInt(bitPattern: raw)))
         InterruptPointer(object: object).pointee.msi = state.address
 
-        // MSI-X: masked, pointed at the vector. Then deliverable.
+        // With interrupt remapping, the entry the message names (a plain
+        // MSI's capability tells which function it is; an MSI-X table
+        // doesn't). MSI-X: masked, pointed at the vector. Then deliverable.
+        DeviceIrqs.prepareMsi(cpu: state.pointee.cpu, vector: state.pointee.vector,
+                              source: msix ? nil : Mcfg.requesterId(base + first))
         if msix {
             setMasked(state, true)
             program(state)
@@ -232,6 +236,7 @@ enum MsiInterrupts {
         guard cpu != state.pointee.cpu else { return }
         guard DeviceIrqs.msiMessage(cpu: cpu, vector: DeviceIrqs.msiFirstVector) != nil else { throw .notSupported }
         guard let vector = DeviceIrqs.allocateMsi(cpu: cpu, count: 1) else { throw .noResources }
+        DeviceIrqs.prepareMsi(cpu: cpu, vector: vector, source: nil)
         DeviceIrqs.setMsiHandler(cpu: cpu, vector: vector, object.address)
         setMasked(state, true)
         let (oldCpu, oldVector, oldOwn) = (state.pointee.cpu, state.pointee.vector, state.pointee.ownVector)
@@ -241,6 +246,7 @@ enum MsiInterrupts {
         program(state)
         if !masked { setMasked(state, false) }
         DeviceIrqs.setMsiHandler(cpu: oldCpu, vector: oldVector, 0)
+        DeviceIrqs.releaseMsi(cpu: oldCpu, vector: oldVector)
         if oldOwn { DeviceIrqs.freeMsi(cpu: oldCpu, vector: oldVector, count: 1) }
         #else
         throw .notSupported
@@ -252,6 +258,7 @@ enum MsiInterrupts {
         setMasked(state, true)
         #if arch(x86_64)
         DeviceIrqs.setMsiHandler(cpu: state.pointee.cpu, vector: state.pointee.vector, 0)
+        DeviceIrqs.releaseMsi(cpu: state.pointee.cpu, vector: state.pointee.vector)
         #endif
     }
 

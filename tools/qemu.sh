@@ -60,8 +60,13 @@ case $arch in
     # edu (00:10.0): a PCI device with MSI (K9d) and DMA for the boot
     # tests, behind QEMU's VT-d (K12a) or AMD-Vi (K12b), which must come
     # before the other devices.
+    # VT-d with interrupt remapping (K12f) under TCG; KVM refuses it unless
+    # the irqchip is split (the IOAPIC in QEMU), which would change every
+    # interrupt timing the bench records, so KVM boots keep it off.
+    intremap=on
+    [[ " $* " == *" kvm "* ]] && intremap=off
     case $iommu in
-      intel) iommu_device=intel-iommu,intremap=off ;;
+      intel) iommu_device=intel-iommu,intremap=$intremap; [[ $intremap == on ]] && iommu_device+=,eim=on ;;
       amd) iommu_device=amd-iommu,intremap=off,dma-remap=on ;;
       *) echo "qemu.sh: --iommu takes intel or amd" >&2; exit 2 ;;
     esac

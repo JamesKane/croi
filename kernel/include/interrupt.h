@@ -64,6 +64,10 @@ enum : uint32_t {
 
 // zx_info_msi_t.
 typedef struct {
+  // The device writes target_data + n for id n to target_addr. With
+  // interrupt remapping (amd64 VT-d, K12f) the address is in the
+  // remappable format (bit 4) naming the kernel's entry for id 0 and the
+  // data is 0; else the compatibility format with the vector as data.
   uint64_t target_addr;      // the address the device writes
   uint32_t target_data;      // the data for id 0; id n writes target_data + n
   uint32_t base_irq_id;      // the first vector

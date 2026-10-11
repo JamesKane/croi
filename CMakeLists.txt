@@ -152,6 +152,22 @@ add_test(NAME boot-reboot
           ${CROI_ARCH} ${_esp_reboot} ${CMAKE_BINARY_DIR}/qemu-reboot ${CROI_EDK2_DIR})
 set_tests_properties(boot-reboot PROPERTIES TIMEOUT 120)
 
+if(CROI_ARCH STREQUAL amd64)
+  # Interrupt remapping off (K12f): TCG boots remap every interrupt, so
+  # this keeps the compatibility-format MSI and IOAPIC paths covered.
+  set(_esp_intremap ${CMAKE_BINARY_DIR}/esp-intremap-off)
+  file(CONFIGURE OUTPUT ${CMAKE_BINARY_DIR}/cmdline-intremap-off
+       CONTENT "${CROI_CMDLINE} userboot.next=${CROI_USERBOOT_NEXT}${_shutdown} croi.intremap=off\n")
+  add_custom_target(esp-intremap-off ALL
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CROI_ESP_DIR} ${_esp_intremap}
+    COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_BINARY_DIR}/cmdline-intremap-off ${_esp_intremap}/croi/cmdline
+    DEPENDS esp)
+  add_test(NAME boot-intremap-off
+    COMMAND ${CROI_QEMU} --test "${CROI_BOOT_DONE}" ${CROI_EXITS}
+            ${CROI_ARCH} ${_esp_intremap} ${CMAKE_BINARY_DIR}/qemu-intremap-off ${CROI_EDK2_DIR})
+  set_tests_properties(boot-intremap-off PROPERTIES TIMEOUT 180)
+endif()
+
 if(CROI_ARCH STREQUAL rv64)
   # The RISC-V IOMMU without MSI_FLAT: base device contexts in a 2-level
   # directory (the default boot has extended ones in 3 levels; K12e).

@@ -245,6 +245,7 @@ enum IoApic {
         var mmio: UInt64 = 0
         var gsiBase: UInt32 = 0
         var pins: UInt32 = 0
+        var id: UInt8 = 0  // the MADT's IOAPIC id (the DMAR's scopes name it)
     }
     nonisolated(unsafe) private static var chips = InlineArray<8, Chip>(repeating: Chip())
     nonisolated(unsafe) private static var chipCount = 0
@@ -283,7 +284,8 @@ enum IoApic {
                 write(mmio, 0x10 + 2 * pin, 1 << 16)  // masked, vector 0
                 write(mmio, 0x11 + 2 * pin, 0)
             }
-            chips[chipCount] = Chip(mmio: mmio, gsiBase: entry.load(fromByteOffset: 8, as: UInt32.self), pins: count)
+            chips[chipCount] = Chip(mmio: mmio, gsiBase: entry.load(fromByteOffset: 8, as: UInt32.self), pins: count,
+                                    id: entry.load(fromByteOffset: 2, as: UInt8.self))
             chipCount += 1
             pins += Int(count)
         }
@@ -328,6 +330,28 @@ enum IoApic {
         write(mmio, 0x10 + 2 * pin, 1 << 16)
         write(mmio, 0x11 + 2 * pin, UInt32(apicId) << 24)
         write(mmio, 0x10 + 2 * pin, low)
+    }
+
+    /// Programs `gsi`'s entry (masked) in the remappable format, pointing
+    /// at interrupt remapping table entry `index` (bit 48; the index in bits
+    /// 63:49 and 11). Vector and trigger mode match the entry's (EOI uses
+    /// them). Controller lock held.
+    static func programRemapped(_ gsi: UInt32, level: Bool, activeLow: Bool, index: Int) {
+        guard let (mmio, pin) = pin(gsi) else { return }
+        var low: UInt32 = (firstVector + gsi) | 1 << 16 | UInt32((index >> 15) & 1) << 11
+        if activeLow { low |= 1 << 13 }
+        if level { low |= 1 << 15 }
+        write(mmio, 0x10 + 2 * pin, 1 << 16)
+        write(mmio, 0x11 + 2 * pin, 1 << 16 | UInt32(index & 0x7FFF) << 17)
+        write(mmio, 0x10 + 2 * pin, low)
+    }
+
+    /// The source id `gsi`'s IOAPIC sends interrupts with, if the DMAR says.
+    static func sourceId(_ gsi: UInt32) -> UInt16? {
+        for i in 0..<chipCount where gsi >= chips[i].gsiBase && gsi - chips[i].gsiBase < chips[i].pins {
+            return Dmar.ioApicSource(chips[i].id)
+        }
+        return nil
     }
 
     /// Masks or unmasks `gsi`. Controller lock held.
