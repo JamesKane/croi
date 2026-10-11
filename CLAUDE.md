@@ -858,7 +858,9 @@ Todhchai M4's shutdown):
   process, a kernel thread holding it prints its threads,
   `Scheduler.dump` (with eligibility timers, period starts, kill marks)
   and, from each CPU running one of its threads, where it was
-  interrupted plus a frame-pointer backtrace (`Ipi.requestReport`, a
+  interrupted plus a frame-pointer backtrace, and for each live thread
+  the syscall it entered by and (amd64) its switched-out kernel frames
+  (`Ipi.requestReport`, a
   mailbox kind that doesn't wait; addresses as they are, for
   llvm-symbolizer) if it isn't dead. It holds the process that second,
   so self-tests' leak checks see it later.

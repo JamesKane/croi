@@ -539,6 +539,39 @@ enum Processes {
         }
     }
 
+    /// One live thread of a stuck process: the syscall (or trap) it
+    /// entered by, and on amd64 the kernel return addresses from its saved
+    /// context (raw, for llvm-symbolizer). Racy: a diagnostic.
+    private static func describe(_ thread: ThreadPointer, index: UInt32, _ console: Uart) {
+        console.write("  thread ")
+        console.write(decimal: UInt64(index))
+        let user = unsafe UserTraps.userFrame(of: thread)
+        if unsafe ExceptionFrame.isSyscall(user.pointee) {
+            console.write(" in syscall ")
+            console.write(decimal: unsafe ExceptionFrame.syscallNumber(user.pointee))
+        } else {
+            console.write(" in a trap")
+        }
+        console.write(" from user pc ")
+        console.write(hex: unsafe ExceptionFrame.programCounter(user.pointee))
+        #if arch(x86_64)
+        if thread != Scheduler.current, thread.pointee.state != .running {
+            // arch_context_switch's frame: r15 r14 r13 r12 rbx rbp, return.
+            let saved = unsafe UnsafePointer<UInt64>(bitPattern: UInt(thread.pointee.savedSp))!
+            var frames = InlineArray<16, UInt64>(repeating: 0)
+            frames[0] = unsafe saved[6]
+            var count = 1
+            unsafe Sampler.walkKernel(saved[5], stack: thread.pointee.savedSp, &frames, &count, encode: false)
+            console.write(", kernel frames:")
+            for i in 0..<count {
+                console.write(" ")
+                console.write(hex: frames[i])
+            }
+        }
+        #endif
+        console.write("\n")
+    }
+
     private static let killWatch: Thread.Entry = { address in
         let object = ObjectPointer(address: address)
         let process = ProcessPointer(object: object)
@@ -561,6 +594,15 @@ enum Processes {
                 }
             }
             console.write("\n")
+            // Where each live one entered the kernel, and (amd64) the
+            // kernel frames it switched out in.
+            object.header.lock.withLock {
+                for i in 0..<process.pointee.threads.count {
+                    let thread = ThreadObjectPointer(object: ObjectPointer(address: process.pointee.threads[i]))
+                    guard thread.pointee.thread != 0 else { continue }
+                    describe(ThreadPointer(address: thread.pointee.thread), index: thread.pointee.index, console)
+                }
+            }
             // Where each of its threads that is running elsewhere is.
             let masked = arch_interrupts_save()
             let running = Scheduler.cpusRunning(processOf: object)

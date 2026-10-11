@@ -143,7 +143,7 @@ enum Sampler {
 
     /// Kernel frames: only within the 16 KiB stack `stack` points into (by
     /// the stack geometry, stack.h), each frame above the last.
-    private static func walkKernel(_ start: UInt64, stack: UInt64, _ frames: inout InlineArray<16, UInt64>,
+    static func walkKernel(_ start: UInt64, stack: UInt64, _ frames: inout InlineArray<16, UInt64>,
                                    _ count: inout Int, encode: Bool) {
         let size = UInt64(CROI_KERNEL_STACK_SIZE)
         let base = stack & ~(2 * size - 1)
