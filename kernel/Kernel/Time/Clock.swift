@@ -1,5 +1,6 @@
 import _Volatile
 import CKernel
+import Synchronization
 import PageTables
 
 /// The monotonic clock: nanoseconds since kernel entry (K9f: so boot
@@ -17,6 +18,8 @@ enum Clock {
     /// The counter at kernel entry, the clock's zero.
     nonisolated(unsafe) private static var entry: UInt64 = 0
     nonisolated(unsafe) private static var mult: UInt64 = 0
+    /// ns = (counter delta * multiplier) >> 32.
+    static var multiplier: UInt64 { mult }
     /// Physical address of the time page (for mapping into user space).
     nonisolated(unsafe) private(set) static var timePage: UInt64 = 0
 
@@ -122,22 +125,30 @@ enum X86TimeSources {
                 return tsc
             }
         }
-        guard let hpet = acpi.table("HPET") else { return 0 }
-        let address = acpi.withTable(hpet) { (table: RawSpan) -> UInt64 in
-            table.byteCount >= 52 ? table.load(fromByteOffset: 44, as: UInt64.self) : 0
+        // A hypervisor's timing leaf (KVM/QEMU, VMware: EAX = TSC kHz): the
+        // frequency it converts our TSC deadlines with. Ours from the HPET
+        // was ~24 ppm off under KVM, so a 60 s deadline came 1.4 ms early.
+        cpuid(1, &regs)
+        if regs[2] & (1 << 31) != 0 {
+            cpuid(0x4000_0000, &regs)
+            if regs[0] >= 0x4000_0010 {
+                cpuid(0x4000_0010, &regs)
+                if regs[0] != 0 {
+                    calibratedBy = "hypervisor leaf 0x40000010"
+                    let tsc = UInt64(regs[0]) * 1000
+                    calibrateApicTimer(tscFrequency: tsc)
+                    return tsc
+                }
+            }
         }
-        guard address != 0 else { return 0 }
-        let mmio: UInt64
-        do throws(VmError) {
-            mmio = try kernelAspace.mapPhysical(address & ~(KernelLayout.pageSize - 1), size: KernelLayout.pageSize,
-                                                MapAttributes(writable: true, cache: .device, global: true))
-                + (address & (KernelLayout.pageSize - 1))
-        } catch {
-            return 0
+        let hpetMapped = mapHpet(acpi)
+        if let tsc = kvmTscFrequency() {
+            calibratedBy = "kvmclock"
+            calibrateApicTimer(tscFrequency: tsc)
+            startSkew(hpetMapped)
+            return tsc
         }
-        let period = read64(mmio) >> 32  // femtoseconds per HPET tick
-        guard period > 0, period <= 100_000_000 else { return 0 }
-        write64(mmio + 0x10, read64(mmio + 0x10) | 1)  // ENABLE_CNF
+        guard let (mmio, period) = hpetMapped else { return 0 }
 
         // 10 ms of HPET ticks, timed by the TSC.
         let ticks = 10_000_000_000_000 / period
@@ -154,7 +165,103 @@ enum X86TimeSources {
         calibratedBy = "HPET"
         let tsc = femtoseconds.dividingFullWidth(scaled).quotient
         calibrateApicTimer(tscFrequency: tsc)
+        startSkew(hpetMapped)
         return tsc
+    }
+
+    /// The HPET, mapped and counting, with its period (fs), if there is one.
+    private static func mapHpet(_ acpi: AcpiTables) -> (mmio: UInt64, period: UInt64)? {
+        guard let hpet = acpi.table("HPET") else { return nil }
+        let address = acpi.withTable(hpet) { (table: RawSpan) -> UInt64 in
+            table.byteCount >= 52 ? table.load(fromByteOffset: 44, as: UInt64.self) : 0
+        }
+        guard address != 0 else { return nil }
+        let mmio: UInt64
+        do throws(VmError) {
+            mmio = try kernelAspace.mapPhysical(address & ~(KernelLayout.pageSize - 1), size: KernelLayout.pageSize,
+                                                MapAttributes(writable: true, cache: .device, global: true))
+                + (address & (KernelLayout.pageSize - 1))
+        } catch {
+            return nil
+        }
+        let period = read64(mmio) >> 32  // femtoseconds per HPET tick
+        guard period > 0, period <= 100_000_000 else { return nil }
+        write64(mmio + 0x10, read64(mmio + 0x10) | 1)  // ENABLE_CNF
+        return (mmio, period)
+    }
+
+    // MARK: Skew (K10f)
+
+    /// Under a hypervisor, the TSC deadline is turned into a host timer on
+    /// the host's clock (NTP-disciplined), while our clock is the TSC at
+    /// its nominal rate: KVM's 60 s deadline came ~1.7 ms early (~28 ppm).
+    /// The HPET runs on the host's clock, so TSC time against HPET time
+    /// over a second or more gives the skew, which `Timers` arms long
+    /// deadlines later by.
+    nonisolated(unsafe) private static var skewHpet: (mmio: UInt64, period: UInt64)? = nil
+    nonisolated(unsafe) private static var skewBase: (tsc: UInt64, hpet: UInt64) = (0, 0)
+
+    private static func startSkew(_ hpet: (mmio: UInt64, period: UInt64)?) {
+        var regs = InlineArray<4, UInt32>(repeating: 0)
+        cpuid(1, &regs)
+        guard regs[2] & (1 << 31) != 0, let hpet else { return }  // hypervisors only
+        skewHpet = hpet
+        skewBase = (arch_counter_read(), read64(hpet.mmio + 0xF0))
+    }
+
+    /// How much slower our clock runs than the HPET's, in ppm (positive:
+    /// hardware deadlines come early), over everything since boot (at
+    /// least 100 ms); nil without a measurement.
+    static func skewPpm() -> Int64? {
+        guard let hpet = skewHpet else { return nil }
+        let tsc = arch_counter_read() &- skewBase.tsc
+        let hpetNs = (read64(hpet.mmio + 0xF0) &- skewBase.hpet).multipliedFullWidth(by: hpet.period)
+        let ours = tsc.multipliedFullWidth(by: Clock.multiplier)
+        let oursNs = Int64(ours.high << 32 | ours.low >> 32)
+        let theirsNs = Int64(UInt64(1_000_000).dividingFullWidth(hpetNs).quotient)
+        guard theirsNs >= 100_000_000 else { return nil }
+        return (theirsNs - oursNs) * 1_000_000 / theirsNs
+    }
+
+    /// KVM's own TSC frequency, from one kvmclock reading: its
+    /// tsc_to_system_mul and tsc_shift come from the same guest TSC kHz
+    /// KVM converts TSC deadlines with (an HPET calibration was ~24 ppm
+    /// off, and long deadlines fired early). The page is registered, read
+    /// and unregistered; kvmclock isn't the kernel's clock.
+    private static func kvmTscFrequency() -> UInt64? {
+        var regs = InlineArray<4, UInt32>(repeating: 0)
+        cpuid(1, &regs)
+        guard regs[2] & (1 << 31) != 0 else { return nil }
+        cpuid(0x4000_0000, &regs)
+        // "KVMKVMKVM\0\0\0" in EBX ECX EDX.
+        guard regs[1] == 0x4B4D_564B, regs[2] == 0x564B_4D56, regs[3] == 0x0000_004D, regs[0] >= 0x4000_0001 else {
+            return nil
+        }
+        cpuid(0x4000_0001, &regs)
+        guard regs[0] & (1 << 3) != 0 else { return nil }  // KVM_FEATURE_CLOCKSOURCE2
+        guard let page = pmm.allocatePage(.wired) else { return nil }
+        defer { pmm.free(page) }
+        let record = unsafe UnsafeMutableRawPointer(bitPattern: UInt(KernelLayout.physmap(page)))!
+        unsafe record.initializeMemory(as: UInt8.self, repeating: 0, count: 32)
+        arch_wrmsr(0x4B56_4D01, page | 1)  // MSR_KVM_SYSTEM_TIME_NEW, enabled
+        var mul: UInt32 = 0
+        var shift: Int8 = 0
+        for _ in 0..<1000 {  // pvclock_vcpu_time_info under its version seqlock
+            let version = unsafe record.load(fromByteOffset: 0, as: UInt32.self)
+            atomicMemoryFence(ordering: .acquiring)
+            mul = unsafe record.load(fromByteOffset: 24, as: UInt32.self)
+            shift = unsafe record.load(fromByteOffset: 28, as: Int8.self)
+            atomicMemoryFence(ordering: .acquiring)
+            if version & 1 == 0, version != 0, unsafe record.load(fromByteOffset: 0, as: UInt32.self) == version { break }
+            mul = 0
+        }
+        arch_wrmsr(0x4B56_4D01, 0)  // off before the page goes back
+        guard mul != 0, shift > -32, shift < 32 else { return nil }
+        // ns = ((tsc << shift) * mul) >> 32: Hz = 1e9 * 2^32 / mul / 2^shift.
+        let scaled = UInt64(1_000_000_000) << 32
+        let hz = shift >= 0 ? scaled / UInt64(mul) >> UInt64(shift) : (scaled / UInt64(mul)) << UInt64(-shift)
+        // KVM's mul comes from whole kHz: round to one.
+        return (hz + 500) / 1000 * 1000
     }
 
     /// Counts local APIC timer ticks over 10 ms of TSC.

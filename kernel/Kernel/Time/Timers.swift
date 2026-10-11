@@ -21,6 +21,10 @@ struct TimerQueue {
     /// `Timers.program`).
     var programmed: UInt64 = .max
     var interrupts: UInt64 = 0
+    /// The hardware's own target (monotonic ns, `programmed` plus the
+    /// lead) and when it was set: what an early interrupt is measured by.
+    var hardwareTarget: UInt64 = 0
+    var hardwareArmedAt: UInt64 = 0
 }
 
 /// Tickless per-CPU one-shot timers (roadmap K2b). The hardware is armed
@@ -147,6 +151,17 @@ enum Timers {
         if earliest == .max { disarmHardware() } else { armHardware(atNanoseconds: earliest) }
     }
 
+    /// How early timer hardware fires, in parts per million of the
+    /// distance it was armed for (KVM's TSC deadline: ~28, the host clock
+    /// against our TSC); long deadlines are armed that much later. Seeded
+    /// once from the measured skew (amd64 under a hypervisor), raised by
+    /// any interrupt that still comes early. Shared: the skew is the
+    /// host's. Racy updates are fine (a few ppm either way).
+    nonisolated(unsafe) static var leadPpm: UInt64 = 0
+    /// When the skew was last measured (ns since entry): it is measured
+    /// again, over a longer baseline, once that has doubled.
+    nonisolated(unsafe) private static var skewMeasuredAt: UInt64 = 0
+
     /// The most a timer interrupt waits for a deadline it came before.
     static var earlyTolerance: UInt64 { 1_000_000 }
 
@@ -163,6 +178,17 @@ enum Timers {
         var earliest = UInt64.max
         for i in 0..<32 where unsafe queue.pointee.entries[i].id != 0 {
             earliest = min(earliest, unsafe queue.pointee.entries[i].deadline)
+        }
+        // An interrupt before the hardware's own target teaches the lead:
+        // in ppm of the distance it was armed for (ten ms or more, and
+        // under 1%, so a stale or odd reading can't teach nonsense).
+        let target = unsafe queue.pointee.hardwareTarget, armedAt = unsafe queue.pointee.hardwareArmedAt
+        if target > now, target > armedAt, target - armedAt >= 10_000_000 {
+            let early = target - now, distance = target - armedAt
+            if early < distance / 100 {
+                let ppm = early * 1_000_000 / distance + 1
+                leadPpm = min(leadPpm + ppm, 2_000)
+            }
         }
         if earliest > now, earliest - now <= earlyTolerance {
             while now < earliest {
@@ -226,8 +252,29 @@ enum Timers {
         armHardware(atNanoseconds: earliest)
     }
 
-    private static func armHardware(atNanoseconds ns: UInt64) {
+    private static func armHardware(atNanoseconds requested: UInt64) {
         let now = arch_counter_read()
+        // Later by the learned lead (K10f: a 60 s sleep came ~1.4 ms early
+        // under KVM, past what an interrupt waits out, and re-arming was a
+        // second wakeup). At worst a long timer runs a few ppm late.
+        let queue = unsafe self.queue
+        let nowNs = Clock.nanoseconds(counter: now)
+        let distance = requested > nowNs ? requested - nowNs : 0
+        #if arch(x86_64)
+        // A long deadline is when the skew matters: measure it (an HPET
+        // read, a VM exit) when the baseline has doubled since last time.
+        if distance >= 1_000_000_000, nowNs >= 200_000_000, nowNs >= 2 * skewMeasuredAt {
+            skewMeasuredAt = nowNs
+            if let ppm = X86TimeSources.skewPpm(), ppm > 0, ppm < 1_000 {
+                leadPpm = max(leadPpm, UInt64(ppm) + 5)  // +5: a short baseline's error
+            }
+        }
+        #endif
+        let lead = leadPpm
+        let extra = min(distance, 1 << 40) * lead / 1_000_000
+        let ns = requested &+ extra < requested ? .max : requested + extra
+        unsafe queue.pointee.hardwareTarget = ns
+        unsafe queue.pointee.hardwareArmedAt = nowNs
         let counter = max(Clock.counter(atNanoseconds: ns), now + 1)
         #if arch(x86_64)
         if deadlineMode {

@@ -916,10 +916,18 @@ resource.h CROI_INFO_CPU_STATS, Smp.swift `CpuStats`):
   which then saw the waiter's value reached and armed nothing: the
   waiter slept until its deadline (m2 on rv64 under host load, ~1 boot
   in 5). `watchLocked` now notifies observers already satisfied.
-- A timer interrupt that comes before the earliest deadline by at most
-  1 ms (`Timers.earlyTolerance`) waits for it rather than re-arming:
-  KVM's TSC deadline fired ~240 us early for a 10 s sleep (~24 ppm),
-  and the re-arm was a second wakeup. Settled again right before the
+- Early timer interrupts (each re-arm was a second wakeup): under KVM a
+  TSC deadline becomes a host timer on the host's NTP-disciplined clock,
+  ~28-34 ppm ahead of our TSC time here (a 60 s sleep came ~1.7 ms
+  early). On amd64 under a hypervisor the skew is measured against the
+  HPET (which runs on the host's clock) when a deadline 1 s or more out
+  is armed and the baseline from boot has doubled; `Timers.leadPpm`
+  (shared) arms long deadlines that much later, and an interrupt that
+  still comes early raises it. One that comes at most 1 ms early
+  (`Timers.earlyTolerance`) waits for the deadline. Timers never run
+  early; a long one may run a few ppm late. The TSC frequency comes
+  from kvmclock's scale when KVM offers it (no 10 ms HPET loop at boot),
+  or a hypervisor leaf 0x40000010. Settled again right before the
   halt (an idle thread switched away mid-poll resumes past the first).
 - Left: the SBSA watchdog's refresh, now every 20-25 s with slack
   (`croi.watchdog=off` removes it; QEMU has none). The debuglog dumper,
