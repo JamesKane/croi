@@ -90,7 +90,7 @@ as information).
 | 11 | Job, process, thread, exceptions, job policy | **Done** (K7a, K7d) |
 | 12 | userboot + bootfs | **Done** (K8b) |
 | 18 (core) | ktrace rings, categories, user marks, tick and PMU sampling, per-thread PMU counters | **Done** (K3–K6, see "Trace" below) |
-| 13 | Resources, interrupt objects, MSI | **Done** except SMC: resources and physical VMOs (K9a), interrupt objects (K9c), MSI/MSI-X on amd64 (K9d), the GICv3 ITS (K12h), RISC-V AIA (K12i). Not yet: the SMC resource and `smc_call` |
+| 13 | Resources, interrupt objects, MSI, SMC | **Done**: resources and physical VMOs (K9a), interrupt objects (K9c), MSI/MSI-X on amd64 (K9d), the GICv3 ITS (K12h), RISC-V AIA (K12i), `smc_call` (K13i) |
 | 14 | BTI/PMT and IOMMUs | **Done** (K9e, K12): VT-d, AMD-Vi, SMMUv3, SMMUv2 (unverified on hardware), the RISC-V IOMMU, interrupt remapping |
 | 15 | FIFO, counter, stream, socket, clock, debuglog | **Done** (K8a, K10a, K13b, K13c, K13f) |
 | 16 | Pager | **Done** (K13d, K13h); no eviction yet |
@@ -825,6 +825,10 @@ THREAD, VMO, maps, handle table) and the NAME property.
   that can be), process_read/write_memory; debugger channels (process and
   job), PROCESS/THREAD_STARTING and THREAD_EXITING, second chance,
   exception reports; single-step and hardware breakpoints (amd64, arm64).
+- **K13i: smc_call.** **Done** (2026-10-11): Zircon's call and layouts,
+  SMC resources by function-ID range, the FADT's conduit, the kernel's
+  PSCI calls refused, Qualcomm's resume protocol behind
+  `croi.smccc_qcom=on`.
 - **K13h: resizable VMOs.** **Done** (2026-10-11): RESIZABLE for VMOs,
   snapshot children and pager VMOs, vmo_set_size, mapping past the end,
   a pager VMO's grown space as dirty zeros. Still not: UNBOUNDED,
@@ -837,8 +841,6 @@ What is still open after K13, gathered from the milestones above, CLAUDE.md's
 from Zircon, see docs/zircon-divergences.md.
 
 **Todhchai's requirements and extensions**
-- Requirement 13: the SMC resource and `smc_call` (arm64 boards' SCMI;
-  scoped by function-ID range, the board review's extension).
 - Requirement 19: keeping a crashed process frozen for post-mortem attach.
 - Requirement 3: page loaning for contiguous VMOs (the Q8B fragmentation
   answer); ACPI-reclaim memory stays wired.

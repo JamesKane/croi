@@ -137,3 +137,33 @@ typedef struct {
 
 static_assert(sizeof(croi_info_kmem_stats_t) == 152);
 static_assert(sizeof(croi_info_kmem_stats_v1_t) == 72);
+
+// smc_call (K13i; Zircon's zx_smc_call, arm64 only): an SMCCC call through
+// the FADT's conduit (SMC or HVC) with an SMC resource covering the
+// function ID (croi scopes SMC resources by function ID, Zircon by the
+// 6-bit service call number). w0 = func_id, x1-x6 the arguments, w7 =
+// secure_os_id << 16 | client_id; the result is x0-x3 and x6. PSCI calls
+// that change CPU or system state are the kernel's (refused for every
+// resource). NOT_SUPPORTED off arm64.
+typedef struct {
+  uint32_t func_id;
+  uint8_t padding1[4];
+  uint64_t arg1;
+  uint64_t arg2;
+  uint64_t arg3;
+  uint64_t arg4;
+  uint64_t arg5;
+  uint64_t arg6;
+  uint16_t client_id;
+  uint16_t secure_os_id;
+  uint8_t padding2[4];
+} croi_smc_parameters_t;
+
+typedef struct {
+  uint64_t arg0;
+  uint64_t arg1;
+  uint64_t arg2;
+  uint64_t arg3;
+  uint64_t arg6;  // a session id, for some implementations
+} croi_smc_result_t;
+

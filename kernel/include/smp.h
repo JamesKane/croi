@@ -19,6 +19,7 @@
 
 #ifndef __ASSEMBLER__
 #include <stdint.h>
+#include "resource.h"
 
 typedef struct {
   uint64_t stack;
@@ -63,6 +64,10 @@ long arch_sbi_call(uint64_t eid, uint64_t fid, uint64_t arg0, uint64_t arg1, uin
 #if defined(__aarch64__)
 // Assembly (arch/arm64/smp.S). A PSCI call via SMC, or HVC if use_hvc.
 uint64_t arch_psci_call(uint64_t fid, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t use_hvc);
+// void arch_smccc_call(params, result, use_hvc) (K13i, smc_call; resource.h's
+// layouts): an SMCCC call through SMC or HVC.
+void arch_smccc_call(const croi_smc_parameters_t *_Nonnull params, croi_smc_result_t *_Nonnull result,
+                     uint64_t use_hvc);
 #endif
 
 // The trampoline's (virtual) address. Inline C because Swift can't take a

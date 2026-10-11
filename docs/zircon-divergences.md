@@ -205,9 +205,20 @@ matches the pinned tree where upstream docs or expectations say otherwise).
   Kind: deliberate. Impact: drivers of MSI-only devices.
 - **arm64 MSIs work** — croi drives the GICv3 ITS; Zircon's is
   unimplemented (panics). Kind: deliberate. Impact: none (strictly more).
-- **SMC resource and smc_call** — not implemented; when it lands it is
-  scoped by SMCCC function-ID range, Zircon scopes by service-call number
-  (OEN). Kind: not yet / deliberate. Impact: arm64 boards' SCMI.
+- **SMC resources by function ID** (K13i) — an SMC resource is a range of
+  SMCCC function IDs; Zircon's is a range of 6-bit service call numbers
+  (OEN), so a Zircon-style resource (base 0x02, size 1: SiP) doesn't
+  carry over. Kind: deliberate (an OEN grants every SiP call). Impact:
+  drivers and devmgr making SMC resources.
+- **smc_call's conduit** — the FADT's PSCI conduit (HVC where firmware
+  runs at EL2); Zircon always issues SMC. Kind: deliberate. Impact: none
+  where firmware is at EL3.
+- **The kernel's PSCI calls refused** — CPU_ON/OFF/SUSPEND, MIGRATE,
+  SYSTEM_OFF/RESET/RESET2/SUSPEND, CPU_FREEZE, CPU_DEFAULT_SUSPEND can't
+  be reached through smc_call or an SMC resource, even the root's; Zircon
+  doesn't filter. Kind: deliberate. Impact: none (system_powerctl).
+- **Qualcomm yielding calls** — behind `croi.smccc_qcom=on` (Zircon's
+  boot option arm64_smccc_qcom). Kind: parity, croi's option name.
 - **powerctl on amd64** — plain SHUTDOWN is NOT_SUPPORTED: user space
   passes \_S5's sleep types with ACPI_TRANSITION_S_STATE; suspend,
   hotplug, PL1 and bootloader/recovery reboots are NOT_SUPPORTED on every

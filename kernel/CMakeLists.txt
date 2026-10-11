@@ -33,6 +33,7 @@ add_library(kernel-swift OBJECT
   Kernel/User/InfoTopics.swift
   Kernel/User/ClockSyscalls.swift
   Kernel/User/DebugSyscalls.swift
+  Kernel/User/SmcSyscalls.swift
   Kernel/User/DriverSyscalls.swift
   Kernel/User/DmaSyscalls.swift
   Kernel/User/CounterSyscalls.swift

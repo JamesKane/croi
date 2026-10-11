@@ -165,3 +165,37 @@ arch_psci_call:
 1:  hvc     #0
     ret
 .size arch_psci_call, . - arch_psci_call
+
+// void arch_smccc_call(params, result, use_hvc) (K13i, smc_call): w0 the
+// function ID, x1-x6 the arguments, w7 secure_os_id << 16 | client_id;
+// the result x0-x3 and x6. SMCCC may clobber x0-x17 (caller-saved).
+.globl arch_smccc_call
+.type arch_smccc_call, %function
+arch_smccc_call:
+    stp     x29, x30, [sp, #-32]!
+    mov     x29, sp
+    stp     x19, x20, [sp, #16]
+    mov     x19, x1
+    mov     x20, x2
+    mov     x9, x0
+    ldr     w0, [x9, #0]
+    ldr     x1, [x9, #8]
+    ldr     x2, [x9, #16]
+    ldr     x3, [x9, #24]
+    ldr     x4, [x9, #32]
+    ldr     x5, [x9, #40]
+    ldr     x6, [x9, #48]
+    ldrh    w10, [x9, #56]
+    ldrh    w11, [x9, #58]
+    orr     w7, w10, w11, lsl #16
+    cbnz    x20, 1f
+    smc     #0
+    b       2f
+1:  hvc     #0
+2:  stp     x0, x1, [x19]
+    stp     x2, x3, [x19, #16]
+    str     x6, [x19, #32]
+    ldp     x19, x20, [sp, #16]
+    ldp     x29, x30, [sp], #32
+    ret
+.size arch_smccc_call, . - arch_smccc_call

@@ -386,6 +386,8 @@ enum Syscalls {
             try socketCall(number, a, table)
         case 194...201:
             try streamCall(number, a, table)
+        case 234:  // smc_call(resource, const croi_smc_parameters_t *, croi_smc_result_t *), K13i
+            try smcCall(a, table)
         case 233:  // vmo_set_size(vmo, size), K13h
             try VmoObject.setSize(table, handle, a[1])
         case 230...232:

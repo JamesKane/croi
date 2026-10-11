@@ -265,6 +265,19 @@ enum RootFilter {
             }
             #endif
             return true
+        case UInt32(CROI_RSRC_KIND_SMC):
+            // PSCI calls that change CPU or system state are the kernel's
+            // (K13i): CPU_SUSPEND, CPU_OFF, CPU_ON, MIGRATE, SYSTEM_OFF,
+            // SYSTEM_RESET, CPU_FREEZE, CPU_DEFAULT_SUSPEND,
+            // SYSTEM_SUSPEND, SYSTEM_RESET2, in either calling convention.
+            let kernels: InlineArray<10, UInt64> = [1, 2, 3, 5, 8, 9, 0xB, 0xC, 0xE, 0x12]
+            for convention in [0x8400_0000, 0xC400_0000] as InlineArray<2, UInt64> {
+                for i in 0..<10 {
+                    let id = convention | kernels[i]
+                    if base <= id && id < end { return false }
+                }
+            }
+            return true
         default:
             return true
         }

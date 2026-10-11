@@ -1555,6 +1555,29 @@ PageList `grow`, syscall 233; vmo.h, task.h):
   streams still never grow their VMO (the pinned tree's either).
 - Mode 17's `resizing`.
 
+SMC calls, K13i (User/SmcSyscalls.swift, smp.S `arch_smccc_call`, syscall
+234; resource.h; Todhchai requirement 13):
+- smc_call(resource, croi_smc_parameters_t *, croi_smc_result_t *):
+  Zircon's layouts and order (null pointers INVALID_ARGS, the parameters
+  read, the resource validated, the call, the result written). arm64:
+  w0 the function ID, x1-x6, w7 = secure_os_id << 16 | client_id; result
+  x0-x3 and x6. Through the FADT's PSCI conduit (`Power.psci`: SMC, or
+  HVC where firmware runs at EL2, as under QEMU; Zircon always uses SMC).
+  Elsewhere NOT_SUPPORTED (after the validation).
+- SMC resources are function-ID ranges (Zircon's are 6-bit service call
+  numbers: an OEN-scoped resource grants every SiP call, the board review's
+  reason). The root filter refuses the PSCI calls that change CPU or system
+  state (CPU_SUSPEND/OFF/ON, MIGRATE, SYSTEM_OFF/RESET/RESET2/SUSPEND,
+  CPU_FREEZE, CPU_DEFAULT_SUSPEND, both conventions): the kernel's, even
+  to the root resource (system_powerctl is the way).
+- Yielding calls (bit 31 clear) with `croi.smccc_qcom=on` follow
+  Qualcomm's resume protocol under one Mutex (Zircon's arm64_smccc_qcom):
+  while x0 is INTERRUPTED (1), call again with function ID 1 and the x6
+  session id. The Q8B needs it.
+- Mode 17's `smc`: PSCI_VERSION through a one-function resource on arm64
+  (QEMU's PSCI over HVC), OUT_OF_RANGE outside it, CPU_OFF and SYSTEM_OFF
+  refused.
+
 Randomness, K11b (Kernel/Random.swift, syscalls 181-182; handoff v5):
 - The loader reads 32 bytes from EFI_RNG_PROTOCOL if the firmware has
   one (edk2 over virtio-rng: qemu.sh adds `-device virtio-rng-pci`) into

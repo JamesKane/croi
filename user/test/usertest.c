@@ -3651,6 +3651,33 @@ static int64_t resizing(const startup_t *s) {
   return 0;
 }
 
+// K13i: smc_call. arm64: PSCI_VERSION through a one-function SMC resource
+// (QEMU's PSCI answers through the FADT's conduit); a function outside it
+// refused; the kernel's PSCI calls (CPU_OFF, SYSTEM_OFF) refused even to
+// the root resource. Elsewhere NOT_SUPPORTED.
+static int64_t smc(const startup_t *s) {
+  croi_smc_parameters_t params;
+  croi_smc_result_t result;
+  for (unsigned i = 0; i < sizeof params; i++) ((volatile char *)&params)[i] = 0;
+  params.func_id = 0x84000000u;  // PSCI_VERSION
+  CHECK(580, sys(CROI_SYS_SMC_CALL, s->resource, 0, (uint64_t)&result, 0, 0) == ERR_INVALID_ARGS);
+#if defined(__aarch64__)
+  uint32_t one = 0, cpu_off = 0;
+  CHECK(581, resource_create(s->resource, CROI_RSRC_KIND_SMC, 0x84000000u, 1, &one) == 0 &&
+                 sys(CROI_SYS_SMC_CALL, one, (uint64_t)&params, (uint64_t)&result, 0, 0) == 0 &&
+                 result.arg0 >= 2 && result.arg0 < 0x80000000u);
+  params.func_id = 0x84000004u;  // AFFINITY_INFO: not this resource's
+  CHECK(582, sys(CROI_SYS_SMC_CALL, one, (uint64_t)&params, (uint64_t)&result, 0, 0) == ERR_OUT_OF_RANGE &&
+                 resource_create(s->resource, CROI_RSRC_KIND_SMC, 0x84000002u, 1, &cpu_off) == ERR_ACCESS_DENIED);
+  params.func_id = 0x84000008u;  // SYSTEM_OFF: the kernel's
+  CHECK(583, sys(CROI_SYS_SMC_CALL, s->resource, (uint64_t)&params, (uint64_t)&result, 0, 0) == ERR_ACCESS_DENIED);
+  sys(CROI_SYS_HANDLE_CLOSE, one, 0, 0, 0, 0);
+#else
+  CHECK(581, sys(CROI_SYS_SMC_CALL, s->resource, (uint64_t)&params, (uint64_t)&result, 0, 0) == ERR_NOT_SUPPORTED);
+#endif
+  return 0;
+}
+
 // K13b: FIFOs (Zircon's: records into the peer's ring, READABLE /
 // WRITABLE / PEER_CLOSED, user signals to the peer) and
 // vmo_replace_as_executable (a VMEX resource; the handle consumed).
@@ -3984,6 +4011,8 @@ static int64_t extensions(const startup_t *s) {
   if (stepped != 0) return stepped;
   int64_t resized = resizing(s);
   if (resized != 0) return resized;
+  int64_t smcs = smc(s);
+  if (smcs != 0) return smcs;
   int64_t random = cprng_checks();
   if (random != 0) return random;
 
