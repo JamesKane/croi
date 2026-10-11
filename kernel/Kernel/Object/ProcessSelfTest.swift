@@ -322,7 +322,7 @@ enum ProcessSelfTest {
             panic("extensions self-test: user side")
         }
         before.expectUnchanged(console)
-        console.write("  extensions: thread trace ids, overruns to a port, debuglog progress, a job's reserved CPU, powerctl refusals, VMO children, cprng\n")
+        console.write("  extensions: thread trace ids, overruns to a port, debuglog progress, a job's reserved CPU, powerctl refusals, VMO children, physical slices with ZERO_CHILDREN and handle counts, cprng\n")
     }
 
     /// Live processes, address spaces and objects, to check nothing leaked.

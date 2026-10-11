@@ -1,3 +1,4 @@
+import Synchronization
 import CKernel
 import PageTables
 
@@ -12,18 +13,25 @@ struct VmoObject: ~Copyable {
         (.basic | .read | .write | .map | .getProperty | .setProperty | .signal)
     }
 
-    /// vmo_create_physical's (Zircon's list: no WAIT, INSPECT or SIGNAL).
-    static var physicalRights: Rights {
-        (.duplicate | .transfer | .read | .write | .execute | .map | .getProperty | .setProperty)
-    }
+    /// vmo_create_physical's: Zircon's are the default VMO rights
+    /// (VmObjectDispatcher::Create; WAIT included, so a driver can wait for
+    /// ZERO_CHILDREN, K13a; no EXECUTE). K9a's list lacked WAIT, INSPECT and
+    /// SIGNAL and had EXECUTE.
+    static var physicalRights: Rights { defaultRights }
 
-    /// A handle-able object for `vmo` (takes a reference of its own).
+    /// A handle-able object for `vmo` (takes a reference of its own). The
+    /// VMO's ZERO_CHILDREN is the object's (K13a).
     static func wrap(_ vmo: VmoPointer) throws(Status) -> ObjectPointer {
         vmo.retain()
         guard let object = Objects.allocate(VmoObject(vmo: vmo.address)) else {
             vmo.release()
             throw .noMemory
         }
+        let none = vmo.pointee.lock.withLock { () -> Bool in
+            if vmo.pointee.object == 0 { vmo.pointee.object = object.address }
+            return vmo.pointee.children == 0
+        }
+        if none { object.header.signals = UInt32(CROI_VMO_ZERO_CHILDREN) }
         return object
     }
 
@@ -53,9 +61,12 @@ struct VmoObject: ~Copyable {
     /// VMO (a child too), optionally NO_WRITE; Zircon's rights: the
     /// parent handle's (DUPLICATE and READ required) plus GET/SET_PROPERTY,
     /// then a snapshot gains WRITE and loses EXECUTE unless NO_WRITE takes
-    /// WRITE away instead (how a loader keeps code executable). Not yet
-    /// (NOT_SUPPORTED): SNAPSHOT (isolated from the parent's later writes),
-    /// SLICE, REFERENCE, SNAPSHOT_MODIFIED, RESIZABLE.
+    /// WRITE away instead (how a loader keeps code executable). SLICE
+    /// (K13a, physical and contiguous parents; NO_WRITE the only other
+    /// option): the parent handle's rights plus GET/SET_PROPERTY, less
+    /// WRITE with NO_WRITE. Not yet (NOT_SUPPORTED): SNAPSHOT (isolated from
+    /// the parent's later writes), REFERENCE, SNAPSHOT_MODIFIED, RESIZABLE,
+    /// slices of anonymous VMOs.
     static func createChild(_ table: borrowing HandleTable, _ handle: UInt32, options: UInt32, offset: UInt64,
                             size: UInt64) throws(Status) -> (ObjectPointer, Rights) {
         let snapshotAtLeastOnWrite = UInt32(CROI_VMO_CHILD_SNAPSHOT_AT_LEAST_ON_WRITE)
@@ -66,7 +77,9 @@ struct VmoObject: ~Copyable {
         if options & noWrite != 0, options & UInt32(CROI_VMO_CHILD_RESIZABLE) != 0 { throw .invalidArgs }
         let kind = options & ~noWrite
         guard kind != 0 else { throw .invalidArgs }
-        guard kind == snapshotAtLeastOnWrite else { throw .notSupported }
+        let slice = UInt32(CROI_VMO_CHILD_SLICE)
+        if kind & slice != 0, kind != slice { throw .invalidArgs }  // nothing else goes with SLICE
+        guard kind == snapshotAtLeastOnWrite || kind == slice else { throw .notSupported }
         let pageMask = KernelLayout.pageSize - 1
         guard size <= UInt64.max - pageMask else { throw .outOfRange }
         let ref = try table.get(handle, type: .vmo, rights: .duplicate | .read)
@@ -74,13 +87,17 @@ struct VmoObject: ~Copyable {
         let parent = VmoPointer(address: UnsafeVmoObject(ref.object).vmo)
         let child: Vmo
         do throws(VmError) {
-            child = try Vmo(childOf: parent, offset: offset, size: (size + pageMask) & ~pageMask)
+            child = kind == slice
+                ? try Vmo(sliceOf: parent, offset: offset, size: (size + pageMask) & ~pageMask)
+                : try Vmo(childOf: parent, offset: offset, size: (size + pageMask) & ~pageMask)
         } catch {
             throw error == .outOfMemory ? .noMemory : error.status
         }
         rights.insert(.getProperty)
         rights.insert(.setProperty)
-        if options & noWrite != 0 {
+        if kind == slice {
+            if options & noWrite != 0 { rights.remove(.write) }
+        } else if options & noWrite != 0 {
             rights.remove(.write)
         } else {
             rights.remove(.execute)

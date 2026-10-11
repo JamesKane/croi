@@ -2520,6 +2520,87 @@ static void spinner(uint64_t arg) {
   sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
 }
 
+// K13a: SLICE children of a physical VMO (segment 0's ECAM: device 1's
+// configuration space reads the same through a slice as through the
+// parent), the rights and refusals, cache policies frozen, HANDLE_COUNT
+// through a channel, and ZERO_CHILDREN following handles and mappings.
+#ifndef ERR_ACCESS_DENIED_
+#define ERR_ACCESS_DENIED_ (-30)
+#endif
+static int64_t vmo_child(uint32_t vmo, uint32_t options, uint64_t offset, uint64_t size, uint32_t *out) {
+  return sys(CROI_SYS_VMO_CREATE_CHILD, vmo, options, offset, size, (uint64_t)out);
+}
+
+static int64_t vmo_slices(const startup_t *s) {
+  if (s->ecam == 0) return 0;
+  volatile uint8_t *whole = 0;
+  uint32_t parent = physical_vmo(s, s->ecam, 0x10000, &whole);
+  uint32_t observed = 0, slice = 0, deeper = 0, ro = 0, ro_slice = 0, nw_slice = 0, anon = 0, bad = 0;
+  uint32_t zero = CROI_VMO_ZERO_CHILDREN, slice_option = CROI_VMO_CHILD_SLICE;
+  CHECK(430, sys(CROI_SYS_OBJECT_WAIT_ONE, parent, zero, 0, (uint64_t)&observed, 0) == 0 && (observed & zero));
+  CHECK(431, sys(CROI_SYS_VMO_CREATE, PAGE, 0, (uint64_t)&anon, 0, 0) == 0 &&
+                 vmo_child(anon, slice_option, 0, PAGE, &bad) == ERR_NOT_SUPPORTED &&
+                 vmo_child(parent, slice_option | CROI_VMO_CHILD_SNAPSHOT_AT_LEAST_ON_WRITE, 0, PAGE, &bad) ==
+                     ERR_INVALID_ARGS &&
+                 vmo_child(parent, slice_option, 8, PAGE, &bad) == ERR_INVALID_ARGS &&
+                 vmo_child(parent, slice_option, 0x10000, PAGE, &bad) == ERR_INVALID_ARGS &&
+                 vmo_child(parent, slice_option, 0xF000, 2 * PAGE, &bad) == ERR_INVALID_ARGS);
+  sys(CROI_SYS_HANDLE_CLOSE, anon, 0, 0, 0, 0);
+  // A slice over device 1's page clears ZERO_CHILDREN and reads as the parent.
+  uint64_t at = 0, deep_at = 0;
+  CHECK(432, vmo_child(parent, slice_option, 0x8000, PAGE, &slice) == 0 &&
+                 sys(CROI_SYS_OBJECT_WAIT_ONE, parent, zero, 0, (uint64_t)&observed, 0) == ERR_TIMED_OUT &&
+                 sys6(CROI_SYS_VMAR_MAP, s->vmar | (uint64_t)CROI_VM_PERM_READ << 32, 0, slice, 0, PAGE,
+                      (uint64_t)&at) == 0 &&
+                 *(volatile uint32_t *)at == *(volatile uint32_t *)(whole + 0x8000));
+  // A slice of the slice is one of the parent; neither side's cache policy
+  // can change now.
+  CHECK(433, vmo_child(slice, slice_option, 0, PAGE, &deeper) == 0 &&
+                 sys6(CROI_SYS_VMAR_MAP, s->vmar | (uint64_t)CROI_VM_PERM_READ << 32, 0, deeper, 0, PAGE,
+                      (uint64_t)&deep_at) == 0 &&
+                 *(volatile uint32_t *)deep_at == *(volatile uint32_t *)at &&
+                 sys(CROI_SYS_VMAR_UNMAP, s->vmar, deep_at, PAGE, 0, 0) == 0 &&
+                 sys(CROI_SYS_VMO_SET_CACHE_POLICY, deeper, CROI_CACHE_POLICY_UNCACHED_DEVICE, 0, 0, 0) == ERR_BAD_STATE);
+  sys(CROI_SYS_HANDLE_CLOSE, deeper, 0, 0, 0, 0);
+  // Rights: a slice of a handle without WRITE has none; NO_WRITE takes it.
+  uint64_t w = 0;
+  uint32_t ro_rights = 1u << 0 | 1u << 1 | 1u << 2 | 1u << 5 | 1u << 14 | 1u << 15;  // dup, transfer, read, map, wait, inspect
+  CHECK(434, sys(CROI_SYS_HANDLE_DUPLICATE, parent, ro_rights, (uint64_t)&ro, 0, 0) == 0 &&
+                 vmo_child(ro, slice_option, 0, PAGE, &ro_slice) == 0 &&
+                 vmo_child(parent, slice_option | CROI_VMO_CHILD_NO_WRITE, 0, PAGE, &nw_slice) == 0 &&
+                 sys6(CROI_SYS_VMAR_MAP, s->vmar | (uint64_t)(CROI_VM_PERM_READ | CROI_VM_PERM_WRITE) << 32, 0, ro_slice,
+                      0, PAGE, (uint64_t)&w) == ERR_ACCESS_DENIED_ &&
+                 sys6(CROI_SYS_VMAR_MAP, s->vmar | (uint64_t)(CROI_VM_PERM_READ | CROI_VM_PERM_WRITE) << 32, 0, nw_slice,
+                      0, PAGE, (uint64_t)&w) == ERR_ACCESS_DENIED_);
+  sys(CROI_SYS_HANDLE_CLOSE, ro_slice, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, nw_slice, 0, 0, 0, 0);
+  // HANDLE_COUNT: two handles; one in flight still counts; back, then closed.
+  croi_info_handle_count_t count = {0};
+  uint32_t a = 0, b = 0, got = 0, actual[2] = {0, 0};
+  CHECK(435, sys(CROI_SYS_OBJECT_GET_INFO, parent, CROI_INFO_HANDLE_COUNT, (uint64_t)&count, sizeof count, 0) == 0 &&
+                 count.handle_count == 2 && sys(CROI_SYS_CHANNEL_CREATE, 0, (uint64_t)&a, (uint64_t)&b, 0, 0) == 0 &&
+                 chan_write(a, "", 0, &ro, 1) == 0 &&
+                 sys(CROI_SYS_OBJECT_GET_INFO, parent, CROI_INFO_HANDLE_COUNT, (uint64_t)&count, sizeof count, 0) == 0 &&
+                 count.handle_count == 2 && chan_read(b, 0, &got, 0, 1, actual) == 0 &&
+                 sys(CROI_SYS_OBJECT_GET_INFO, parent, CROI_INFO_HANDLE_COUNT, (uint64_t)&count, sizeof count, 0) == 0 &&
+                 count.handle_count == 2 && sys(CROI_SYS_HANDLE_CLOSE, got, 0, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_OBJECT_GET_INFO, parent, CROI_INFO_HANDLE_COUNT, (uint64_t)&count, sizeof count, 0) == 0 &&
+                 count.handle_count == 1);
+  sys(CROI_SYS_HANDLE_CLOSE, a, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, b, 0, 0, 0, 0);
+  // The last slice's handle goes while it is mapped: still a child. The
+  // unmap ends it, and ZERO_CHILDREN comes back.
+  CHECK(436, sys(CROI_SYS_HANDLE_CLOSE, slice, 0, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_OBJECT_WAIT_ONE, parent, zero, 0, (uint64_t)&observed, 0) == ERR_TIMED_OUT &&
+                 sys(CROI_SYS_VMAR_UNMAP, s->vmar, at, PAGE, 0, 0) == 0 &&
+                 sys(CROI_SYS_OBJECT_WAIT_ONE, parent, zero, now_ns() + 1000000000ull, (uint64_t)&observed, 0) == 0 &&
+                 sys(CROI_SYS_VMO_SET_CACHE_POLICY, parent, CROI_CACHE_POLICY_UNCACHED_DEVICE, 0, 0, 0) ==
+                     ERR_BAD_STATE);
+  sys(CROI_SYS_VMAR_UNMAP, s->vmar, (uint64_t)whole, 0x10000, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, parent, 0, 0, 0, 0);
+  return 0;
+}
+
 // K11a: copy-on-first-touch VMO children. Returns 0 or the failed check.
 static int64_t vmo_children(void) {
   enum { P = 4096 };
@@ -2697,6 +2778,8 @@ static int64_t extensions(const startup_t *s) {
 
   int64_t children = vmo_children();
   if (children != 0) return children;
+  int64_t slices = vmo_slices(s);
+  if (slices != 0) return slices;
   int64_t random = cprng_checks();
   if (random != 0) return random;
 

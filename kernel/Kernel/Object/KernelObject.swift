@@ -17,6 +17,9 @@ struct ObjectHeader: ~Copyable {
     /// Waits registered on it (intrusive list).
     var observers: ObserverPointer?
     let references = Atomic<Int>(1)
+    /// Handles to it, in handle tables and in channel messages in flight
+    /// (ZX_INFO_HANDLE_COUNT, K13a).
+    let handleCount = Atomic<UInt32>(0)
 
     init(type: ObjectType) {
         self.type = type
@@ -103,7 +106,9 @@ enum Objects {
         case .event: free(object, as: EventObject.self)
         case .port: Ports.destroy(object)
         case .vmo:
-            VmoPointer(address: UnsafeVmoObject(object).vmo).release()
+            let vmo = VmoPointer(address: UnsafeVmoObject(object).vmo)
+            vmo.pointee.lock.withLock { if vmo.pointee.object == object.address { vmo.pointee.object = 0 } }
+            vmo.release()
             free(object, as: VmoObject.self)
         case .resource: Resources.destroy(object)
         case .job: Processes.destroyJob(object)

@@ -1,3 +1,4 @@
+import Synchronization
 import CKernel
 
 /// Channels, eventpairs and object info from user space (K7b; numbers in
@@ -186,6 +187,14 @@ extension Syscalls {
                 try put(Resources.info(resource.object), a[2])
                 return
             }
+            if a[1] == UInt64(CROI_INFO_HANDLE_COUNT) {  // K13a, Zircon's: INSPECT
+                guard a[3] >= UInt64(MemoryLayout<croi_info_handle_count_t>.size) else { throw .bufferTooSmall }
+                try check(a[2], MemoryLayout<croi_info_handle_count_t>.size)
+                let object = try table.get(handle, rights: .inspect)
+                try put(croi_info_handle_count_t(handle_count: object.object.header.handleCount.load(ordering: .relaxed)),
+                        a[2])
+                return
+            }
             guard a[1] == UInt64(CROI_INFO_HANDLE_BASIC) else { throw .notSupported }
             guard a[3] >= UInt64(MemoryLayout<croi_info_handle_basic_t>.size) else { throw .bufferTooSmall }
             try check(a[2], MemoryLayout<croi_info_handle_basic_t>.size)
@@ -291,6 +300,7 @@ extension Syscalls {
         for i in 0..<Int(message.pointee.handles) {
             let entry = message.handle(i)
             let value = try table.add(ObjectPointer(address: entry.object), rights: entry.rights)
+            ObjectPointer(address: entry.object).header.handleCount.subtract(1, ordering: .relaxed)  // landed
             message.setHandle(i, object: 0, rights: Rights(rawValue: 0))  // the table's now
             try put(value, handles + UInt64(i) * 4)
         }

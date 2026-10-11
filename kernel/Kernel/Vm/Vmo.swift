@@ -53,9 +53,16 @@ struct VmoRecord: ~Copyable {
     /// Ranges pinned for DMA (K9e, a PMT each): their pages stay committed
     /// and in place, and the cache policy stays.
     var pins = UniqueArray<PinRange>()
-    /// A copy-on-first-touch child's parent (a reference held), or nil.
+    /// A child's parent (a reference held), or nil: a copy-on-first-touch
+    /// child's (K11a) or a slice's (K13a).
     var parent: VmoPointer? = nil
     var parentOffset: UInt64 = 0
+    /// A slice (K13a): the parent's pages, never its own.
+    var slice = false
+    /// Live children (K13a's ZERO_CHILDREN), and the VMO object to signal
+    /// (0 once it is gone; cleared under this lock by its destroy).
+    var children = 0
+    var object: UInt64 = 0
 
     var pageCount: Int { Int(size / KernelLayout.pageSize) }
 }
@@ -83,10 +90,15 @@ struct VmoRecord: ~Copyable {
             }
             account.release()
         }
-        pointee.parent?.release()
+        if let parent = pointee.parent {
+            parent.childGone()
+            parent.release()
+        }
         switch pointee.kind {
         case .anonymous:
             pointee.pages.forEach { _, phys in pmm.free(phys) }
+        case .contiguous where pointee.slice:
+            break  // the parent's pages
         case .contiguous(let base):
             if ContiguousPool.contains(base) {
                 ContiguousPool.free(base, pointee.pageCount)
@@ -100,6 +112,40 @@ struct VmoRecord: ~Copyable {
         unsafe raw.deinitialize(count: 1)
         unsafe heap.free(UnsafeMutableRawPointer(raw))
         Vmos.live.subtract(1, ordering: .relaxed)
+    }
+
+    /// A child of this VMO was created (K13a): counted, and the object's
+    /// ZERO_CHILDREN cleared. The object's lock serializes the signal with
+    /// `childGone`, which rechecks the count under it (as Zircon does).
+    func childAdded() {
+        let object = pointee.lock.withLock { () -> UInt64 in
+            pointee.children += 1
+            return pointee.object
+        }
+        signalChildren(object)
+    }
+
+    /// One went (its last reference): ZERO_CHILDREN set if it was the last.
+    func childGone() {
+        let object = pointee.lock.withLock { () -> UInt64 in
+            pointee.children -= 1
+            return pointee.children == 0 ? pointee.object : 0
+        }
+        signalChildren(object)
+    }
+
+    /// Sets or clears the object's ZERO_CHILDREN from the count now.
+    private func signalChildren(_ address: UInt64) {
+        guard address != 0 else { return }
+        let object = ObjectPointer(address: address)
+        guard object.tryRetain() else { return }  // on its way out
+        object.header.lock.withLock {
+            let none = pointee.lock.withLock { pointee.children == 0 }
+            let bit = UInt32(CROI_VMO_ZERO_CHILDREN)
+            object.header.signals = none ? object.header.signals | bit : object.header.signals & ~bit
+            Observers.notify(object)
+        }
+        object.release()
     }
 
     /// The physical page holding byte `offset`, committing it (zeroed) if
@@ -328,6 +374,42 @@ struct Vmo: ~Copyable {
         parent.retain()
         made.pointee.parent = parent
         made.pointee.parentOffset = offset
+        parent.childAdded()
+        record = made
+    }
+
+    /// vmo_create_child's SLICE (K13a) of a physical or contiguous VMO:
+    /// [offset, offset+size) of its pages, page aligned and wholly inside,
+    /// with its cache policy and memory flags; a slice of a slice is one of
+    /// the root. Holds a reference to the root. Anonymous parents: not yet.
+    init(sliceOf parent: VmoPointer, offset: UInt64, size: UInt64) throws(VmError) {
+        let page = KernelLayout.pageSize
+        guard offset % page == 0, size % page == 0, size > 0,
+              !offset.addingReportingOverflow(size).overflow, offset + size <= parent.pointee.size else {
+            throw .invalidArgument
+        }
+        var root = parent, at = offset
+        if parent.pointee.slice, let up = parent.pointee.parent {
+            root = up
+            at += parent.pointee.parentOffset
+        }
+        let kind: VmoRecord.Kind
+        switch root.pointee.kind {
+        case .physical(let base): kind = .physical(base: base + at)
+        case .contiguous(let base): kind = .contiguous(base: base + at)
+        case .anonymous: throw .notSupported
+        }
+        let (cache, firmware, readOnly) = root.pointee.lock.withLock {
+            (root.pointee.cache, root.pointee.cachedFirmware, root.pointee.sharedReadOnly)
+        }
+        let made = try Self.make(kind, size: size, cache: cache)
+        made.pointee.slice = true
+        made.pointee.cachedFirmware = firmware
+        made.pointee.sharedReadOnly = readOnly
+        root.retain()
+        made.pointee.parent = root
+        made.pointee.parentOffset = at
+        root.childAdded()
         record = made
     }
 
@@ -489,6 +571,8 @@ struct Vmo: ~Copyable {
     /// the old type outlives the change.
     func setCachePolicy(_ policy: CachePolicy) throws(VmError) {
         try record.pointee.lock.withLock { () throws(VmError) in
+            // Slices share their parent's policy, so neither side changes it.
+            guard !record.pointee.slice, record.pointee.children == 0 else { throw .badState }
             guard !record.pointee.cachedFirmware || policy == .cached else { throw .denied(0) }
             guard !record.pointee.sharedReadOnly else { throw .denied(0) }  // the kernel writes it cached
             guard record.pointee.mappers.count == 0 else { throw .alreadyMapped(0) }

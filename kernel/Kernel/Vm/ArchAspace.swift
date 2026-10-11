@@ -23,6 +23,9 @@ enum VmError: Error, Equatable {
     /// Not for this kind of VMO (a snapshot of a physical one; decommit
     /// of a child).
     case notSupported
+    /// Not in this VMO's state (K13a: a cache policy change on a VMO with
+    /// children, or on a slice).
+    case badState
 }
 
 /// What a virtual address translates to.

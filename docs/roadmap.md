@@ -760,9 +760,13 @@ Zircon's: the host keeps one physical VMO per window and gives clients
 pages and the parent's cache policy, no copy); the parent raises
 ZX_VMO_ZERO_CHILDREN when its last child goes (mappings hold children),
 which the host waits for (wait_async on its port) before reuse.
-ZX_INFO_HANDLE_COUNT (topic 7) comes along for parity; Todhchai won't
-depend on it. Until then the host holds windows until the context
-closes (safe). Scheduled after the IOMMU work.
+ZX_INFO_HANDLE_COUNT (Zircon's topic 19) comes along for parity;
+Todhchai won't depend on it. **Done** (2026-10-11), moved ahead of K12g
+at the user's call: slices of physical and contiguous VMOs (anonymous
+ones NOT_SUPPORTED yet), ZERO_CHILDREN for every child kind, the handle
+count (tables and messages in flight), and vmo_create_physical's
+rights corrected to Zircon's (WAIT was missing: the host couldn't have
+waited on its windows).
 
 ### After M3 (requirements 14–19 and the remaining extensions)
 - IOMMUs: VT-d first, then AMD-Vi, SMMUv3 (Fuchsia reference code) and

@@ -14,7 +14,16 @@ enum : uint32_t {
   // object_get_info topics.
   CROI_INFO_HANDLE_BASIC = 2,
   CROI_INFO_VMAR = 7,  // croi_info_vmar_t (needs INSPECT)
+  // croi_info_handle_count_t (needs INSPECT, K13a): handles to the object
+  // in every handle table and in channel messages in flight. A mapping
+  // keeps a VMO alive without a handle: see vmo.h's ZERO_CHILDREN.
+  CROI_INFO_HANDLE_COUNT = 19,
 };
+
+// zx_info_handle_count_t.
+typedef struct {
+  uint32_t handle_count;
+} croi_info_handle_count_t;
 
 // zx_info_vmar_t.
 typedef struct {

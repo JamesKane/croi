@@ -1115,6 +1115,35 @@ VMO children, K11a (Vmo.swift `init(childOf:)`, VmoObject
   SNAPSHOT_MODIFIED, RESIZABLE: NOT_SUPPORTED; physical or contiguous
   parents: NOT_SUPPORTED. Mode 17 checks it (`vmo_children`).
 
+VMO slices, ZERO_CHILDREN and handle counts, K13a (Vmo.swift `init(sliceOf:)`,
+`childAdded`/`childGone`; VmoObject; agreed with Todhchai for the GPU
+driver host's BAR windows):
+- `vmo_create_child` SLICE (alone or with NO_WRITE; anything else with it
+  INVALID_ARGS) of a physical or contiguous VMO: a VMO of the same kind
+  over [offset, offset+size) of its pages (page aligned, wholly inside,
+  else INVALID_ARGS), with its cache policy and memory flags, `slice`
+  set (a contiguous slice frees nothing); a slice of a slice is one of
+  the root. Rights: the parent handle's plus GET/SET_PROPERTY, less WRITE
+  with NO_WRITE. Anonymous parents: NOT_SUPPORTED (Zircon has them).
+- Every VMO record counts its live children (K11a's snapshots too) and
+  knows its object (`VmoRecord.object`, cleared by the object's destroy).
+  ZERO_CHILDREN (signal bit 3) is set at wrap, cleared by `childAdded`,
+  set again by `childGone` (the child record's last reference: its last
+  handle and last mapping); both update the signal under the object's
+  lock and recheck the count there (Zircon's double check). Lock order
+  object -> vmo there.
+- A VMO with children, or a slice, can't change its cache policy
+  (`VmError.badState`, BAD_STATE).
+- `ObjectHeader.handleCount`: +1 in `HandleTable.add` and in
+  `MessagePointer.setHandle` (a handle in flight), -1 in close/take, at
+  channel_read's install and in a message's `free`. object_get_info
+  CROI_INFO_HANDLE_COUNT (19, Zircon's), INSPECT.
+- vmo_create_physical's rights are now Zircon's (the default VMO rights:
+  WAIT, INSPECT and SIGNAL, no EXECUTE).
+- Mode 17's `vmo_slices`: on segment 0's ECAM, refusals, reads through a
+  slice and a slice of it, cache policies frozen, rights, the count
+  through a channel round trip, ZERO_CHILDREN after the last unmap.
+
 Randomness, K11b (Kernel/Random.swift, syscalls 181-182; handoff v5):
 - The loader reads 32 bytes from EFI_RNG_PROTOCOL if the firmware has
   one (edk2 over virtio-rng: qemu.sh adds `-device virtio-rng-pci`) into

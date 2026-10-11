@@ -91,6 +91,7 @@ struct HandleTable: ~Copyable {
             table.pointee.slots[index].object = object.address
             table.pointee.slots[index].rights = rights
             table.pointee.count += 1
+            object.header.handleCount.add(1, ordering: .relaxed)
             return Self.value(index, table.pointee.slots[index].generation)
         }
     }
@@ -125,6 +126,7 @@ struct HandleTable: ~Copyable {
             table.pointee.slots[index].object = 0
             table.pointee.slots[index].generation = (table.pointee.slots[index].generation + 1) & 0xFF
             table.pointee.count -= 1
+            object.header.handleCount.subtract(1, ordering: .relaxed)
             return object
         }
         Observers.handleClosed(object, table: table.address, handle: handle)
@@ -140,6 +142,7 @@ struct HandleTable: ~Copyable {
             table.pointee.slots[index].object = 0
             table.pointee.slots[index].generation = (table.pointee.slots[index].generation + 1) & 0xFF
             table.pointee.count -= 1
+            ObjectPointer(address: entry.object).header.handleCount.subtract(1, ordering: .relaxed)
             return (ObjectPointer(address: entry.object), entry.rights)
         }
         Observers.handleClosed(entry.0, table: table.address, handle: handle)
