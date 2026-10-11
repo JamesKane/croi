@@ -98,6 +98,30 @@ extension Syscalls {
             let h1 = try table.add(second, rights: EventPairObject.defaultRights)
             try put(h0, a[1])
             try put(h1, a[2])
+        case 87:  // fifo_create(elem_count, elem_size, options, out0, out1), K13b
+            guard a[2] == 0 else { throw .invalidArgs }
+            try Policy.check(UInt32(CROI_POL_NEW_FIFO))
+            try check(a[3], MemoryLayout<UInt32>.size)
+            try check(a[4], MemoryLayout<UInt32>.size)
+            let (first, second) = try Fifos.create(count: a[0], size: a[1])
+            let h0: UInt32
+            do throws(Status) {
+                h0 = try table.add(first, rights: FifoObject.defaultRights)
+            } catch {
+                first.release()
+                second.release()
+                throw error
+            }
+            let h1 = try table.add(second, rights: FifoObject.defaultRights)
+            try put(h0, a[3])
+            try put(h1, a[4])
+        case 88, 89:  // fifo_write / fifo_read(fifo, elem_size, data, count, size_t *actual)
+            if a[4] != 0 { try check(a[4], MemoryLayout<UInt64>.size) }
+            let fifo = try table.get(handle, type: .fifo, rights: number == 88 ? .write : .read)
+            let moved = number == 88
+                ? try Fifos.write(fifo.object, size: a[1], source: a[2], count: a[3])
+                : try Fifos.read(fifo.object, size: a[1], destination: a[2], count: a[3])
+            if a[4] != 0 { try put(moved, a[4]) }
         case 85:  // object_signal_peer(handle, clear, set)
             let object = try table.get(handle, rights: .signalPeer)
             try Channels.signalPeer(object.object, clear: UInt32(truncatingIfNeeded: a[1]),

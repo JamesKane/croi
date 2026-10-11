@@ -2603,6 +2603,64 @@ static void spinner(uint64_t arg) {
 #ifndef ERR_ACCESS_DENIED_
 #define ERR_ACCESS_DENIED_ (-30)
 #endif
+// K13b: FIFOs (Zircon's: records into the peer's ring, READABLE /
+// WRITABLE / PEER_CLOSED, user signals to the peer) and
+// vmo_replace_as_executable (a VMEX resource; the handle consumed).
+static int64_t fifos_and_exec(const startup_t *s) {
+  uint32_t a = 0, b = 0, observed = 0;
+  uint64_t actual = 0;
+  uint32_t rec[8] = {0}, got[8] = {0};
+  CHECK(440, sys(CROI_SYS_FIFO_CREATE, 0, 4, 0, (uint64_t)&a, (uint64_t)&b) == ERR_OUT_OF_RANGE &&
+                 sys(CROI_SYS_FIFO_CREATE, 1024, 8, 0, (uint64_t)&a, (uint64_t)&b) == ERR_OUT_OF_RANGE &&
+                 sys(CROI_SYS_FIFO_CREATE, 4, 4, 1, (uint64_t)&a, (uint64_t)&b) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_FIFO_CREATE, 4, 4, 0, (uint64_t)&a, (uint64_t)&b) == 0 &&
+                 sys(CROI_SYS_OBJECT_WAIT_ONE, a, CROI_SIGNAL_WRITABLE, 0, (uint64_t)&observed, 0) == 0);
+  for (int i = 0; i < 8; i++) rec[i] = 100 + i;
+  // Six offered, four fit; then full: SHOULD_WAIT, a not WRITABLE, b READABLE.
+  CHECK(441, sys(CROI_SYS_FIFO_WRITE, a, 8, (uint64_t)rec, 1, (uint64_t)&actual) == ERR_OUT_OF_RANGE &&
+                 sys(CROI_SYS_FIFO_WRITE, a, 4, (uint64_t)rec, 6, (uint64_t)&actual) == 0 && actual == 4 &&
+                 sys(CROI_SYS_FIFO_WRITE, a, 4, (uint64_t)rec, 1, (uint64_t)&actual) == ERR_SHOULD_WAIT &&
+                 sys(CROI_SYS_OBJECT_WAIT_ONE, a, CROI_SIGNAL_WRITABLE, 0, (uint64_t)&observed, 0) == ERR_TIMED_OUT &&
+                 sys(CROI_SYS_OBJECT_WAIT_ONE, b, CROI_SIGNAL_READABLE, 0, (uint64_t)&observed, 0) == 0);
+  // Read three, then the rest: order kept, a WRITABLE again, b empty.
+  CHECK(442, sys(CROI_SYS_FIFO_READ, b, 4, (uint64_t)got, 3, (uint64_t)&actual) == 0 && actual == 3 &&
+                 got[0] == 100 && got[2] == 102 &&
+                 sys(CROI_SYS_OBJECT_WAIT_ONE, a, CROI_SIGNAL_WRITABLE, 0, (uint64_t)&observed, 0) == 0 &&
+                 sys(CROI_SYS_FIFO_READ, b, 4, (uint64_t)got, 8, (uint64_t)&actual) == 0 && actual == 1 &&
+                 got[0] == 103 &&
+                 sys(CROI_SYS_FIFO_READ, b, 4, (uint64_t)got, 1, 0) == ERR_SHOULD_WAIT &&
+                 sys(CROI_SYS_OBJECT_WAIT_ONE, b, CROI_SIGNAL_READABLE, 0, (uint64_t)&observed, 0) == ERR_TIMED_OUT);
+  // A user signal to the peer; then a closed peer.
+  CHECK(443, sys(CROI_SYS_OBJECT_SIGNAL_PEER, a, 0, 1u << 24, 0, 0) == 0 &&
+                 sys(CROI_SYS_OBJECT_WAIT_ONE, b, 1u << 24, 0, (uint64_t)&observed, 0) == 0 &&
+                 sys(CROI_SYS_FIFO_WRITE, b, 4, (uint64_t)rec, 1, 0) == 0 &&
+                 sys(CROI_SYS_HANDLE_CLOSE, b, 0, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_OBJECT_WAIT_ONE, a, CROI_SIGNAL_PEER_CLOSED, 0, (uint64_t)&observed, 0) == 0 &&
+                 !(observed & CROI_SIGNAL_WRITABLE) &&
+                 sys(CROI_SYS_FIFO_WRITE, a, 4, (uint64_t)rec, 1, 0) == ERR_PEER_CLOSED &&
+                 sys(CROI_SYS_FIFO_READ, a, 4, (uint64_t)got, 1, 0) == 0 && got[0] == 100 &&
+                 sys(CROI_SYS_FIFO_READ, a, 4, (uint64_t)got, 1, 0) == ERR_PEER_CLOSED);
+  sys(CROI_SYS_HANDLE_CLOSE, a, 0, 0, 0, 0);
+
+  // An anonymous VMO isn't executable until replaced with a VMEX resource;
+  // a bad resource still takes the handle.
+  uint32_t vmo = 0, exec = 0, other = 0;
+  uint64_t at = 0;
+  CHECK(444, sys(CROI_SYS_VMO_CREATE, PAGE, 0, (uint64_t)&vmo, 0, 0) == 0 &&
+                 sys6(CROI_SYS_VMAR_MAP, s->vmar | (uint64_t)(CROI_VM_PERM_READ | CROI_VM_PERM_EXECUTE) << 32, 0, vmo,
+                      0, PAGE, (uint64_t)&at) == ERR_ACCESS_DENIED_ &&
+                 sys(CROI_SYS_HANDLE_DUPLICATE, vmo, 1u << 31, (uint64_t)&other, 0, 0) == 0 &&
+                 sys(CROI_SYS_VMO_REPLACE_AS_EXECUTABLE, other, vmo, (uint64_t)&exec, 0, 0) == ERR_WRONG_TYPE &&
+                 sys(CROI_SYS_HANDLE_CLOSE, other, 0, 0, 0, 0) == ERR_BAD_HANDLE &&
+                 sys(CROI_SYS_VMO_REPLACE_AS_EXECUTABLE, vmo, s->resource, (uint64_t)&exec, 0, 0) == 0 &&
+                 sys(CROI_SYS_HANDLE_CLOSE, vmo, 0, 0, 0, 0) == ERR_BAD_HANDLE &&
+                 sys6(CROI_SYS_VMAR_MAP, s->vmar | (uint64_t)(CROI_VM_PERM_READ | CROI_VM_PERM_EXECUTE) << 32, 0, exec,
+                      0, PAGE, (uint64_t)&at) == 0);
+  sys(CROI_SYS_VMAR_UNMAP, s->vmar, at, PAGE, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, exec, 0, 0, 0, 0);
+  return 0;
+}
+
 static int64_t vmo_child(uint32_t vmo, uint32_t options, uint64_t offset, uint64_t size, uint32_t *out) {
   return sys(CROI_SYS_VMO_CREATE_CHILD, vmo, options, offset, size, (uint64_t)out);
 }
@@ -2856,6 +2914,8 @@ static int64_t extensions(const startup_t *s) {
   if (children != 0) return children;
   int64_t slices = vmo_slices(s);
   if (slices != 0) return slices;
+  int64_t fifos = fifos_and_exec(s);
+  if (fifos != 0) return fifos;
   int64_t random = cprng_checks();
   if (random != 0) return random;
 

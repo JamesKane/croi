@@ -517,10 +517,12 @@ enum Channels {
         switch object.header.type {
         case .channel: shared = ChannelPointer(object: object).pointee.shared
         case .eventpair: shared = EventPairPointer(object: object).pointee.shared
+        case .fifo: shared = FifoPointer(object: object).pointee.shared
         default: throw .wrongType
         }
         let peer = shared.pointee.lock.withLock { () -> ObjectPointer? in
             let address = object.header.type == .channel ? ChannelPointer(object: object).pointee.peer
+                : object.header.type == .fifo ? FifoPointer(object: object).pointee.peer
                 : EventPairPointer(object: object).pointee.peer
             guard address != 0 else { return nil }
             let other = ObjectPointer(address: address)
@@ -536,6 +538,7 @@ enum Channels {
         switch object.header.type {
         case .channel: ChannelPointer(object: object).pointee.peerKoid
         case .eventpair: EventPairPointer(object: object).pointee.peerKoid
+        case .fifo: FifoPointer(object: object).pointee.peerKoid
         default: 0
         }
     }

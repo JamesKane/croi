@@ -263,6 +263,23 @@ enum Syscalls {
             try put(try table.add(try VmoObject.create(size: a[0]), rights: VmoObject.defaultRights), a[2])
         case 48:  // vmo_create_child(vmo, options, offset, size, uint32_t *out), K11a
             try VmoObject.createChildCall(a, table)
+        case 49:  // vmo_replace_as_executable(vmo, vmex, out), K13b: the handle goes either way
+            try check(a[2], MemoryLayout<UInt32>.size)
+            let rights = try table.rights(of: handle)
+            _ = try table.get(handle, type: .vmo)
+            do throws(Status) {
+                try Resources.check(table, UInt32(truncatingIfNeeded: a[1]), system: UInt64(CROI_RSRC_SYSTEM_VMEX_BASE))
+            } catch {
+                try? table.close(handle)
+                throw error
+            }
+            let (object, _) = try table.take(handle)
+            do throws(Status) {
+                try put(try table.add(object, rights: rights | .execute), a[2])
+            } catch {
+                object.release()
+                throw error
+            }
         case 41:  // vmo_read
             try vmoCopy(table, handle, user: a[1], offset: a[2], length: a[3], toUser: true)
         case 42:  // vmo_write

@@ -1229,6 +1229,26 @@ driver host's BAR windows):
   slice and a slice of it, cache policies frozen, rights, the count
   through a channel round trip, ZERO_CHILDREN after the last unmap.
 
+FIFOs and executable VMOs, K13b (Kernel/Object/Fifo.swift; syscalls 87-89
+in IpcSyscalls, 49 in Syscalls; Todhchai's block, input and GPU rings):
+- Zircon's FIFO (type 19, ZX_DEFAULT_FIFO_RIGHTS): `fifo_create(count,
+  size, options, out0, out1)` (count and size non-zero, count x size at
+  most 4096, else OUT_OF_RANGE; NEW_FIFO policy, condition 10), each
+  endpoint a heap ring of records its holder reads; a write fills the
+  peer's ring. `fifo_write/read(fifo, elem_size, data, count, actual)`
+  move as many whole records as fit or are there (size mismatch or count
+  0 OUT_OF_RANGE; none: SHOULD_WAIT, or PEER_CLOSED with no peer and,
+  for reads, nothing left). READABLE / WRITABLE (room in the peer's
+  ring) / PEER_CLOSED (the peer's last close, which also clears
+  WRITABLE) kept under the pair's `PeerShared` lock. User bytes go
+  through a heap bounce buffer outside the lock (reads check the
+  destination writable first). signal_peer and related koids cover
+  FIFOs.
+- `vmo_replace_as_executable(vmo, vmex, out)` (49): the vmex must be the
+  VMEX system resource (base 1) or root; the new handle has the old
+  rights plus EXECUTE; the old handle is gone either way (Zircon's).
+- Mode 17's `fifos_and_exec`.
+
 Randomness, K11b (Kernel/Random.swift, syscalls 181-182; handoff v5):
 - The loader reads 32 bytes from EFI_RNG_PROTOCOL if the firmware has
   one (edk2 over virtio-rng: qemu.sh adds `-device virtio-rng-pci`) into

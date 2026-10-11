@@ -49,6 +49,7 @@ add_library(kernel-swift OBJECT
   Kernel/Object/Port.swift
   Kernel/Object/Process.swift
   Kernel/Object/Channel.swift
+  Kernel/Object/Fifo.swift
   Kernel/Object/Futex.swift
   Kernel/Object/TimerObject.swift
   Kernel/Object/Exception.swift

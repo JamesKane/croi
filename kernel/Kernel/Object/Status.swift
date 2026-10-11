@@ -111,6 +111,7 @@ enum ObjectType: UInt32 {
     case log = 12
     case resource = 15
     case eventpair = 16
+    case fifo = 19
     case job = 17
     case vmar = 18
     case timer = 22

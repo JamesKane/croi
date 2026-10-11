@@ -781,6 +781,23 @@ the SMC resource.
   isolation on rv64 (MRIF mode or per-device guest files), the second
   stage the MSI tables are mainly for (guests).
 
+### K13: Zircon pieces in Todhchai's order (2026-10-11)
+
+Todhchai's order after M5j: FIFOs, then sockets and streams (stdio and
+pipes for ported C programs), then the pager (File.map demand-paged);
+none blocks it. A survey of Zircon's syscalls (vdso/*.fidl at the pin)
+against croi's (about 88 of Zircon's 199) found these missing families
+and objects besides: clock objects (croi has monotonic time only), iob,
+debug (process_read/write_memory, task_suspend), restricted mode,
+membarrier, SMC, ktrace/sampler (croi has its own trace and PMU calls);
+vmar_op_range, object_wait_many, port_cancel_key, handle_close_many,
+thread_start_regs, the channel *_etc calls; most info topics (PROCESS,
+THREAD, VMO, maps, handle table) and the NAME property.
+
+- **K13b: FIFOs and vmo_replace_as_executable.** **Done** (2026-10-11).
+- **K13c: sockets and streams.** Next.
+- **K13d: the pager.**
+
 ### K13a (agreed with Todhchai, 2026-10-11): VMO slices and ZERO_CHILDREN
 
 Todhchai's GPU driver host (M5g) hands clients VMOs over windows of

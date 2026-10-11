@@ -35,6 +35,7 @@ enum : uint64_t {
   CROI_SYS_VMO_OP_RANGE = 45,      // (vmo, op, offset, size, buffer, buffer_size)
   CROI_SYS_VMO_SET_CACHE_POLICY = 46,  // (vmo, policy)
   CROI_SYS_VMO_CREATE_PHYSICAL = 47,   // (MMIO resource, paddr, size, uint32_t *out)
+  CROI_SYS_VMO_REPLACE_AS_EXECUTABLE = 49,  // (vmo, vmex resource, uint32_t *out), K13b: consumes vmo
   CROI_SYS_VMO_CREATE_CHILD = 48,      // (vmo, options, offset, size, uint32_t *out), K11a
   CROI_SYS_TRACE_CONFIGURE = 50,   // (resource, op, a, b, c, sample_hz)
   CROI_SYS_PMU_CONFIGURE = 51,     // (resource, op, a, b)
@@ -64,6 +65,9 @@ enum : uint64_t {
   CROI_SYS_EVENTPAIR_CREATE = 84,  // (options, out0, out1)
   CROI_SYS_OBJECT_SIGNAL_PEER = 85,  // (handle, clear, set)
   CROI_SYS_OBJECT_GET_INFO = 86,   // (handle, topic, buffer, buffer_size)
+  CROI_SYS_FIFO_CREATE = 87,       // (elem_count, elem_size, options, out0, out1), K13b
+  CROI_SYS_FIFO_WRITE = 88,        // (fifo, elem_size, const void *data, count, size_t *actual)
+  CROI_SYS_FIFO_READ = 89,         // (fifo, elem_size, void *data, count, size_t *actual)
   CROI_SYS_TEST_PROFILE = 6,       // (op) boot self-test only
   // Futexes and timers (K7c): Zircon's.
   CROI_SYS_FUTEX_WAIT = 90,        // (uint32_t *value, current, new_owner thread handle, deadline)

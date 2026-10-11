@@ -145,7 +145,7 @@ enum Its {
         write64(frame + 0x70, configTable | cacheable | idBits)    // GICR_PROPBASER
         write64(frame + 0x78, pending | cacheable | 1 << 62)       // GICR_PENDBASER, PTZ
         let control = unsafe VolatileMappedRegister<UInt32>(unsafeBitPattern: UInt(frame))
-        unsafe control.store(control.load() | 1)                   // EnableLPIs
+        control.store(control.load() | 1)                   // EnableLPIs
         let processor = (unsafe VolatileMappedRegister<UInt64>(unsafeBitPattern: UInt(frame + 8)).load() >> 8) & 0xFFFF
         let cpu = Int(Cpu.current)
         guard cpu < rdBases.count else { return }

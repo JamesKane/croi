@@ -469,7 +469,7 @@ struct RiscvIommuUnit: ~Copyable {
                                                       MapAttributes(writable: true, cache: .device, global: true),
                                                       shared: true) else { return }
         let command = unsafe VolatileMappedRegister<UInt16>(unsafeBitPattern: UInt(cfg + 4))
-        unsafe command.store(command.load() | 1 << 1 | 1 << 2)  // memory space, bus master
+        command.store(command.load() | 1 << 1 | 1 << 2)  // memory space, bus master
         try? kernelAspace.free(cfg)
     }
 

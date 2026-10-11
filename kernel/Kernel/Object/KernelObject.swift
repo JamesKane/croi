@@ -117,6 +117,7 @@ enum Objects {
         case .vmar: Processes.destroyVmar(object)
         case .channel: Channels.destroy(object)
         case .eventpair: Channels.destroyEventPair(object)
+        case .fifo: Fifos.destroy(object)
         case .timer: free(object, as: TimerObject.self)
         case .log: DebugLogs.destroy(object)
         case .profile: free(object, as: ProfileObject.self)
