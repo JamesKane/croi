@@ -603,6 +603,10 @@ enum Processes {
                     describe(ThreadPointer(address: thread.pointee.thread), index: thread.pointee.index, console)
                 }
             }
+            // First, before any IPI of ours wakes a CPU and changes it.
+            let saved = arch_interrupts_save()  // dump takes the scheduler lock masked
+            Scheduler.dump(to: console)
+            arch_interrupts_restore(saved)
             // Where each of its threads that is running elsewhere is.
             let masked = arch_interrupts_save()
             let running = Scheduler.cpusRunning(processOf: object)
@@ -611,9 +615,6 @@ enum Processes {
             }
             arch_interrupts_restore(masked)
             Scheduler.sleep(until: Clock.now() + 50_000_000)  // let them print
-            let saved = arch_interrupts_save()  // dump takes the scheduler lock masked
-            Scheduler.dump(to: console)
-            arch_interrupts_restore(saved)
         }
         object.release()
         return 0

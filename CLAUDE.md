@@ -916,6 +916,11 @@ resource.h CROI_INFO_CPU_STATS, Smp.swift `CpuStats`):
   which then saw the waiter's value reached and armed nothing: the
   waiter slept until its deadline (m2 on rv64 under host load, ~1 boot
   in 5). `watchLocked` now notifies observers already satisfied.
+- A timer interrupt that comes before the earliest deadline by at most
+  1 ms (`Timers.earlyTolerance`) waits for it rather than re-arming:
+  KVM's TSC deadline fired ~240 us early for a 10 s sleep (~24 ppm),
+  and the re-arm was a second wakeup. Settled again right before the
+  halt (an idle thread switched away mid-poll resumes past the first).
 - Left: the SBSA watchdog's refresh, now every 20-25 s with slack
   (`croi.watchdog=off` removes it; QEMU has none). The debuglog dumper,
   timeline ticks and idle polling were already event-driven.

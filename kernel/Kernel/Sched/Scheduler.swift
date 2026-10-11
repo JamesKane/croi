@@ -41,6 +41,8 @@ struct CpuScheduler {
     var wakeLatencyBound: UInt64 = .max
     var frequencyFloor: UInt64 = 0
     var switches: UInt64 = 0
+    /// Kicks that sent no IPI because this CPU was polling (dump).
+    var kicksToPoller: UInt64 = 0
 
     var hasRunnable: Bool { !fair.isEmpty || !deadline.isEmpty }
     var queuedCount: Int { fair.count + deadline.count + throttled.count }
@@ -205,7 +207,10 @@ enum Scheduler {
             }
             // A wakeup aimed here after the check above sends an IPI, and a
             // throttled thread's period start has a timer: either ends the
-            // wait.
+            // wait. Settled again: an idle thread switched away part way
+            // through its poll comes back there, past the settle above (a
+            // stale slice timer woke Todhchai's 10 s nanosleep once).
+            Timers.settle()
             arch_wait_for_interrupt()
             unsafe percpu.pointee.stats.idleTime += Clock.now() - waiting
             unsafe percpu.pointee.stats.idleWakeups += 1
@@ -246,7 +251,10 @@ enum Scheduler {
     private static func kick(_ cpu: Int) {
         let bit: UInt64 = 1 << UInt64(cpu)
         _ = preemptPending.bitwiseOr(bit, ordering: .sequentiallyConsistent)
-        guard pollingCpus.load(ordering: .sequentiallyConsistent) & bit == 0 else { return }
+        guard pollingCpus.load(ordering: .sequentiallyConsistent) & bit == 0 else {
+            cpus[cpu].kicksToPoller += 1  // diagnostics (Scheduler.dump)
+            return
+        }
         Ipi.requestReschedule(cpu)
     }
 
@@ -1237,6 +1245,7 @@ enum Scheduler {
 
     /// Puts a ready thread on `cpu`'s run queues.
     private static func enqueue(_ thread: ThreadPointer, on cpu: Int, _ now: UInt64) {
+        if thread.pointee.state != .ready { thread.pointee.readySince = now }
         thread.pointee.state = .ready
         thread.pointee.cpu = cpu
         switch thread.pointee.effective.discipline {
@@ -1744,6 +1753,8 @@ enum Scheduler {
             out.write(", slice ")
             out.write(decimal: UInt64(cpus[cpu].sliceTimer))
             out.write(pending & (1 << UInt64(cpu)) != 0 ? ", preempt pending" : "")
+            out.write(", kicks to poller ")
+            out.write(decimal: cpus[cpu].kicksToPoller)
             out.write(", switches ")
             out.write(decimal: cpus[cpu].switches)
             out.write(", ipi mailbox ")
@@ -1810,6 +1821,11 @@ enum Scheduler {
                 out.write(" us")
             }
             if thread.pointee.killPending { out.write(" killed") }
+            if thread.pointee.state == .ready {
+                out.write(" ready for ")
+                writeOffset(thread.pointee.readySince, to: out)
+                out.write(" us")
+            }
             out.write(" queue ")
             out.write(hex: thread.pointee.waitQueue?.address ?? 0)
             out.write(" timer ")

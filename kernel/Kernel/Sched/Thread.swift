@@ -41,6 +41,8 @@ struct Thread: ~Copyable {
     var runQueue = RunQueue.none
     /// When it last started running, for charging the time it used.
     var runStart: UInt64 = 0
+    /// When it last became ready (diagnostics: Scheduler.dump).
+    var readySince: UInt64 = 0
     // Fair: virtual runtime, and how far ahead of its CPU's minimum it was
     // when it left (carried to wherever it runs next).
     var vruntime: UInt64 = 0

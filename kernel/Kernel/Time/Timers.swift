@@ -147,12 +147,29 @@ enum Timers {
         if earliest == .max { disarmHardware() } else { armHardware(atNanoseconds: earliest) }
     }
 
+    /// The most a timer interrupt waits for a deadline it came before.
+    static var earlyTolerance: UInt64 { 1_000_000 }
+
     /// The timer interrupt (interrupts masked).
     static func handleInterrupt() {
         let queue = unsafe self.queue
         unsafe queue.pointee.interrupts += 1
         unsafe queue.pointee.programmed = .max
-        let now = Clock.now()
+        var now = Clock.now()
+        // Early by a little (KVM's TSC deadline came ~240 us early for a
+        // timer 10 s out, ~24 ppm): wait for the earliest instead of
+        // re-arming for it, which was a second wakeup (K10f). Timers
+        // never run early.
+        var earliest = UInt64.max
+        for i in 0..<32 where unsafe queue.pointee.entries[i].id != 0 {
+            earliest = min(earliest, unsafe queue.pointee.entries[i].deadline)
+        }
+        if earliest > now, earliest - now <= earlyTolerance {
+            while now < earliest {
+                arch_spin_pause()
+                now = Clock.now()
+            }
+        }
         for i in 0..<32 {
             let entry = unsafe queue.pointee.entries[i]
             guard entry.id != 0, entry.deadline <= now, let callback = entry.callback else { continue }
