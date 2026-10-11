@@ -1498,6 +1498,12 @@ Debugger channels, K13g part 2 (Kernel/Object/Exception.swift; task.h):
 - Not yet: the debugger channel's ZX_EXCP_USER (thread_raise_exception).
 - Mode 17's `debugger`: our own process's debugger sees a thread start
   (registers) and exit, a breakpoint with a second chance.
+- Post-mortem freeze (Todhchai requirement 19) is user space's, as on
+  Fuchsia (its crash service's "Limbo"): a crashed thread stays in its
+  exception while a handler holds the exception handle; its registers,
+  exception report and the process's memory can be read, the handle can
+  move over a channel to a debugger, and the thread stays frozen until
+  its holder resumes or ends it. Mode 17's `postmortem` checks the flow.
 
 Single-step and hardware breakpoints, K13g part 3 (Kernel/Object/HardwareDebug.swift,
 cpu.S `arch_debug_*`; task.h):

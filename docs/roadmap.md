@@ -95,7 +95,7 @@ as information).
 | 15 | FIFO, counter, stream, socket, clock, debuglog | **Done** (K8a, K10a, K13b, K13c, K13f) |
 | 16 | Pager | **Done** (K13d, K13h); no eviction yet |
 | 17 | Rings | Nothing needed from croi; Zircon's IOB not implemented |
-| 19 | Debug syscalls | **Done** (K7d, K13g) except keeping a crashed process frozen for post-mortem attach |
+| 19 | Debug syscalls | **Done** (K7d, K13g); a crashed process is kept frozen by its exception handler holding the exception (Fuchsia's Limbo pattern, tested) |
 | 20 | Firmware data for user space (ACPI tables and op regions, GOP framebuffer) behind resources | **Done** (K9b) |
 
 ## Milestones
@@ -841,7 +841,6 @@ What is still open after K13, gathered from the milestones above, CLAUDE.md's
 from Zircon, see docs/zircon-divergences.md.
 
 **Todhchai's requirements and extensions**
-- Requirement 19: keeping a crashed process frozen for post-mortem attach.
 - Requirement 3: page loaning for contiguous VMOs (the Q8B fragmentation
   answer); ACPI-reclaim memory stays wired.
 - Requirement 9: lazy AMX through XFD, SME streaming mode, per-thread SVE

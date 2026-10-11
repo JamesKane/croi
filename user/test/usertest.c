@@ -3678,6 +3678,69 @@ static int64_t smc(const startup_t *s) {
   return 0;
 }
 
+// Requirement 19's post-mortem freeze (Fuchsia's "Limbo", user space on
+// Zircon's mechanisms): a crashed thread stays in its exception while the
+// handler holds the exception handle; meanwhile its registers and the
+// process's memory are read, and the handle moves over a channel to
+// another holder (a debugger), the thread still frozen, until released.
+static void crasher(uint64_t arg) {
+  *(volatile uint64_t *)arg = 0xC0FFEE;  // in the caller's frame: no writable statics here
+  *(volatile uint64_t *)0x10 = 1;  // a fatal page fault
+  sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
+}
+
+static int64_t postmortem_checks(const startup_t *s, uint32_t *channel_out);
+
+static int64_t postmortem(const startup_t *s) {
+  uint32_t channel = 0;
+  int64_t result = postmortem_checks(s, &channel);
+  if (channel != 0) sys(CROI_SYS_HANDLE_CLOSE, channel, 0, 0, 0, 0);
+  return result;
+}
+
+static int64_t postmortem_checks(const startup_t *s, uint32_t *channel_out) {
+  uint32_t channel = 0, exception = 0, a = 0, b = 0, moved = 0, actual[2];
+  croi_exception_info_t info;
+  croi_thread_state_general_regs_t regs;
+  croi_exception_report_t report;
+  croi_info_thread_t state;
+  uint64_t counts[2], marker = 0;
+  volatile uint64_t crash_marker = 0;
+  CHECK(590, sys(CROI_SYS_TASK_CREATE_EXCEPTION_CHANNEL, s->process, 0, (uint64_t)&channel, 0, 0) == 0 &&
+                 (*channel_out = channel));
+  uint32_t thread = start_thread(s, crasher, (uint64_t)&crash_marker);
+  CHECK(591, next_exception(channel, &info, &exception) && info.type == CROI_EXCP_FATAL_PAGE_FAULT &&
+                 sys(CROI_SYS_THREAD_READ_STATE, thread, CROI_THREAD_STATE_GENERAL_REGS, (uint64_t)&regs, sizeof regs, 0) == 0 &&
+                 sys6(CROI_SYS_OBJECT_GET_INFO, thread, CROI_INFO_THREAD_EXCEPTION_REPORT, (uint64_t)&report, sizeof report,
+                      (uint64_t)&counts[0], (uint64_t)&counts[1]) == 0 &&
+#if defined(__x86_64__)
+                 report.context.arch.cr2 == 0x10 &&
+#elif defined(__aarch64__)
+                 report.context.arch.far == 0x10 &&
+#else
+                 report.context.arch.tval == 0x10 &&
+#endif
+                 sys(CROI_SYS_PROCESS_READ_MEMORY, s->process, (uint64_t)&crash_marker, (uint64_t)&marker, 8, 0) == 0 &&
+                 marker == 0xC0FFEE);
+  // Handed to another holder: still frozen in its exception.
+  CHECK(592, sys(CROI_SYS_CHANNEL_CREATE, 0, (uint64_t)&a, (uint64_t)&b, 0, 0) == 0 &&
+                 sys6(CROI_SYS_CHANNEL_WRITE, a, 0, (uint64_t)"pm", 2, (uint64_t)&exception, 1) == 0 &&
+                 sys6(CROI_SYS_CHANNEL_READ, b, 0, (uint64_t)&marker, (uint64_t)&moved, 8 | (uint64_t)1 << 32,
+                      (uint64_t)actual) == 0 && actual[1] == 1);
+  sys(CROI_SYS_NANOSLEEP, now_ns() + 20000000ull, 0, 0, 0, 0);
+  uint32_t exit_state = CROI_EXCEPTION_STATE_THREAD_EXIT;
+  CHECK(593, sys6(CROI_SYS_OBJECT_GET_INFO, thread, CROI_INFO_THREAD, (uint64_t)&state, sizeof state, (uint64_t)&counts[0],
+                  (uint64_t)&counts[1]) == 0 &&
+                 state.state == CROI_THREAD_STATE_BLOCKED_EXCEPTION &&
+                 sys(CROI_SYS_OBJECT_SET_PROPERTY, moved, CROI_PROP_EXCEPTION_STATE, (uint64_t)&exit_state, 4, 0) == 0 &&
+                 sys(CROI_SYS_HANDLE_CLOSE, moved, 0, 0, 0, 0) == 0 &&
+                 (wait_for(thread, CROI_SIGNAL_TASK_TERMINATED, 3000000000ull) & CROI_SIGNAL_TASK_TERMINATED));
+  sys(CROI_SYS_HANDLE_CLOSE, thread, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, a, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, b, 0, 0, 0, 0);
+  return 0;
+}
+
 // K13b: FIFOs (Zircon's: records into the peer's ring, READABLE /
 // WRITABLE / PEER_CLOSED, user signals to the peer) and
 // vmo_replace_as_executable (a VMEX resource; the handle consumed).
@@ -4013,6 +4076,8 @@ static int64_t extensions(const startup_t *s) {
   if (resized != 0) return resized;
   int64_t smcs = smc(s);
   if (smcs != 0) return smcs;
+  int64_t frozen = postmortem(s);
+  if (frozen != 0) return frozen;
   int64_t random = cprng_checks();
   if (random != 0) return random;
 
