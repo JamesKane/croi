@@ -91,6 +91,12 @@ if(CROI_ARCH STREQUAL amd64)
     COMMAND ${CROI_QEMU} --iommu amd --test "iommu:  AMD-Vi:"
             ${CROI_ARCH} ${CROI_ESP_DIR} ${CMAKE_BINARY_DIR}/qemu-amd-iommu ${CROI_EDK2_DIR})
   set_tests_properties(boot-amd-iommu PROPERTIES TIMEOUT 120)
+  # AMD-Vi with XT (K12g): 128-bit interrupt remapping entries, x2APIC
+  # destinations (boot-amd-iommu has the 32-bit ones).
+  add_test(NAME boot-amd-iommu-xt
+    COMMAND ${CROI_QEMU} --iommu amd-xt --test "iommu:  AMD-Vi:"
+            ${CROI_ARCH} ${CROI_ESP_DIR} ${CMAKE_BINARY_DIR}/qemu-amd-iommu-xt ${CROI_EDK2_DIR})
+  set_tests_properties(boot-amd-iommu-xt PROPERTIES TIMEOUT 120)
 endif()
 
 if(CROI_ARCH STREQUAL rv64)

@@ -346,6 +346,12 @@ enum IoApic {
         write(mmio, 0x10 + 2 * pin, low)
     }
 
+    /// Whether `body` holds for every IOAPIC's MADT id.
+    static func allIds(_ body: (UInt8) -> Bool) -> Bool {
+        for i in 0..<chipCount where !body(chips[i].id) { return false }
+        return true
+    }
+
     /// The source id `gsi`'s IOAPIC sends interrupts with, if the DMAR says.
     static func sourceId(_ gsi: UInt32) -> UInt16? {
         for i in 0..<chipCount where gsi >= chips[i].gsiBase && gsi - chips[i].gsiBase < chips[i].pins {

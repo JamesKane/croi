@@ -106,9 +106,7 @@ enum DeviceIrqs {
             guard InterruptRemapping.reaches(target) else { throw .notSupported }
             InterruptRemapping.set(InterruptRemapping.gsiIndex(number), vector: IoApic.firstVector + number,
                                    apicId: target, level: level, source: IoApic.sourceId(number))
-            controllerLock.withLock {
-                IoApic.programRemapped(number, level: level, activeLow: activeLow, index: InterruptRemapping.gsiIndex(number))
-            }
+            controllerLock.withLock { InterruptRemapping.programIoApic(number, level: level, activeLow: activeLow) }
             return
         }
         #endif
@@ -212,6 +210,10 @@ enum DeviceIrqs {
             var first: UInt32 = 0
             while first + count <= msiVectorCount {
                 if unsafe inUse[cpu] & (mask << UInt64(first)) == 0 {
+                    // AMD-Vi remapping: their indices too, or not at all.
+                    guard InterruptRemapping.allocateMsiIndices(cpu: cpu, vector: msiFirstVector + first, count: count) else {
+                        return nil
+                    }
                     unsafe inUse[cpu] |= mask << UInt64(first)
                     return msiFirstVector + first
                 }
@@ -226,6 +228,7 @@ enum DeviceIrqs {
             guard let inUse = unsafe msiInUse else { return }
             let mask: UInt64 = count >= 64 ? ~0 : (1 << UInt64(count)) - 1
             unsafe inUse[cpu] &= ~(mask << UInt64(vector - msiFirstVector))
+            InterruptRemapping.freeMsiIndices(cpu: cpu, vector: vector, count: count)
         }
     }
 

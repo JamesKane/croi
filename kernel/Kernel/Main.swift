@@ -206,6 +206,7 @@ func kernel_main_continue() -> Never {
         Dmar.initialize(acpi)
         Vtd.boot(console)
         Ivrs.initialize(acpi)
+        Amdvi.boot(acpi, console)
         #elseif arch(arm64)
         Iort.initialize(acpi)
         #elseif arch(riscv64)

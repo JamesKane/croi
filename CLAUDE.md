@@ -832,7 +832,23 @@ AMD-Vi, K12b (Kernel/Iommu/AmdIommu.swift; croi's type CROI_IOMMU_TYPE_AMD
   config page, bus mastering on). Claimed: V, TV, mode 4, IR, IW, domain
   id; released: V and TV with mode 0 and no permissions (blocked). Event
   batches log the first four and count the rest.
-- QEMU: `qemu.sh --iommu amd` (`amd-iommu,intremap=off,dma-remap=on`:
+- K12g: `Amdvi.boot` (after `Ivrs.initialize`) brings up every IVRS unit
+  at boot (as VT-d's; `create` binds). Interrupt remapping when every
+  unit has IASup, the IVRS's special device entries (type 0x48, variety
+  1) describe every MADT IOAPIC (Linux's rule), and XT + GA or no APIC id
+  above 255 (the MADT's): one 2048-entry table that every device table
+  entry names (word 2: IV, IntTabLen 11, IntCtl remapped; 128-bit
+  entries with GAEn + XTEn, else 32-bit), no source verification (an
+  MSI-X table doesn't name its device). Indices: IOAPIC pin = its vector
+  0x30 + GSI (the redirection entry is unchanged, so EOI broadcasts
+  match); MSIs from 0x100, allocated with their vectors in
+  `DeviceIrqs.allocateMsi` (`InterruptRemapping.allocateMsiIndices`,
+  consecutive and aligned), message 0xFEE00000 with the index as data.
+  Every change: INVALIDATE_IOMMU_ALL. The IOMMU's own event MSI is
+  compatibility format (not remapped).
+- QEMU: `qemu.sh --iommu amd` (`amd-iommu,intremap=on` under TCG, off
+  under KVM, `dma-remap=on`; `--iommu amd-xt` adds xtsup=on: test
+  `boot-amd-iommu-xt`;
   without dma-remap QEMU 10.2 doesn't translate emulated devices, and
   edu's test DMA wrote physical memory); test `boot-amd-iommu`. QEMU's
   events carry address 0, and a refused 64-byte DMA logs one fault per

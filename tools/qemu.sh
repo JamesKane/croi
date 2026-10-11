@@ -67,8 +67,9 @@ case $arch in
     [[ " $* " == *" kvm "* ]] && intremap=off
     case $iommu in
       intel) iommu_device=intel-iommu,intremap=$intremap; [[ $intremap == on ]] && iommu_device+=,eim=on ;;
-      amd) iommu_device=amd-iommu,intremap=off,dma-remap=on ;;
-      *) echo "qemu.sh: --iommu takes intel or amd" >&2; exit 2 ;;
+      amd) iommu_device=amd-iommu,intremap=$intremap,dma-remap=on ;;
+      amd-xt) iommu_device=amd-iommu,intremap=on,xtsup=on,dma-remap=on ;;
+      *) echo "qemu.sh: --iommu takes intel, amd or amd-xt" >&2; exit 2 ;;
     esac
     qemu=(qemu-system-x86_64 -machine q35 -cpu max -device "$iommu_device" -device edu,addr=0x10
           -drive "if=pflash,format=raw,readonly=on,file=$edk2/ovmf/OVMF_CODE.fd"

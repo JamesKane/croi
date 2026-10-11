@@ -64,7 +64,7 @@ enum Amdvi {
                   unity.first_device <= unity.last_device else { throw .invalidArgs }
             at += unitySize
         }
-        guard let ivhd = Ivrs.find(header.register_base, segment: header.pci_segment) else { throw .notFound }
+        guard Ivrs.find(header.register_base, segment: header.pci_segment) != nil else { throw .notFound }
         unitsLock.lock()
         defer { unitsLock.unlock() }
         for i in 0..<unitCount where AmdviUnitPointer(address: units[i]).pointee.registerBase == header.register_base {
@@ -74,12 +74,79 @@ enum Amdvi {
             unit.pointee.bound = true
             return unit.address
         }
-        guard unitCount < units.count else { throw .noResources }
-        let unit = try AmdviUnitPointer.make(ivhd, descriptor)
-        unit.pointee.bound = true
-        units[unitCount] = unit.address
-        unitCount += 1
-        return unit.address
+        throw .notSupported  // in the IVRS, but boot couldn't bring it up
+    }
+
+    /// Brings up every IVRS unit (devices untranslated until claimed), then
+    /// interrupt remapping (K12g) where every unit and the IVRS allow it.
+    static func boot(_ acpi: AcpiTables, _ console: Uart) {
+        for i in 0..<Ivrs.count where unitCount < units.count {
+            if let unit = try? AmdviUnitPointer.make(Ivrs.units[i]) {
+                units[unitCount] = unit.address
+                unitCount += 1
+            }
+        }
+        guard unitCount > 0 else { return }
+        console.write("  iommu:  AMD-Vi, ")
+        console.write(decimal: UInt64(unitCount))
+        console.write(unitCount == 1 ? " unit; interrupt remapping " : " units; interrupt remapping ")
+        if BootOptions.has("croi.intremap=off") {
+            console.write("off (croi.intremap=off)\n")
+            return
+        }
+        // As Linux: only where the IVRS describes every IOAPIC (firmware
+        // that doesn't can't have its IOAPICs' interrupts remapped).
+        guard unitCount == Ivrs.count, IoApic.allIds({ Ivrs.describesIoApic($0) }) else {
+            console.write("not offered by the platform\n")
+            return
+        }
+        var invalidateAll = true, extended = true
+        for i in 0..<unitCount {
+            let features = AmdviUnitPointer(address: units[i]).read64(Amdvi.extendedFeatures)
+            invalidateAll = invalidateAll && features & (1 << 6) != 0             // IASup
+            extended = extended && features & (1 << 2) != 0 && features & (1 << 7) != 0  // XTSup, GASup
+        }
+        guard invalidateAll else {
+            console.write("not supported by every unit\n")
+            return
+        }
+        var highest: UInt64 = 0
+        Madt.forEachCpu(acpi) { cpu in highest = max(highest, cpu.hardwareId) }
+        guard extended || highest <= 0xFF else {
+            console.write("off (x2APIC ids above 255 without XT)\n")
+            return
+        }
+        guard InterruptRemapping.startAmd(extended: extended) else {
+            console.write("off (no memory)\n")
+            return
+        }
+        // Every device's entry gets the table: remapped (IntCtl 10b), 2048
+        // entries; then the units drop what they cached.
+        let word2 = InterruptRemapping.table | 11 << 1 | 1 | 2 << 60
+        for i in 0..<unitCount {
+            let unit = AmdviUnitPointer(address: units[i])
+            unit.pointee.lock.withLock {
+                for device in 0..<65536 { unsafe (unit.entry(UInt16(device)) + 2).pointee = word2 }
+                if extended {
+                    unit.write64(Amdvi.control, unit.read64(Amdvi.control) | 1 << 17 | 1 << 50)  // GAEn, XTEn
+                }
+                unit.submitLocked(0, 8 << 28, 0, 0)  // INVALIDATE_IOMMU_ALL
+                try? unit.waitLocked()
+            }
+        }
+        InterruptRemapping.enabled = true
+        console.write(extended ? "on, x2APIC destinations\n" : "on\n")
+    }
+
+    /// After an interrupt table entry changed: every unit drops its caches.
+    static func invalidateInterrupts() {
+        for i in 0..<unitCount {
+            let unit = AmdviUnitPointer(address: units[i])
+            unit.pointee.lock.withLock {
+                unit.submitLocked(0, 8 << 28, 0, 0)  // INVALIDATE_IOMMU_ALL (IASup is required)
+                try? unit.waitLocked()
+            }
+        }
     }
 
     static func unbind(_ address: UInt64) {
@@ -183,6 +250,14 @@ enum Ivrs {
 
     nonisolated(unsafe) static var units = InlineArray<8, Unit>(repeating: Unit())
     nonisolated(unsafe) static var count = 0
+    /// IOAPICs the IVHDs' special device entries describe (their ids).
+    nonisolated(unsafe) static var ioApics = InlineArray<8, UInt8>(repeating: 0)
+    nonisolated(unsafe) static var ioApicCount = 0
+
+    static func describesIoApic(_ id: UInt8) -> Bool {
+        for i in 0..<ioApicCount where ioApics[i] == id { return true }
+        return false
+    }
 
     static func initialize(_ acpi: AcpiTables) {
         guard let ivrs = acpi.table("IVRS") else { return }
@@ -202,6 +277,19 @@ enum Ivrs {
                     if find(unit.registerBase, segment: unit.segment) == nil {
                         units[count] = unit
                         count += 1
+                    }
+                    // Device entries: 4 bytes below type 64, 8 below 128;
+                    // special devices (type 0x48) name IOAPICs (variety 1).
+                    var entry = at + (type == 0x10 ? 24 : 40)
+                    while entry + 4 <= at + length {
+                        let kind = table.load(fromByteOffset: entry, as: UInt8.self)
+                        let size = kind < 64 ? 4 : kind < 128 ? 8 : Int(table.load(fromByteOffset: entry + 21, as: UInt8.self)) + 22
+                        guard entry + size <= at + length else { break }
+                        if kind == 0x48, table.load(fromByteOffset: entry + 7, as: UInt8.self) == 1, ioApicCount < ioApics.count {
+                            ioApics[ioApicCount] = table.load(fromByteOffset: entry + 4, as: UInt8.self)
+                            ioApicCount += 1
+                        }
+                        entry += size
                     }
                 }
                 at += length
@@ -257,7 +345,7 @@ struct AmdviUnit: ~Copyable {
 
     // MARK: Creation
 
-    static func make(_ ivhd: Ivrs.Unit, _ descriptor: RawSpan) throws(Status) -> AmdviUnitPointer {
+    static func make(_ ivhd: Ivrs.Unit) throws(Status) -> AmdviUnitPointer {
         let registers: UInt64
         do throws(VmError) {
             registers = try kernelAspace.mapPhysical(ivhd.registerBase, size: 4 * KernelLayout.pageSize,
@@ -269,7 +357,6 @@ struct AmdviUnit: ~Copyable {
         unsafe raw.bindMemory(to: AmdviUnit.self, capacity: 1).initialize(to: AmdviUnit(
             registers: registers, registerBase: ivhd.registerBase, segment: ivhd.segment, iommuDeviceId: ivhd.deviceId))
         let unit = AmdviUnitPointer(address: UInt64(UInt(bitPattern: raw)))
-        try unit.setDescriptor(descriptor)
 
         // Off while the tables change (firmware may have left it on).
         unit.write64(Amdvi.control, 0)
@@ -329,9 +416,11 @@ struct AmdviUnit: ~Copyable {
             cap = UInt64(read8(cap + 1) & 0xFC)
             hops += 1
         }
-        guard cap != 0, read8(cap) == 5,
-              let vector = DeviceIrqs.allocateMsi(cpu: 0, count: 1),
-              let message = DeviceIrqs.msiMessage(cpu: 0, vector: vector) else { return false }
+        // The IOMMU's own interrupt isn't remapped: compatibility format.
+        let apicId = DeviceIrqs.apicId(cpu: 0)
+        guard cap != 0, read8(cap) == 5, apicId <= 0xFF,
+              let vector = DeviceIrqs.allocateMsi(cpu: 0, count: 1) else { return false }
+        let message = (address: 0xFEE0_0000 | apicId << 12, data: vector)
         DeviceIrqs.setKernelMsiHandler(cpu: 0, vector: vector, Amdvi.eventInterrupt, address)
         let control = read16(cap + 2)
         write32(cap + 4, UInt32(truncatingIfNeeded: message.address))

@@ -744,10 +744,18 @@ the SMC resource.
   255 work. iommu_create binds boot's units. Not yet: posted interrupts,
   source verification for MSI-X, IOAPIC scopes behind bridges. Bench
   (KVM) boots keep remapping off (QEMU needs a split irqchip for it).
-- **K12g: AMD-Vi interrupt remapping** (per-device remapping tables,
-  IOAPIC device ids from the IVRS, GA mode for x2APIC). The arm64 side
-  is the GICv3 ITS and the rv64 side the IMSIC (with the RISC-V IOMMU's
-  MSI page tables): both are their own steps.
+- **K12g: AMD-Vi interrupt remapping.** **Done** (2026-10-11). Units at
+  boot; one shared 2048-entry table named by every device entry (an
+  MSI-X table doesn't say which device it is, so no source
+  verification: VT-d verifies IOAPICs and plain MSIs), IOAPIC indices =
+  their vectors, MSI indices allocated with their vectors, 32-bit
+  entries or 128-bit GA ones with x2APIC destinations, IASup required,
+  enabled only where the IVRS describes every IOAPIC. Tested on QEMU's
+  amd-iommu with and without xtsup. Not yet: per-device tables with
+  source verification, guest/posted mode.
+- The arm64 side of interrupt remapping is the GICv3 ITS and the rv64
+  side the IMSIC (with the RISC-V IOMMU's MSI page tables): both are
+  their own steps.
 
 ### K13a (agreed with Todhchai, 2026-10-11): VMO slices and ZERO_CHILDREN
 
