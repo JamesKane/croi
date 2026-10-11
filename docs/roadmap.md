@@ -639,7 +639,33 @@ if K10 splits (nothing else in M4 depends on it).
   idle polling's re-arming), and a budget line counting each CPU's
   wakeups over an idle window in the lean boot.
 
-Not in K10 (after M4 unless Todhchai's order says otherwise): VMO
+### K11: Todhchai M5, Vulkan and tier 1 foundations (draft, on branch m5)
+
+Todhchai's M5 (`../todhchai/docs/milestones/M5.md`) needs nothing new
+from croi for the GPU path: BAR windows are physical VMOs with a per-VMO
+cache policy, fences are counter_wait_async, DMA is M3's BTIs. Its tier 1
+step (M5k: pthreads over futexes, ELF TLS, a dynamic linker) and the
+loader that loads the client driver as a shared object need these, in
+this order, pending Todhchai's confirmation:
+
+- **K11a: VMO children** (requirement 7, phase B). `vmo_create_child`
+  (48) with SNAPSHOT_AT_LEAST_ON_WRITE, NO_WRITE: an anonymous child
+  that reads as its parent (recursively) and copies each page in at its
+  first touch; Zircon's rights. Started on the branch. Then SLICE (a
+  window sharing the parent's pages: mappings of the parent's own pages
+  through the child, so decommits must reach the child's mappers) and
+  strict SNAPSHOT (isolation from the parent's later writes: needs
+  Zircon's hidden parent or eager copies), as the dynamic linker needs.
+- **K11b: position-independent programs and randomness.** ET_DYN
+  loading in ProgramLoader and userboot (today "a PIE (not yet)"), with
+  a randomized load base (ASLR) from `cprng_draw` (Zircon's
+  zx_cprng_draw: RDRAND/RNDR/Zkr-seeded, for libc's stack guard, hash
+  seeds and ASLR) and `cprng_add_entropy`.
+- **K11c: ext 6 to user space, if M5 wants it** (GPU memory accounting:
+  accounts, device-local VMOs, pressure packets, kernel-only since K4c).
+  Under Venus the GPU's memory is the host's, so possibly after M5.
+
+Not in K11 (after M5 unless Todhchai's order says otherwise): VMO
 children for the dynamic linker, FIFO/socket/stream, the pager and debug
 syscalls (M5 and later); GPU memory accounting syscalls (ext 6, with the
 GPU in M5); VT-d and the other IOMMUs; the GICv3 ITS and RISC-V IMSIC;

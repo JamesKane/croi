@@ -757,6 +757,7 @@ extension VmError {
         case .alreadyMapped: .alreadyExists
         case .denied: .accessDenied
         case .unaligned, .outOfRange, .invalidArgument: .invalidArgs
+        case .notSupported: .notSupported
         }
     }
 }

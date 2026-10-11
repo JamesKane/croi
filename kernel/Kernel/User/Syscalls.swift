@@ -259,6 +259,8 @@ enum Syscalls {
             try Policy.check(UInt32(CROI_POL_NEW_VMO))
             try check(a[2], MemoryLayout<UInt32>.size)
             try put(try table.add(try VmoObject.create(size: a[0]), rights: VmoObject.defaultRights), a[2])
+        case 48:  // vmo_create_child(vmo, options, offset, size, uint32_t *out), K11a
+            try VmoObject.createChildCall(a, table)
         case 41:  // vmo_read
             try vmoCopy(table, handle, user: a[1], offset: a[2], length: a[3], toUser: true)
         case 42:  // vmo_write
@@ -442,7 +444,8 @@ enum Syscalls {
         var done: UInt64 = 0
         while done < length {
             let at = offset + done
-            guard let phys = toUser ? (vmo.lookup(at: at) ?? vmo.commit(at: at)) : vmo.commit(at: at) else { throw .noMemory }
+            // Reading a child's untouched page reads its parent's (no copy).
+            guard let phys = toUser ? (vmo.content(at: at) ?? vmo.commit(at: at)) : vmo.commit(at: at) else { throw .noMemory }
             let within = at % KernelLayout.pageSize
             let chunk = min(length - done, KernelLayout.pageSize - within)
             let kernel = KernelLayout.physmap(phys) + within

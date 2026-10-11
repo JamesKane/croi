@@ -20,6 +20,9 @@ enum VmError: Error, Equatable {
     case dead
     /// Pages of the range are pinned for DMA (K9e).
     case pinned
+    /// Not for this kind of VMO (a snapshot of a physical one; decommit
+    /// of a child).
+    case notSupported
 }
 
 /// What a virtual address translates to.

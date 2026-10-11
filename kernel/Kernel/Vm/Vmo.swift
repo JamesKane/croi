@@ -10,6 +10,15 @@ import Synchronization
 /// - physical: someone's physical range, e.g. device memory (never owned);
 /// - contiguous: physically contiguous pages committed at creation, with
 ///   an alignment (K4b adds an address limit and the boot-time pool).
+///
+/// An anonymous VMO may have a parent (K11a, vmo_create_child's
+/// SNAPSHOT_AT_LEAST_ON_WRITE): a page it hasn't committed reads as the
+/// parent's at `parentOffset` + its offset (the parent's own parent's, and
+/// so on; zero past the parent's end or where nobody has one), and its
+/// first touch, read or write, copies that page in. Zircon's "at least on
+/// write" allows the copy that early, so no hidden-node tree is needed:
+/// the parent's later writes show in the child only where the child
+/// hasn't touched. Lock order: child -> parent.
 struct VmoRecord: ~Copyable {
     enum Kind: Equatable {
         case anonymous
@@ -44,6 +53,9 @@ struct VmoRecord: ~Copyable {
     /// Ranges pinned for DMA (K9e, a PMT each): their pages stay committed
     /// and in place, and the cache policy stays.
     var pins = UniqueArray<PinRange>()
+    /// A copy-on-first-touch child's parent (a reference held), or nil.
+    var parent: VmoPointer? = nil
+    var parentOffset: UInt64 = 0
 
     var pageCount: Int { Int(size / KernelLayout.pageSize) }
 }
@@ -71,6 +83,7 @@ struct VmoRecord: ~Copyable {
             }
             account.release()
         }
+        pointee.parent?.release()
         switch pointee.kind {
         case .anonymous:
             pointee.pages.forEach { _, phys in pmm.free(phys) }
@@ -101,6 +114,8 @@ struct VmoRecord: ~Copyable {
                 let present = pointee.pages.lookup(index)
                 if present != 0 { return present }
                 if let account = pointee.account, !account.charge(KernelLayout.pageSize) { return nil }
+                // A child's first touch: what it reads now, copied in.
+                let source = pointee.parent.flatMap { $0.content(at: pointee.parentOffset + offset) }
                 guard let phys = pmm.allocatePage(.vmo) else {
                     pointee.account?.uncharge(KernelLayout.pageSize)
                     return nil
@@ -110,8 +125,13 @@ struct VmoRecord: ~Copyable {
                     pointee.account?.uncharge(KernelLayout.pageSize)
                     return nil
                 }
-                unsafe UnsafeMutableRawPointer(bitPattern: UInt(KernelLayout.physmap(phys)))!
-                    .initializeMemory(as: UInt8.self, repeating: 0, count: Int(KernelLayout.pageSize))
+                let page = unsafe UnsafeMutableRawPointer(bitPattern: UInt(KernelLayout.physmap(phys)))!
+                if let source {
+                    unsafe page.copyMemory(from: UnsafeRawPointer(bitPattern: UInt(KernelLayout.physmap(source)))!,
+                                           byteCount: Int(KernelLayout.pageSize))
+                } else {
+                    unsafe page.initializeMemory(as: UInt8.self, repeating: 0, count: Int(KernelLayout.pageSize))
+                }
                 pointee.committedPages += 1
                 Trace.event(CROI_TRACE_VM, UInt16(CROI_TK_COMMIT), pointee.traceId, UInt64(index))
                 return phys
@@ -137,6 +157,16 @@ struct VmoRecord: ~Copyable {
     var inPhysmap: Bool {
         if case .physical = pointee.kind { return pointee.sharedReadOnly }
         return true
+    }
+
+    /// The page whose bytes `offset` reads as, without committing: its own,
+    /// else (a child) its parent's at the matching offset, recursively; nil
+    /// for zero. Past the end: nil.
+    func content(at offset: UInt64) -> UInt64? {
+        guard offset < pointee.size else { return nil }
+        if let own = lookup(at: offset) { return own }
+        guard let parent = pointee.parent else { return nil }
+        return parent.content(at: pointee.parentOffset + offset)
     }
 
     /// The physical page holding byte `offset` if committed (no commit).
@@ -286,6 +316,21 @@ struct Vmo: ~Copyable {
         }
     }
 
+    /// vmo_create_child's SNAPSHOT_AT_LEAST_ON_WRITE child of `parent`
+    /// (anonymous: its own or a child; others are NOT_SUPPORTED, as
+    /// Zircon refuses snapshots of physical and contiguous VMOs): `size`
+    /// bytes reading as the parent's from `offset` (zero past its end),
+    /// each page copied in at its first touch. Holds a parent reference.
+    init(childOf parent: VmoPointer, offset: UInt64, size: UInt64) throws(VmError) {
+        guard case .anonymous = parent.pointee.kind else { throw .notSupported }
+        guard offset % KernelLayout.pageSize == 0 else { throw .invalidArgument }
+        let made = try Self.make(.anonymous, size: size, cache: .cached)
+        parent.retain()
+        made.pointee.parent = parent
+        made.pointee.parentOffset = offset
+        record = made
+    }
+
     /// Size 0 only for anonymous VMOs (Zircon allows them: nothing to map).
     private static func make(_ kind: VmoRecord.Kind, size: UInt64, cache: CachePolicy) throws(VmError) -> VmoPointer {
         guard size % KernelLayout.pageSize == 0, size > 0 || kind == .anonymous else { throw .invalidArgument }
@@ -324,6 +369,9 @@ struct Vmo: ~Copyable {
     func decommit(offset: UInt64, size: UInt64) throws(VmError) {
         try checkRange(offset, size)
         guard case .anonymous = record.pointee.kind else { throw .invalidArgument }
+        // A child's decommitted page would read as its parent's again, not
+        // zero (Zircon: NOT_SUPPORTED on snapshot children).
+        guard record.pointee.parent == nil else { throw .notSupported }
         var freed = UniqueArray<UInt64>()
         var aspaces = UniqueArray<UInt64>()
         try record.pointee.lock.withLock { () throws(VmError) in
@@ -421,10 +469,10 @@ struct Vmo: ~Copyable {
         while at < end {
             let pageStart = at & ~(page - 1)
             let length = min(end, pageStart + page) - at
-            if case .anonymous = record.pointee.kind, length == page,
+            if case .anonymous = record.pointee.kind, length == page, record.pointee.parent == nil,
                !record.pointee.lock.withLock({ record.pinnedLocked(pageStart, page) }) {
                 try decommit(offset: pageStart, size: page)
-            } else if let phys = record.lookup(at: pageStart) {
+            } else if let phys = record.pointee.parent != nil ? record.commit(at: pageStart) : record.lookup(at: pageStart) {
                 let address = KernelLayout.physmap(phys) + (at - pageStart)
                 unsafe UnsafeMutableRawPointer(bitPattern: UInt(address))!
                     .initializeMemory(as: UInt8.self, repeating: 0, count: Int(length))

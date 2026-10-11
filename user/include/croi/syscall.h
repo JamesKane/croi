@@ -35,6 +35,7 @@ enum : uint64_t {
   CROI_SYS_VMO_OP_RANGE = 45,      // (vmo, op, offset, size, buffer, buffer_size)
   CROI_SYS_VMO_SET_CACHE_POLICY = 46,  // (vmo, policy)
   CROI_SYS_VMO_CREATE_PHYSICAL = 47,   // (MMIO resource, paddr, size, uint32_t *out)
+  CROI_SYS_VMO_CREATE_CHILD = 48,      // (vmo, options, offset, size, uint32_t *out), K11a
   CROI_SYS_TRACE_CONFIGURE = 50,   // (resource, op, a, b, c, sample_hz)
   CROI_SYS_PMU_CONFIGURE = 51,     // (resource, op, a, b)
   // Jobs, processes, threads (K7a). Zircon's calls; vmar_* pack the VMAR

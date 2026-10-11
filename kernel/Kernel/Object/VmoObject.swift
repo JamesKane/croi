@@ -41,6 +41,56 @@ struct VmoObject: ~Copyable {
         return try wrap(vmo.record)
     }
 
+    /// The syscall (its own function: objectCall's size decides what the
+    /// optimizer folds there).
+    @inline(never)
+    static func createChildCall(_ a: InlineArray<6, UInt64>, _ table: borrowing HandleTable) throws(Status) {
+        try Syscalls.check(a[4], MemoryLayout<UInt32>.size)
+        let (child, rights) = try createChild(table, UInt32(truncatingIfNeeded: a[0]),
+                                              options: UInt32(truncatingIfNeeded: a[1]), offset: a[2], size: a[3])
+        try Syscalls.put(try table.add(child, rights: rights), a[4])
+    }
+
+    /// vmo_create_child (K11a). SNAPSHOT_AT_LEAST_ON_WRITE of an anonymous
+    /// VMO (a child too), optionally NO_WRITE; Zircon's rights: the
+    /// parent handle's (DUPLICATE and READ required) plus GET/SET_PROPERTY,
+    /// then a snapshot gains WRITE and loses EXECUTE unless NO_WRITE takes
+    /// WRITE away instead (how a loader keeps code executable). Not yet
+    /// (NOT_SUPPORTED): SNAPSHOT (isolated from the parent's later writes),
+    /// SLICE, REFERENCE, SNAPSHOT_MODIFIED, RESIZABLE.
+    static func createChild(_ table: borrowing HandleTable, _ handle: UInt32, options: UInt32, offset: UInt64,
+                            size: UInt64) throws(Status) -> (ObjectPointer, Rights) {
+        let snapshotAtLeastOnWrite = UInt32(CROI_VMO_CHILD_SNAPSHOT_AT_LEAST_ON_WRITE)
+        let noWrite = UInt32(CROI_VMO_CHILD_NO_WRITE)
+        let known = UInt32(CROI_VMO_CHILD_SNAPSHOT) | UInt32(CROI_VMO_CHILD_RESIZABLE) | UInt32(CROI_VMO_CHILD_SLICE)
+            | snapshotAtLeastOnWrite | noWrite | UInt32(CROI_VMO_CHILD_REFERENCE) | UInt32(CROI_VMO_CHILD_SNAPSHOT_MODIFIED)
+        guard options & ~known == 0 else { throw .invalidArgs }
+        if options & noWrite != 0, options & UInt32(CROI_VMO_CHILD_RESIZABLE) != 0 { throw .invalidArgs }
+        let kind = options & ~noWrite
+        guard kind != 0 else { throw .invalidArgs }
+        guard kind == snapshotAtLeastOnWrite else { throw .notSupported }
+        let pageMask = KernelLayout.pageSize - 1
+        guard size <= UInt64.max - pageMask else { throw .outOfRange }
+        let ref = try table.get(handle, type: .vmo, rights: [.duplicate, .read])
+        var rights = try table.rights(of: handle)
+        let parent = VmoPointer(address: UnsafeVmoObject(ref.object).vmo)
+        let child: Vmo
+        do throws(VmError) {
+            child = try Vmo(childOf: parent, offset: offset, size: (size + pageMask) & ~pageMask)
+        } catch {
+            throw error == .outOfMemory ? .noMemory : error.status
+        }
+        rights.insert(.getProperty)
+        rights.insert(.setProperty)
+        if options & noWrite != 0 {
+            rights.remove(.write)
+        } else {
+            rights.remove(.execute)
+            rights.insert(.write)
+        }
+        return (try wrap(child.record), rights)
+    }
+
     /// The VMO behind `handle`, checked for mapping with `rights`: the map
     /// right, plus read, write and execute rights for each access asked
     /// for (Zircon's rule). A reference the caller releases.

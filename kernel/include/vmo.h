@@ -7,6 +7,17 @@
 enum : uint32_t {
   // vmo_op_range ops (croi has no pager or discardable VMOs: LOCK,
   // UNLOCK, TRY_LOCK, DONT_NEED, ALWAYS_NEED are NOT_SUPPORTED).
+  // vmo_create_child options (Zircon's ZX_VMO_CHILD_*). K11a supports
+  // SNAPSHOT_AT_LEAST_ON_WRITE (each page copied in at the child's first
+  // touch of it) with or without NO_WRITE; the rest are NOT_SUPPORTED.
+  CROI_VMO_CHILD_SNAPSHOT = 1u << 0,
+  CROI_VMO_CHILD_RESIZABLE = 1u << 2,
+  CROI_VMO_CHILD_SLICE = 1u << 3,
+  CROI_VMO_CHILD_SNAPSHOT_AT_LEAST_ON_WRITE = 1u << 4,
+  CROI_VMO_CHILD_NO_WRITE = 1u << 5,
+  CROI_VMO_CHILD_REFERENCE = 1u << 6,
+  CROI_VMO_CHILD_SNAPSHOT_MODIFIED = 1u << 7,
+
   CROI_VMO_OP_COMMIT = 1,
   CROI_VMO_OP_DECOMMIT = 2,
   CROI_VMO_OP_CACHE_SYNC = 6,

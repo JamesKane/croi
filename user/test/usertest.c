@@ -2375,6 +2375,75 @@ static void spinner(uint64_t arg) {
   sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
 }
 
+// K11a: copy-on-first-touch VMO children. Returns 0 or the failed check.
+static int64_t vmo_children(void) {
+  enum { P = 4096 };
+  uint32_t parent = 0, child = 0, grand = 0, ro = 0, other = 0;
+  uint8_t byte = 0, page[64];
+  if (sys(CROI_SYS_VMO_CREATE, 3 * P, 0, (uint64_t)&parent, 0, 0) != 0) return 410;
+  byte = 'A';
+  if (sys(CROI_SYS_VMO_WRITE, parent, (uint64_t)&byte, 0, 1, 0) != 0) return 410;
+  byte = 'C';
+  if (sys(CROI_SYS_VMO_WRITE, parent, (uint64_t)&byte, 2 * P, 1, 0) != 0) return 410;
+  // Refusals: no type, unknown bits, kinds not yet, an unaligned offset.
+  if (sys(CROI_SYS_VMO_CREATE_CHILD, parent, 0, 0, P, (uint64_t)&other) != ERR_INVALID_ARGS ||
+      sys(CROI_SYS_VMO_CREATE_CHILD, parent, 1u << 9, 0, P, (uint64_t)&other) != ERR_INVALID_ARGS ||
+      sys(CROI_SYS_VMO_CREATE_CHILD, parent, CROI_VMO_CHILD_SNAPSHOT, 0, P, (uint64_t)&other) != ERR_NOT_SUPPORTED ||
+      sys(CROI_SYS_VMO_CREATE_CHILD, parent, CROI_VMO_CHILD_SLICE, 0, P, (uint64_t)&other) != ERR_NOT_SUPPORTED ||
+      sys(CROI_SYS_VMO_CREATE_CHILD, parent, CROI_VMO_CHILD_SNAPSHOT_AT_LEAST_ON_WRITE, 100, P, (uint64_t)&other) !=
+          ERR_INVALID_ARGS)
+    return 411;
+  // A child one page longer than its parent.
+  if (sys(CROI_SYS_VMO_CREATE_CHILD, parent, CROI_VMO_CHILD_SNAPSHOT_AT_LEAST_ON_WRITE, 0, 4 * P,
+          (uint64_t)&child) != 0)
+    return 412;
+  // Untouched, it reads the parent, including the parent's later writes.
+  if (sys(CROI_SYS_VMO_READ, child, (uint64_t)&byte, 0, 1, 0) != 0 || byte != 'A') return 413;
+  byte = 'B';
+  sys(CROI_SYS_VMO_WRITE, parent, (uint64_t)&byte, 0, 1, 0);
+  if (sys(CROI_SYS_VMO_READ, child, (uint64_t)&byte, 0, 1, 0) != 0 || byte != 'B') return 414;
+  // Written, it has its own page; the parent is untouched.
+  byte = 'X';
+  if (sys(CROI_SYS_VMO_WRITE, child, (uint64_t)&byte, 0, 1, 0) != 0) return 415;
+  sys(CROI_SYS_VMO_READ, parent, (uint64_t)&byte, 0, 1, 0);
+  if (byte != 'B') return 416;
+  sys(CROI_SYS_VMO_READ, child, (uint64_t)&byte, 0, 1, 0);
+  if (byte != 'X') return 416;
+  // Beyond the parent: zero; the parent's never-written page: zero; its third: 'C'.
+  for (int i = 0; i < 64; i++) page[i] = 0xEE;
+  if (sys(CROI_SYS_VMO_READ, child, (uint64_t)page, 3 * P, 64, 0) != 0) return 417;
+  for (int i = 0; i < 64; i++)
+    if (page[i] != 0) return 417;
+  sys(CROI_SYS_VMO_READ, child, (uint64_t)&byte, P, 1, 0);
+  if (byte != 0) return 417;
+  sys(CROI_SYS_VMO_READ, child, (uint64_t)&byte, 2 * P, 1, 0);
+  if (byte != 'C') return 417;
+  // A grandchild sees its parent's copy; a decommit of a child is refused.
+  if (sys(CROI_SYS_VMO_CREATE_CHILD, child, CROI_VMO_CHILD_SNAPSHOT_AT_LEAST_ON_WRITE, 0, P, (uint64_t)&grand) != 0)
+    return 418;
+  sys(CROI_SYS_VMO_READ, grand, (uint64_t)&byte, 0, 1, 0);
+  if (byte != 'X') return 418;
+  if (sys6(CROI_SYS_VMO_OP_RANGE, child, CROI_VMO_OP_DECOMMIT, 0, P, 0, 0) != ERR_NOT_SUPPORTED) return 419;
+  // Rights: a snapshot can be written and not executed; NO_WRITE can't be written.
+  croi_info_handle_basic_t info;
+  if (sys(CROI_SYS_OBJECT_GET_INFO, child, CROI_INFO_HANDLE_BASIC, (uint64_t)&info, sizeof info, 0) != 0 ||
+      !(info.rights & (1u << 3)) || (info.rights & (1u << 4)))
+    return 420;
+  if (sys(CROI_SYS_VMO_CREATE_CHILD, parent, CROI_VMO_CHILD_SNAPSHOT_AT_LEAST_ON_WRITE | CROI_VMO_CHILD_NO_WRITE, 0,
+          P, (uint64_t)&ro) != 0 ||
+      sys(CROI_SYS_VMO_WRITE, ro, (uint64_t)&byte, 0, 1, 0) != ERR_ACCESS_DENIED)
+    return 421;
+  // Mapped, a child faults its pages in from the parent.
+  uint64_t at = 0;
+  if (sys(CROI_SYS_VMO_MAP, child, 2 * P, P, 3, (uint64_t)&at) != 0 || *(volatile uint8_t *)at != 'C') return 422;
+  *(volatile uint8_t *)at = 'Z';
+  sys(CROI_SYS_VMO_READ, parent, (uint64_t)&byte, 2 * P, 1, 0);
+  if (byte != 'C') return 422;
+  uint32_t handles[] = {parent, child, grand, ro};
+  for (int i = 0; i < 4; i++) sys(CROI_SYS_HANDLE_CLOSE, handles[i], 0, 0, 0, 0);
+  return 0;
+}
+
 static int64_t extensions(const startup_t *s) {
   // A thread's trace id: task << 12 | index, distinct per thread.
   // They spin until told to stop (5 s at most): on a slow emulator a fixed
@@ -2458,6 +2527,9 @@ static int64_t extensions(const startup_t *s) {
     CHECK(405, observed & CROI_SIGNAL_TASK_TERMINATED);
     sys(CROI_SYS_HANDLE_CLOSE, victim, 0, 0, 0, 0);
   }
+
+  int64_t children = vmo_children();
+  if (children != 0) return children;
 
   // system_powerctl's refusals (K10e; the real thing ends the boot, under
   // userboot.shutdown=): the resource, then the command, then its argument.
