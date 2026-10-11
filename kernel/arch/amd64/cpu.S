@@ -301,6 +301,14 @@ arch_cache_op:
 2:  ret
 .size arch_cache_op, . - arch_cache_op
 
+// void arch_device_write_barrier(void): nothing to do (stores are ordered
+// before uncached device stores).
+.globl arch_device_write_barrier
+.type arch_device_write_barrier, @function
+arch_device_write_barrier:
+    ret
+.size arch_device_write_barrier, . - arch_device_write_barrier
+
 // uint64_t arch_cache_line(void): CPUID.1 EBX[15:8] x 8 bytes.
 .globl arch_cache_line
 .type arch_cache_line, @function

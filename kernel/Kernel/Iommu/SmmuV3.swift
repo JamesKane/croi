@@ -8,8 +8,9 @@ import Synchronization
 /// Arm SMMUv3 DMA translation (K12c; the SMMU architecture specification
 /// v3, IHI 0070). Zircon's ABI: iommu_create(ARM_SMMU,
 /// zx_iommu_desc_arm_smmu_t), whose register base must be an IORT SMMUv3
-/// node's (an SMMUv1/v2 node: NOT_SUPPORTED until that driver; Zircon's
-/// own ARM_SMMU driver is v2, from a device tree). bti_create's id is the
+/// node's (SMMUv1/v2 nodes go to SmmuV2.swift; Zircon's own ARM_SMMU
+/// driver is v2, from a device tree). A unit firmware left enabled is
+/// refused (BAD_STATE): it is firmware's. bti_create's id is the
 /// PCI requester id; the IORT maps it to a stream id.
 ///
 /// One `SmmuUnit` per SMMU. Creation gives it a linear stream table of
@@ -63,7 +64,6 @@ enum SmmuV3 {
         guard descriptor.byteCount == MemoryLayout<UInt64>.size else { throw .invalidArgs }  // zx_iommu_desc_arm_smmu_t
         let base = unsafe descriptor.unsafeLoadUnaligned(as: UInt64.self)
         guard base % KernelLayout.pageSize == 0 else { throw .invalidArgs }
-        if Iort.isSmmuV2(base) { throw .notSupported }
         guard let index = Iort.smmuIndex(base) else { throw .notFound }
         unitsLock.lock()
         defer { unitsLock.unlock() }
@@ -187,8 +187,19 @@ enum Iort {
     nonisolated(unsafe) static var smmuCount = 0
     nonisolated(unsafe) static var mappings = InlineArray<16, Mapping>(repeating: Mapping())
     nonisolated(unsafe) static var mappingCount = 0
-    /// SMMUv1/v2 nodes' bases (refused distinctly).
-    nonisolated(unsafe) static var v2Bases = InlineArray<4, UInt64>(repeating: 0)
+    /// SMMUv1/v2 nodes (SmmuV2.swift).
+    struct SmmuV2Node {
+        var registerBase: UInt64 = 0
+        var span: UInt64 = 0
+        var model: UInt32 = 0
+        var coherentWalks = false
+        var contextInterrupts = 0
+        /// Heap: per context bank, GSIV | edge << 32 (IORT order is bank
+        /// order); 0 if none were listed.
+        var interrupts: UInt64 = 0
+    }
+
+    nonisolated(unsafe) static var v2Nodes = InlineArray<4, SmmuV2Node>(repeating: SmmuV2Node())
     nonisolated(unsafe) static var v2Count = 0
 
     static func initialize(_ acpi: AcpiTables) {
@@ -211,8 +222,26 @@ enum Iort {
                         coherent: unsafe table.unsafeLoadUnaligned(fromByteOffset: at + 24, as: UInt32.self) & 1 != 0,
                         eventInterrupt: unsafe table.unsafeLoadUnaligned(fromByteOffset: at + 44, as: UInt32.self))
                     smmuCount += 1
-                } else if type == 3, length >= 24, v2Count < v2Bases.count {
-                    v2Bases[v2Count] = unsafe table.unsafeLoadUnaligned(fromByteOffset: at + 16, as: UInt64.self)
+                } else if type == 3, length >= 60, v2Count < v2Nodes.count {
+                    var node = SmmuV2Node(
+                        registerBase: unsafe table.unsafeLoadUnaligned(fromByteOffset: at + 16, as: UInt64.self),
+                        span: unsafe table.unsafeLoadUnaligned(fromByteOffset: at + 24, as: UInt64.self),
+                        model: unsafe table.unsafeLoadUnaligned(fromByteOffset: at + 32, as: UInt32.self),
+                        coherentWalks: unsafe table.unsafeLoadUnaligned(fromByteOffset: at + 36, as: UInt32.self) & 2 != 0)
+                    let count = Int(unsafe table.unsafeLoadUnaligned(fromByteOffset: at + 44, as: UInt32.self))
+                    let array = Int(unsafe table.unsafeLoadUnaligned(fromByteOffset: at + 48, as: UInt32.self))
+                    if count > 0, count <= 128, at + array + 8 * count <= table.byteCount,
+                       let raw = unsafe heap.allocate(size: 8 * count) {
+                        let words = unsafe raw.bindMemory(to: UInt64.self, capacity: count)
+                        for i in 0..<count {
+                            let gsiv = unsafe table.unsafeLoadUnaligned(fromByteOffset: at + array + 8 * i, as: UInt32.self)
+                            let flags = unsafe table.unsafeLoadUnaligned(fromByteOffset: at + array + 8 * i + 4, as: UInt32.self)
+                            unsafe words[i] = UInt64(gsiv) | UInt64(flags & 1) << 32
+                        }
+                        node.contextInterrupts = count
+                        node.interrupts = UInt64(UInt(bitPattern: raw))
+                    }
+                    v2Nodes[v2Count] = node
                     v2Count += 1
                 }
                 at += length
@@ -249,9 +278,9 @@ enum Iort {
         return nil
     }
 
-    static func isSmmuV2(_ base: UInt64) -> Bool {
-        for i in 0..<v2Count where v2Bases[i] == base { return true }
-        return false
+    static func smmuV2(_ base: UInt64) -> Int? {
+        for i in 0..<v2Count where v2Nodes[i].registerBase == base { return i }
+        return nil
     }
 
     /// The stream id requester id `rid` reaches SMMU `smmu` with, if any.
@@ -343,6 +372,10 @@ struct SmmuUnit: ~Copyable {
         func read(_ offset: UInt64) -> UInt32 {
             unsafe VolatileMappedRegister<UInt32>(unsafeBitPattern: UInt(registers + offset)).load()
         }
+        // A unit firmware left on is firmware's (the Q8B's PCIe SMMUv3 is
+        // reserved, and its hypervisor resets the SoC on writes it doesn't
+        // expect): leave it alone until a board rule hands it over.
+        guard read(SmmuV3.cr0) & SmmuV3.smmuEnable == 0 else { throw .badState }
         let idr0 = read(SmmuV3.idr0), idr1 = read(SmmuV3.idr1), idr5 = read(SmmuV3.idr5)
         // Stage 1, AArch64 tables, 4 KiB granules.
         guard idr0 & (1 << 1) != 0, (idr0 >> 2) & 3 != 1, idr5 & (1 << 4) != 0 else { throw .notSupported }
@@ -357,8 +390,6 @@ struct SmmuUnit: ~Copyable {
             outputSize: UInt64(min(idr5 & 7, 5))))
         let unit = SmmuUnitPointer(address: UInt64(UInt(bitPattern: raw)))
 
-        // Off while the tables change (firmware may have left it on).
-        try unit.setControl(0)
 
         // A linear stream table of bypass entries reaching every stream id
         // the IORT routes here.

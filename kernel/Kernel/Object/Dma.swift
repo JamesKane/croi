@@ -108,8 +108,13 @@ enum Dma {
             #endif
         case UInt32(CROI_IOMMU_TYPE_ARM_SMMU):
             #if arch(arm64)
-            unit = try SmmuV3.create(descriptor)
-            kind = IommuKind.smmu.rawValue
+            if descriptor.byteCount == 8, Iort.smmuV2(unsafe descriptor.unsafeLoadUnaligned(as: UInt64.self)) != nil {
+                unit = try SmmuV2.create(descriptor)
+                kind = IommuKind.smmuV2.rawValue
+            } else {
+                unit = try SmmuV3.create(descriptor)
+                kind = IommuKind.smmu.rawValue
+            }
             #else
             throw .notSupported
             #endif
@@ -143,9 +148,8 @@ enum Dma {
         let unit = unsafe record.pointee.unit
         #if arch(x86_64) || arch(arm64)
         if unit != 0 {
-            guard id <= 0xFFFF else { throw .outOfRange }
             let kind = unsafe IommuKind(rawValue: record.pointee.kind)!
-            let domain = try Iommus.attach(kind, unit: unit, deviceId: UInt16(id))
+            let domain = try Iommus.attach(kind, unit: unit, id: id)
             var bti = BtiObject(btiId: id)
             bti.iommu = iommu.address
             bti.domain = domain.address
@@ -295,7 +299,8 @@ enum Dma {
             while at < size {
                 do throws(Status) {
                     guard let phys = vmo.lookup(at: offset + at) else { throw .badState }
-                    try IoDomains.map(domain, iova: iova + at, phys: phys, write: writable)
+                    try IoDomains.map(domain, iova: iova + at, phys: phys, write: writable,
+                                      cached: properties(object).memory_type != UInt32(CROI_BTI_MEMORY_NONCOHERENT))
                 } catch {
                     IoDomains.unmap(domain, iova: iova, size: at)
                     IoDomains.release(domain, iova: iova)

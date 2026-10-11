@@ -820,6 +820,32 @@ descriptor, but Zircon's driver is SMMUv2 from a device tree):
   shareable, AP[1] set, AP[2] for read only. Released: abort (config 000).
 - QEMU arm64 now has `-device edu,addr=0x10` behind its `iommu=smmuv3`;
   mode 18 runs there (F_PERMISSION and F_TRANSLATION events).
+- A unit firmware left enabled (CR0.SMMUEN) is refused, BAD_STATE: the
+  Q8B's PCIe SMMUv3 is firmware-reserved and policed by its hypervisor.
+
+Arm SMMUv1/v2, K12d (Kernel/Iommu/SmmuV2.swift; AbyssBSD's qcom_smmu and
+qcom_apps_smmu on the Q8B are the reference, freebsd-src branch
+radxa-dragon-q8b, `5cf2c7fd99`; its docs/boards/radxa-dragon-q8b/lessons.md
+lists what resets that SoC):
+- `Iort.v2Nodes`: base, span, coherent walks, per-bank context
+  interrupts (GSIV | edge, heap). iommu_create picks v2 or v3 by node.
+- Firmware owns the unit: never a global register, never a reset. Free:
+  an entry invalid and faulting; a bank no valid translating entry uses
+  whose CBAR is 0 or that this driver set up (`ours`). Claim: bank (CBAR
+  only ever 0x1f300, TCR T0SZ from IDR2.UBS, ASID = bank, MAIR 0x44FF,
+  SCTLR M|TRE|AFE|CFRE|ASIDPNE and CFIE once its interrupt is the
+  kernel's), then each S2CR, then each SMR, with `arch_device_write_
+  barrier` (cache.h: dsb st) between. Release: SMR 0, S2CR fault, SCTLR 0,
+  TLBIASID + sync. The pairs come from bti_create (dma.h).
+- `IoDomain.inputBits` is stored (36 on the Q8B: walks start at level 1,
+  3 levels); `IoDomains.map(cached:)` picks MAIR index 1 for a
+  non-coherent BTI (SMMUv2 and v3).
+- No QEMU model: `SmmuV2SelfTest` (arm64 boot self-test) runs the driver
+  on a RAM stand-in set up as the Q8B's apps SMMU (register writes logged
+  through `SmmuV2Unit.log`): nothing but the claimed entries and bank
+  written, CBAR 0x1f300 only, bank then S2CR then SMR (verified to fail
+  with the order swapped), overlaps refused, leaf bits, release, reuse,
+  firmware's banks never taken. Unverified on hardware.
 
 Counters, K10a (Kernel/Object/Counter.swift, User/CounterSyscalls.swift,
 include/counter.h, syscalls 160-165):

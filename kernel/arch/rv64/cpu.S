@@ -277,6 +277,15 @@ arch_cache_op:
 9:  ret
 .size arch_cache_op, . - arch_cache_op
 
+// void arch_device_write_barrier(void): memory stores before device
+// stores (fence w, o).
+.globl arch_device_write_barrier
+.type arch_device_write_barrier, %function
+arch_device_write_barrier:
+    fence   w, o
+    ret
+.size arch_device_write_barrier, . - arch_device_write_barrier
+
 .globl arch_cache_line
 .type arch_cache_line, %function
 arch_cache_line:

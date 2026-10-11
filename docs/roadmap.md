@@ -716,9 +716,19 @@ the SMC resource.
   SMMUv3 with edu (mode 18 on arm64). Not yet: two-level stream tables
   (a linear one is 64 bytes per stream id: 4 MiB for QEMU's 65536),
   stage 2, queue MSIs, ATS/PRI, named-component stream ids.
-- **K12d and on:** SMMUv2 (Qualcomm's SMMU-500 on the SC8280XP board;
-  Fuchsia's arm_smmu driver is the reference, from ACPI's IORT type 3
-  here), the RISC-V IOMMU, and interrupt remapping for all of them.
+- **K12d: Arm SMMUv1/v2 (MMU-500).** **Done** (2026-10-11), unverified on
+  hardware. AbyssBSD's Q8B drivers are the reference (Fuchsia's arm_smmu
+  never implemented its enforced mode): firmware's unit, used only
+  through free entries and banks, CBAR 0x1f300 only, bank before S2CR
+  before SMR, the caller's stream pairs (Zircon's id format plus a
+  second pair). Tested on a RAM stand-in of the Q8B's apps SMMU. On the
+  way: SMMUv3 units firmware left on are refused. Not yet: the GPU's
+  split TTBR1 and per-process TTBR0 (Adreno; a GPU-specific interface),
+  units firmware left disabled, extended stream ids, global faults, the
+  Sky1's firmware-enabled SMMUv3s with RMRs (a board rule to hand them
+  over).
+- **K12e and on:** the RISC-V IOMMU (QEMU's riscv-iommu-pci), and
+  interrupt remapping for all of them.
 
 ### After M3 (requirements 14–19 and the remaining extensions)
 - IOMMUs: VT-d first, then AMD-Vi, SMMUv3 (Fuchsia reference code) and

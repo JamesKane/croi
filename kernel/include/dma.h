@@ -28,12 +28,20 @@
 //   as INTEL's (bti_create's id is the device id, bus << 8 | device << 3 |
 //   function). Faults go to the event log (an MSI the kernel programs into
 //   the IOMMU's PCI function) and are logged.
-// - ARM_SMMU (K12c, arm64): Zircon's zx_iommu_desc_arm_smmu_t (the
-//   register base alone), which must be an IORT SMMUv3 node's (NOT_FOUND;
-//   an SMMUv1/v2 node's is NOT_SUPPORTED until that driver). bti_create's
-//   id is the PCI requester id, which the IORT maps to the device's stream
-//   id (OUT_OF_RANGE if it doesn't reach this SMMU). Faults go to the
-//   event queue (its wired interrupt) and are logged.
+// - ARM_SMMU (arm64): Zircon's zx_iommu_desc_arm_smmu_t (the register
+//   base alone), an IORT SMMU node's (NOT_FOUND otherwise).
+//   - SMMUv3 (K12c): bti_create's id is the PCI requester id, which the
+//     IORT maps to the device's stream id (OUT_OF_RANGE if it doesn't
+//     reach this SMMU). A unit firmware left enabled is firmware's:
+//     BAD_STATE. Faults go to the event queue and are logged.
+//   - SMMUv1/v2 (K12d, MMU-500): firmware owns it and a hypervisor may
+//     police it (the Q8B's), so the kernel only uses free stream match
+//     entries and banks. bti_create's id is stream match pairs, Zircon's
+//     value | mask << 16 (15 bits each) and croi's second pair in bits
+//     32-62 with bit 63 set; they must be the pairs the platform expects
+//     (on the Q8B, Linux's devicetree's: the hypervisor resets the SoC on
+//     others). Pairs overlapping a valid entry: ALREADY_BOUND; none free:
+//     NO_RESOURCES. A unit firmware left disabled: NOT_SUPPORTED.
 // - The RISC-V IOMMU: NOT_SUPPORTED yet.
 //
 // bti_pin(bti | options << 32, vmo | addrs_count << 32, offset, size,

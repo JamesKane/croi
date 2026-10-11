@@ -12,6 +12,7 @@ enum IommuKind: UInt8 {
     case vtd
     case amd
     case smmu
+    case smmuV2  // its tables are SMMUv3's (VMSA stage 1)
 }
 
 struct IoDomain: ~Copyable {
@@ -23,15 +24,17 @@ struct IoDomain: ~Copyable {
     let deviceId: UInt16
     let root: UInt64  // physical
     let levels: Int
-    /// Driver data (SMMUv3: the context descriptor's page).
+    /// Bits of I/O address translated (at most 12 + 9 x levels; SMMUv2
+    /// units may take fewer, such as the Q8B's 36).
+    let inputBits: UInt64
+    /// Driver data (SMMUv3: the context descriptor's page; SMMUv2: the
+    /// bank and stream match entries).
     var extra: UInt64 = 0
     let lock = SpinLock()
     /// Allocated IOVA ranges, sorted by base.
     var used = UniqueArray<IovaRange>()
     /// Table pages (freed with the domain).
     var tables = UniqueArray<UInt64>()
-
-    var inputBits: UInt64 { UInt64(12 + 9 * levels) }
 }
 
 struct IovaRange {
@@ -50,14 +53,16 @@ struct IovaRange {
 
 enum IoDomains {
     /// A domain record with an empty root table, or nil.
-    static func make(_ kind: IommuKind, unit: UInt64, id: UInt16, deviceId: UInt16, levels: Int) -> IoDomainPointer? {
+    static func make(_ kind: IommuKind, unit: UInt64, id: UInt16, deviceId: UInt16, levels: Int,
+                     inputBits: UInt64? = nil) -> IoDomainPointer? {
         guard let root = zeroedPage() else { return nil }
         guard let raw = unsafe heap.allocate(size: MemoryLayout<IoDomain>.size, alignment: 64) else {
             pmm.free(root)
             return nil
         }
         unsafe raw.bindMemory(to: IoDomain.self, capacity: 1).initialize(to: IoDomain(
-            kind: kind, unit: unit, domainId: id, deviceId: deviceId, root: root, levels: levels))
+            kind: kind, unit: unit, domainId: id, deviceId: deviceId, root: root, levels: levels,
+            inputBits: inputBits ?? UInt64(12 + 9 * levels)))
         let domain = IoDomainPointer(address: UInt64(UInt(bitPattern: raw)))
         domain.pointee.tables.append(root)
         wrote(domain, root, KernelLayout.pageSize)
@@ -129,14 +134,18 @@ enum IoDomains {
 
     private static var addressMask: UInt64 { 0x000F_FFFF_FFFF_F000 }
 
+    /// SMMU stage-1 tables (v3 and v2 alike).
+    private static func vmsa(_ kind: IommuKind) -> Bool { kind == .smmu || kind == .smmuV2 }
+
     private static func present(_ kind: IommuKind, _ entry: UInt64) -> Bool {
         kind == .vtd ? entry & 3 != 0 : entry & 1 != 0
     }
 
-    /// SMMUv3 stage-1 leaf attributes: AF, inner shareable, MAIR index 0
-    /// (normal write-back), AP[1] set (the SMMU's transactions are
-    /// unprivileged), AP[2] for read only.
-    private static var smmuPage: UInt64 { 3 | 1 << 10 | 3 << 8 | 1 << 6 }
+    /// SMMU stage-1 leaf attributes: AF, not global (ASID-tagged), inner
+    /// shareable, AP[1] set (the SMMU's transactions are unprivileged),
+    /// AP[2] for read only; MAIR index 0 (normal write-back) or, uncached,
+    /// 1 (normal non-cacheable), as the drivers program MAIR.
+    private static var smmuPage: UInt64 { 3 | 1 << 10 | 1 << 11 | 3 << 8 | 1 << 6 }
 
     /// A table entry pointing at the next level's table (`level` is the
     /// level of the table holding it); permissions are the leaves'.
@@ -144,20 +153,23 @@ enum IoDomains {
         switch kind {
         case .vtd: return next | 3                                            // read, write
         case .amd: return next | 1 | UInt64(level - 1) << 9 | 1 << 61 | 1 << 62  // PR, next level, IR, IW
-        case .smmu: return next | 3                                                // a table
+        case .smmu, .smmuV2: return next | 3                                       // a table
         }
     }
 
-    private static func leaf(_ kind: IommuKind, _ phys: UInt64, write: Bool) -> UInt64 {
+    private static func leaf(_ kind: IommuKind, _ phys: UInt64, write: Bool, cached: Bool) -> UInt64 {
         switch kind {
         case .vtd: return phys | 1 | (write ? 2 : 0)
         case .amd: return phys | 1 | 1 << 61 | (write ? 1 << 62 : 0)  // next level 0: a page
-        case .smmu: return phys | smmuPage | (write ? 0 : 1 << 7)
+        case .smmu, .smmuV2: return phys | smmuPage | (write ? 0 : 1 << 7) | (cached ? 0 : 1 << 2)
         }
     }
 
-    /// Maps one page (read, and write if asked).
-    static func map(_ domain: IoDomainPointer, iova: UInt64, phys: UInt64, write: Bool) throws(Status) {
+    /// Maps one page (read, and write if asked). `cached` false gives the
+    /// device's accesses normal non-cacheable attributes where the format
+    /// carries them (SMMU: a non-coherent device's BTI).
+    static func map(_ domain: IoDomainPointer, iova: UInt64, phys: UInt64, write: Bool,
+                    cached: Bool = true) throws(Status) {
         let kind = domain.pointee.kind
         try domain.pointee.lock.withLock { () throws(Status) in
             var table = domain.pointee.root
@@ -175,7 +187,7 @@ enum IoDomains {
             }
             let index = Int((iova >> 12) & 0x1FF)
             let slot = unsafe UnsafeMutablePointer<UInt64>(bitPattern: UInt(KernelLayout.physmap(table)))! + index
-            unsafe slot.pointee = leaf(kind, phys, write: write)
+            unsafe slot.pointee = leaf(kind, phys, write: write, cached: cached)
             wrote(domain, table + UInt64(index) * 8, 8)
         }
         #if arch(x86_64)
@@ -219,7 +231,11 @@ enum IoDomains {
         if domain.pointee.kind == .vtd { VtdUnitPointer(address: domain.pointee.unit).flushTables(phys, size) }
         // AMD-Vi page walks snoop the CPU's caches.
         #elseif arch(arm64)
-        SmmuUnitPointer(address: domain.pointee.unit).flushTables(phys, size)
+        if domain.pointee.kind == .smmuV2 {
+            SmmuV2UnitPointer(address: domain.pointee.unit).flushTables(phys, size)
+        } else {
+            SmmuUnitPointer(address: domain.pointee.unit).flushTables(phys, size)
+        }
         #endif
     }
 
@@ -232,28 +248,36 @@ enum IoDomains {
             unit.pointee.lock.withLock { try? unit.invalidateIotlbLocked(domain: domain.pointee.domainId) }
         case .amd:
             AmdviUnitPointer(address: domain.pointee.unit).invalidatePages(domain: domain.pointee.domainId)
-        case .smmu:
+        case .smmu, .smmuV2:
             break
         }
         #elseif arch(arm64)
-        SmmuUnitPointer(address: domain.pointee.unit).invalidateAsid(domain.pointee.domainId)
+        if domain.pointee.kind == .smmuV2 {
+            SmmuV2UnitPointer(address: domain.pointee.unit).invalidateBank(Int(domain.pointee.domainId))
+        } else {
+            SmmuUnitPointer(address: domain.pointee.unit).invalidateAsid(domain.pointee.domainId)
+        }
         #endif
     }
 }
 
 /// What Dma.swift calls: claiming and releasing devices, whatever the unit.
 enum Iommus {
-    /// `deviceId` is the PCI requester id (bus << 8 | device << 3 |
-    /// function); the SMMU maps it to a stream id through the IORT.
-    static func attach(_ kind: IommuKind, unit: UInt64, deviceId: UInt16) throws(Status) -> IoDomainPointer {
+    /// `id` is bti_create's: a PCI requester id (bus << 8 | device << 3 |
+    /// function; an SMMUv3 maps it to a stream id through the IORT), or on
+    /// an SMMUv2 stream match pairs (SmmuV2.attach).
+    static func attach(_ kind: IommuKind, unit: UInt64, id: UInt64) throws(Status) -> IoDomainPointer {
         #if arch(x86_64)
+        guard id <= 0xFFFF else { throw .outOfRange }
         switch kind {
-        case .vtd: return try Vtd.attach(VtdUnitPointer(address: unit), bdf: deviceId)
-        case .amd: return try Amdvi.attach(AmdviUnitPointer(address: unit), deviceId: deviceId)
-        case .smmu: throw .notSupported
+        case .vtd: return try Vtd.attach(VtdUnitPointer(address: unit), bdf: UInt16(id))
+        case .amd: return try Amdvi.attach(AmdviUnitPointer(address: unit), deviceId: UInt16(id))
+        case .smmu, .smmuV2: throw .notSupported
         }
         #elseif arch(arm64)
-        return try SmmuV3.attach(SmmuUnitPointer(address: unit), requesterId: deviceId)
+        if kind == .smmuV2 { return try SmmuV2.attach(SmmuV2UnitPointer(address: unit), streams: id) }
+        guard id <= 0xFFFF else { throw .outOfRange }
+        return try SmmuV3.attach(SmmuUnitPointer(address: unit), requesterId: UInt16(id))
         #else
         throw .notSupported
         #endif
@@ -265,10 +289,10 @@ enum Iommus {
         switch domain.pointee.kind {
         case .vtd: Vtd.detach(domain)
         case .amd: Amdvi.detach(domain)
-        case .smmu: break
+        case .smmu, .smmuV2: break
         }
         #elseif arch(arm64)
-        SmmuV3.detach(domain)
+        if domain.pointee.kind == .smmuV2 { SmmuV2.detach(domain) } else { SmmuV3.detach(domain) }
         #endif
     }
 
@@ -277,10 +301,10 @@ enum Iommus {
         switch kind {
         case .vtd: Vtd.unbind(unit)
         case .amd: Amdvi.unbind(unit)
-        case .smmu: break
+        case .smmu, .smmuV2: break
         }
         #elseif arch(arm64)
-        SmmuV3.unbind(unit)
+        if kind == .smmuV2 { SmmuV2.unbind(unit) } else { SmmuV3.unbind(unit) }
         #endif
     }
 
@@ -289,7 +313,7 @@ enum Iommus {
         #if arch(x86_64)
         return Vtd.faultsCounted() + Amdvi.faultsCounted()
         #elseif arch(arm64)
-        return SmmuV3.faultsCounted()
+        return SmmuV3.faultsCounted() + SmmuV2.faultsCounted()
         #else
         return 0
         #endif

@@ -311,6 +311,9 @@ private func runSelfTests(_ console: Uart) {
     FpSelfTest.run(console)
     SamplerSelfTest.run(console)
     PmuSelfTest.run(console)
+    #if arch(arm64)
+    SmmuV2SelfTest.run(console)
+    #endif
     ProcessSelfTest.run(console)
     ProcessSelfTest.runIpc(console)
     ProcessSelfTest.runSync(console)

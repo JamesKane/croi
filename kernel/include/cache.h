@@ -17,6 +17,11 @@ enum : uint32_t {
 // without Zicbom: the platform must be coherent), so nothing is done.
 void arch_cache_op(uint64_t addr, uint64_t size, uint32_t op, uint64_t line);
 
+// Orders earlier stores to normal memory before later stores to device
+// registers (arm64 dsb st, rv64 fence w,o, amd64 nothing): an IOMMU's
+// tables before the register write that makes it walk them.
+void arch_device_write_barrier(void);
+
 // The smallest data cache line (amd64 CPUID.1 CLFLUSH size; arm64
 // CTR_EL0.DminLine; rv64 0: the RHCT says, see VmoCache).
 uint64_t arch_cache_line(void);

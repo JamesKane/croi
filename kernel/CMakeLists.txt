@@ -60,6 +60,8 @@ add_library(kernel-swift OBJECT
   Kernel/Iommu/IntelIommu.swift
   Kernel/Iommu/AmdIommu.swift
   Kernel/Iommu/SmmuV3.swift
+  Kernel/Iommu/SmmuV2.swift
+  Kernel/Iommu/SmmuV2SelfTest.swift
   Kernel/Object/KernelMemory.swift
   Kernel/Object/Counter.swift
   Kernel/Object/Timeline.swift

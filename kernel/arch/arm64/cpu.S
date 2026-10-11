@@ -391,6 +391,15 @@ arch_cache_op:
 9:  ret
 .size arch_cache_op, . - arch_cache_op
 
+// void arch_device_write_barrier(void): dsb st, so stores to normal memory
+// (an IOMMU's tables) are visible before a later device-register store.
+.globl arch_device_write_barrier
+.type arch_device_write_barrier, %function
+arch_device_write_barrier:
+    dsb     st
+    ret
+.size arch_device_write_barrier, . - arch_device_write_barrier
+
 // uint64_t arch_cache_line(void): 4 << CTR_EL0.DminLine bytes.
 .globl arch_cache_line
 .type arch_cache_line, %function
