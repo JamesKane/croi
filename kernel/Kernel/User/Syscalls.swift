@@ -72,7 +72,7 @@ enum UserTraps {
     }
 
     /// On every way back to user mode: a killed thread exits instead.
-    private static func leaving() {
+    static func leaving() {
         guard Scheduler.current.pointee.killPending else { return }
         arch_interrupts_enable()
         Processes.checkKilled()
@@ -473,6 +473,12 @@ enum Syscalls {
 @c @implementation
 func arch_syscall(_ frame: UnsafeMutablePointer<arch_exception_frame_t>) {
     unsafe Syscalls.dispatch(frame)
+    // Back to user mode by sysretq: the kill check UserTraps.handle makes
+    // on every other way back. Without it a killed thread whose syscalls
+    // returned (an interrupted wait, a retry loop) ran on until an
+    // interrupt caught it in user mode: on an idle, tickless CPU, seconds
+    // (Todhchai's compositor kill).
+    UserTraps.leaving()
 }
 #endif
 

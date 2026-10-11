@@ -393,6 +393,12 @@ static void user_spinner(uint64_t arg) {
   for (;;) {
   }
 }
+// Retries a call that fails at once, as a client loop does: its way back
+// to user mode must notice the kill (amd64's SYSCALL path once didn't).
+static void syscall_spinner(uint64_t arg) {
+  (void)arg;
+  for (;;) sys(CROI_SYS_HANDLE_CLOSE, 0x12340003, 0, 0, 0, 0);
+}
 
 static int64_t child_thread(uint32_t self, void (*entry)(uint64_t), uint64_t arg) {
   uint32_t thread = 0, stack = 0;
@@ -459,7 +465,8 @@ static int64_t child(uint32_t self, uint64_t submode, uint64_t vdso) {
         sys(CROI_SYS_EVENT_CREATE, 0, (uint64_t)&event, 0, 0, 0) != 0)
       return 90;
     int64_t failed = child_thread(self, port_blocker, port) | child_thread(self, counter_blocker, counter) |
-                     child_thread(self, blocker, event) | child_thread(self, user_spinner, 0);
+                     child_thread(self, blocker, event) | child_thread(self, user_spinner, 0) |
+                     child_thread(self, syscall_spinner, 0);
     if (failed) return failed;
     uint32_t observed = 0;
     sys(CROI_SYS_OBJECT_WAIT_ONE, a, CROI_SIGNAL_READABLE, ~0ull, (uint64_t)&observed, 0);  // until killed
