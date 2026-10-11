@@ -259,6 +259,9 @@ thread's stack top.
   number in rax, args rdi rsi rdx r10 r8 r9) builds the same frame
   (vector 0x100) and returns with sysretq (the rip is SYSCALL's, so
   canonical); STAR/FMASK in `arch_syscall_init`, per CPU.
+  `arch_syscall` runs `UserTraps.leaving()` after the dispatch, as every
+  other way back to user mode does (it didn't: a killed thread retrying
+  failing syscalls ran on until an interrupt caught it in user mode).
 - arm64: EL0 vectors (slots 8-15) skip the overflow check and save/restore
   SP_EL0; SP_EL1 is the stack top because user frames sit there; svc #0
   with the number in x16 (Zircon's); TPIDRRO_EL0 is kernel scratch and 0
