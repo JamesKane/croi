@@ -13,6 +13,7 @@ add_library(kernel-swift OBJECT
   Kernel/Irq/Ipi.swift
   Kernel/Irq/DeviceIrqs.swift
   Kernel/Irq/Its.swift
+  Kernel/Irq/Aia.swift
   Kernel/KernelLayout.swift
   Kernel/KernelPageTables.swift
   Kernel/KernelStack.swift

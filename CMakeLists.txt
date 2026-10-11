@@ -181,6 +181,12 @@ if(CROI_ARCH STREQUAL rv64)
     COMMAND ${CROI_QEMU} --iommu base --test "iommu:  RISC-V IOMMU:"
             ${CROI_ARCH} ${CROI_ESP_DIR} ${CMAKE_BINARY_DIR}/qemu-riscv-iommu ${CROI_EDK2_DIR})
   set_tests_properties(boot-riscv-iommu-base PROPERTIES TIMEOUT 180)
+  # AIA (K12i): the APLIC and IMSICs instead of the PLIC; the whole boot
+  # test, wired interrupts through the APLIC and MSIs through the IMSICs.
+  add_test(NAME boot-aia
+    COMMAND ${CROI_QEMU} --aia --test "${CROI_BOOT_DONE}" ${CROI_EXITS}
+            ${CROI_ARCH} ${CROI_ESP_DIR} ${CMAKE_BINARY_DIR}/qemu-aia ${CROI_EDK2_DIR})
+  set_tests_properties(boot-aia PROPERTIES TIMEOUT 240)
 endif()
 
 if(CROI_ARCH STREQUAL arm64)

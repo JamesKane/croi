@@ -5,8 +5,8 @@ import PageTables
 /// An MSI allocation (K9d; Zircon's MsiAllocation behind an MsiDispatcher,
 /// type 32): `count` contiguous vectors on one CPU, aligned to `count` as
 /// multi-message MSI needs, and which ids of it have interrupt objects.
-/// amd64 (local APIC vectors) and arm64 (LPIs through the GICv3 ITS,
-/// K12h); rv64 needs the IMSIC.
+/// amd64 (local APIC vectors), arm64 (LPIs through the GICv3 ITS, K12h)
+/// and rv64 (identities of AIA's IMSICs, K12i).
 struct MsiObject: ~Copyable {
     var header = ObjectHeader(type: .msi)
     let cpu: Int
@@ -31,8 +31,13 @@ struct MsiObject: ~Copyable {
 enum Msis {
     /// msi_allocate (the caller checked the MSI system resource).
     static func allocate(count: UInt32) throws(Status) -> ObjectPointer {
-        #if arch(x86_64) || arch(arm64)
+        #if arch(x86_64) || arch(arm64) || arch(riscv64)
         guard count > 0, count <= 32, count & (count - 1) == 0 else { throw .invalidArgs }
+        #if arch(arm64)
+        guard Its.ready else { throw .notSupported }  // no ITS: no MSIs
+        #elseif arch(riscv64)
+        guard Aia.active else { throw .notSupported }  // the PLIC: no MSIs
+        #endif
         guard let base = DeviceIrqs.allocateMsi(cpu: 0, count: count) else { throw .noResources }
         guard let object = Objects.allocate(MsiObject(cpu: 0, base: base, count: count)) else {
             DeviceIrqs.freeMsi(cpu: 0, vector: base, count: count)
@@ -45,7 +50,7 @@ enum Msis {
     }
 
     static func destroy(_ object: ObjectPointer) {
-        #if arch(x86_64) || arch(arm64)
+        #if arch(x86_64) || arch(arm64) || arch(riscv64)
         let msi = MsiPointer(object: object)
         DeviceIrqs.freeMsi(cpu: msi.pointee.cpu, vector: msi.pointee.base, count: msi.pointee.count)
         #endif
@@ -56,7 +61,7 @@ enum Msis {
     static func info(_ object: ObjectPointer) -> croi_info_msi_t {
         let msi = MsiPointer(object: object)
         var info = croi_info_msi_t()
-        #if arch(x86_64) || arch(arm64)
+        #if arch(x86_64) || arch(arm64) || arch(riscv64)
         if let (address, data) = DeviceIrqs.msiMessage(cpu: msi.pointee.cpu, vector: msi.pointee.base) {
             info.target_addr = address
             info.target_data = data
@@ -122,7 +127,7 @@ enum MsiInterrupts {
     /// the MSI-X table at `offset` in `vmo` or the MSI capability there.
     static func create(_ allocation: ObjectPointer, options: UInt32, id: UInt32, vmo: VmoPointer,
                        offset: UInt64) throws(Status) -> ObjectPointer {
-        #if arch(x86_64) || arch(arm64)
+        #if arch(x86_64) || arch(arm64) || arch(riscv64)
         let msix = options & UInt32(CROI_MSI_MODE_MSI_X) != 0
         guard options & ~UInt32(CROI_MSI_MODE_MSI_X) == 0 else { throw .invalidArgs }
         guard case .physical(let base) = vmo.pointee.kind, vmo.pointee.cache == .device,
@@ -235,7 +240,7 @@ enum MsiInterrupts {
 
     /// Writes the MSI-X entry's address and data for its CPU and vector.
     private static func program(_ state: MsiStatePointer) {
-        #if arch(x86_64) || arch(arm64)
+        #if arch(x86_64) || arch(arm64) || arch(riscv64)
         guard let (address, data) = DeviceIrqs.msiMessage(cpu: state.pointee.cpu, vector: state.pointee.vector) else {
             return
         }
@@ -250,13 +255,21 @@ enum MsiInterrupts {
     /// MSI: NOT_SUPPORTED (the driver programmed the capability). Object
     /// lock held.
     static func retarget(_ state: MsiStatePointer, _ object: ObjectPointer, cpu: Int, masked: Bool) throws(Status) {
-        #if arch(x86_64) || arch(arm64)
+        #if arch(x86_64) || arch(arm64) || arch(riscv64)
         guard state.pointee.msix else { throw .notSupported }
         guard cpu != state.pointee.cpu else { return }
         #if arch(arm64)
         // The ITS moves the event's collection; the device's message stays.
         Its.move(deviceId: state.pointee.deviceId, lpi: state.pointee.vector, to: cpu)
         state.pointee.cpu = cpu
+        #elseif arch(riscv64)
+        // The same identity, sent to the other hart's file: only the
+        // address changes, under the entry's mask.
+        guard DeviceIrqs.msiMessage(cpu: cpu, vector: state.pointee.vector) != nil else { throw .notSupported }
+        setMasked(state, true)
+        state.pointee.cpu = cpu
+        program(state)
+        if !masked { setMasked(state, false) }
         #else
         guard DeviceIrqs.msiMessage(cpu: cpu, vector: DeviceIrqs.msiFirstVector) != nil else { throw .notSupported }
         guard let vector = DeviceIrqs.allocateMsi(cpu: cpu, count: 1) else { throw .noResources }
@@ -281,7 +294,7 @@ enum MsiInterrupts {
     /// Destroyed: masked, and no handler runs for it once this returns.
     static func detach(_ state: MsiStatePointer) {
         setMasked(state, true)
-        #if arch(x86_64) || arch(arm64)
+        #if arch(x86_64) || arch(arm64) || arch(riscv64)
         DeviceIrqs.setMsiHandler(cpu: state.pointee.cpu, vector: state.pointee.vector, 0)
         DeviceIrqs.releaseMsi(cpu: state.pointee.cpu, vector: state.pointee.vector)
         #if arch(arm64)
@@ -301,7 +314,7 @@ enum MsiInterrupts {
             write32(state.pointee.registers + 8, 0)
         }
         try? kernelAspace.free(state.pointee.window)
-        #if arch(x86_64) || arch(arm64)
+        #if arch(x86_64) || arch(arm64) || arch(riscv64)
         if state.pointee.ownVector { DeviceIrqs.freeMsi(cpu: state.pointee.cpu, vector: state.pointee.vector, count: 1) }
         #endif
         Msis.release(state.pointee.allocation, id: state.pointee.id)

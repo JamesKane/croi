@@ -108,6 +108,31 @@ arch_tlb_invalidate_all:
     ret
 .size arch_tlb_invalidate_all, . - arch_tlb_invalidate_all
 
+// AIA's IMSIC registers (K12i), by CSR number (siselect 0x150, sireg
+// 0x151, stopei 0x15C: the assembler may not know the names).
+.globl arch_rv_imsic_read
+.type arch_rv_imsic_read, %function
+arch_rv_imsic_read:
+    csrw    0x150, a0
+    csrr    a0, 0x151
+    ret
+.size arch_rv_imsic_read, . - arch_rv_imsic_read
+
+.globl arch_rv_imsic_write
+.type arch_rv_imsic_write, %function
+arch_rv_imsic_write:
+    csrw    0x150, a0
+    csrw    0x151, a1
+    ret
+.size arch_rv_imsic_write, . - arch_rv_imsic_write
+
+.globl arch_rv_imsic_claim
+.type arch_rv_imsic_claim, %function
+arch_rv_imsic_claim:
+    csrrw   a0, 0x15C, zero
+    ret
+.size arch_rv_imsic_claim, . - arch_rv_imsic_claim
+
 // void arch_rv_sie_set(uint64_t mask) / void arch_rv_sie_clear(uint64_t mask)
 // void arch_rv_sip_clear(uint64_t mask)
 .globl arch_rv_sie_set

@@ -24,7 +24,7 @@ enum DeviceIrqs {
         #elseif arch(arm64)
         1020
         #elseif arch(riscv64)
-        Plic.gsiBase + Plic.count
+        Aia.active ? Aia.gsiBase + Aia.sources + 1 : Plic.gsiBase + Plic.count
         #endif
     }
 
@@ -53,7 +53,7 @@ enum DeviceIrqs {
         #elseif arch(arm64)
         return GicV3.isValidSpi(number)
         #elseif arch(riscv64)
-        return Plic.isValid(number)
+        return Aia.active ? Aia.isValid(number) : Plic.isValid(number)
         #endif
     }
 
@@ -118,8 +118,12 @@ enum DeviceIrqs {
             guard !activeLow else { throw .notSupported }  // the GIC takes active-high and rising edges only
             GicV3.programSpi(number, level: level, affinity: target)
             #elseif arch(riscv64)
-            guard !activeLow else { throw .notSupported }  // PLIC gateways: active high
-            guard Plic.route(number, hart: target) else { throw .notSupported }
+            guard !activeLow else { throw .notSupported }  // PLIC gateways (and croi's APLIC use): active high
+            if Aia.active {
+                guard Aia.route(number, level: level, hart: target) else { throw .notSupported }
+            } else {
+                guard Plic.route(number, hart: target) else { throw .notSupported }
+            }
             #endif
         }
     }
@@ -134,7 +138,7 @@ enum DeviceIrqs {
             #elseif arch(arm64)
             GicV3.setSpiMasked(number, masked)
             #elseif arch(riscv64)
-            Plic.setMasked(number, masked)
+            if Aia.active { Aia.setMasked(number, masked) } else { Plic.setMasked(number, masked) }
             #endif
         }
     }
@@ -328,6 +332,35 @@ enum DeviceIrqs {
     static func dispatchMsi(_ lpi: UInt32) {
         tableLock.withLock {
             let object = Its.handler(lpi)
+            if object != 0 { InterruptObjects.fire(ObjectPointer(address: object)) }
+        }
+    }
+
+    static func prepareMsi(cpu: Int, vector: UInt32, source: UInt16?) {}
+    static func releaseMsi(cpu: Int, vector: UInt32) {}
+    #endif
+
+    #if arch(riscv64)
+    // MSIs through AIA's IMSICs (K12i): a "vector" is an identity, global
+    // across harts; `cpu` picks the hart file the message is sent to.
+
+    static func allocateMsi(cpu: Int, count: UInt32) -> UInt32? { Aia.allocate(count: count) }
+
+    static func freeMsi(cpu: Int, vector: UInt32, count: UInt32) { Aia.free(vector, count: count) }
+
+    /// The hart's interrupt file and the identity; nil without AIA.
+    static func msiMessage(cpu: Int, vector: UInt32) -> (address: UInt64, data: UInt32)? {
+        guard Aia.active else { return nil }
+        return Aia.message(cpu: cpu, identity: vector)
+    }
+
+    static func setMsiHandler(cpu: Int, vector: UInt32, _ object: UInt64) {
+        tableLock.withLock { Aia.setHandler(vector, object) }
+    }
+
+    static func dispatchMsi(_ identity: UInt32) {
+        tableLock.withLock {
+            let object = Aia.handler(identity)
             if object != 0 { InterruptObjects.fire(ObjectPointer(address: object)) }
         }
     }

@@ -206,7 +206,12 @@ enum ProcessSelfTest {
             console.write("  msi:    not supported (no ITS)\n")
         }
         #else
-        console.write("  msi:    not supported yet (IMSIC)\n")
+        if Aia.active {
+            console.write("  msi:    through AIA's IMSICs: allocations and info; where present, edu's MSI by port and ")
+            console.write("by wait, a virtio MSI-X table's entries programmed, moved to CPU 1's file, cleared\n")
+        } else {
+            console.write("  msi:    not supported (no IMSIC: the PLIC has no MSIs)\n")
+        }
         #endif
     }
 

@@ -699,8 +699,8 @@ include/interrupt.h; syscalls 147 msi_allocate, 148 msi_create):
   at msi_create and retarget and cleared by `releaseMsi`. set_affinity moves an
   MSI-X vector: a vector on the new CPU, the entry rewritten under its
   mask, the old vector dropped; plain MSI is NOT_SUPPORTED (the driver
-  owns the capability). arm64: through the GICv3 ITS (K12h, below); rv64
-  (IMSIC): NOT_SUPPORTED.
+  owns the capability). arm64: through the GICv3 ITS (K12h, below); rv64:
+  through AIA's IMSICs (K12i, below), else NOT_SUPPORTED (the PLIC).
 - The kernel's mappings of MSI-X tables and capabilities are `shared`
   (`mapPhysical(shared:)`): they don't enter the root filter's list of
   kernel MMIO, so the driver keeps its resource over them.
@@ -786,6 +786,29 @@ Intel VT-d, K12a (Kernel/Iommu/IntelIommu.swift):
   DRHD, a driver reads the DMAR itself): edu's DMA engine copies through
   pinned IOVAs, a write to a read-only and to an unpinned IOVA fault
   (QEMU prints its own lines for those), re-claim and re-bind.
+
+RISC-V AIA: the APLIC and IMSICs, K12i (Kernel/Irq/Aia.swift; cpu.S
+`arch_rv_imsic_*` through siselect/sireg/stopei by CSR number):
+- Used where the MADT has an IMSIC, RINTCs with IMSIC files and an
+  S-level APLIC, and every hart has Ssaia; else the PLIC, as before.
+  `Aia.initialize` (instead of `Plic.initialize`): hart index = a file's
+  place among the files; every source inactive and disabled; domaincfg
+  IE + DM (MSI delivery; the root domain's MSI addresses are firmware's).
+  Each hart: eidelivery 1, eithreshold 0, every eie bit, SEIE.
+- Identities are global: a wired source s is identity s (APLIC target:
+  hart index, EIID s; sourcecfg level-high or rising-edge); MSIs take
+  consecutive, aligned identities from the first multiple of 64 above
+  the sources. scause 9 claims through stopei (`claimAll`): wired to
+  `DeviceIrqs.dispatch`, MSIs to `dispatchMsi`. Masking: the APLIC's
+  clrienum/setienum (a level source also gets setipnum on unmask: in MSI
+  mode it pends again only on a new edge, and the write counts only
+  while the line is asserted), MSIs at the device. The MSI message is
+  the hart's file and the identity; set_affinity rewrites the address.
+- The RISC-V IOMMU now comes up at boot (`RiscvIommus.boot`, devices
+  passed through): QEMU resets it Off, which blocked edu's MSIs.
+- QEMU: `qemu.sh --aia` (`aia=aplic-imsic`); test `boot-aia` runs the
+  whole boot test there. No remapping yet (the IOMMU's MSI page tables),
+  so check 297 skips rv64.
 
 The GICv3 ITS: MSIs on arm64, K12h (Kernel/Irq/Its.swift, DeviceIrqs'
 arm64 MSI part, MsiObject):

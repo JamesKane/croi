@@ -29,8 +29,8 @@ enum Interrupts {
         detail = GicV3.itsBase
         #elseif arch(riscv64)
         RiscvInterrupts.initializeBootCpu(acpi)
-        summary = "SBI IPIs, PLIC sources; IMSIC/APLIC/PLIC count"
-        detail = UInt64(RiscvInterrupts.controllers)
+        summary = Aia.active ? "SBI IPIs, AIA: APLIC sources to IMSICs, identities" : "SBI IPIs, PLIC sources; IMSIC/APLIC/PLIC count"
+        detail = Aia.active ? UInt64(Aia.identities) : UInt64(RiscvInterrupts.controllers)
         #endif
         DeviceIrqs.initialize()
         return true
@@ -118,6 +118,8 @@ enum Interrupts {
             Timers.handleInterrupt()
         } else if code == 13 {  // local counter overflow (Sscofpmf)
             unsafe Pmu.handleOverflow(frame)
+        } else if code == 9, Aia.active {  // supervisor external interrupt: this hart's IMSIC file
+            Aia.claimAll({ gsi in DeviceIrqs.dispatch(gsi) }, { identity in DeviceIrqs.dispatchMsi(identity) })
         } else if code == 9 {  // supervisor external interrupt: the PLIC
             while let gsi = Plic.claim() {
                 DeviceIrqs.dispatch(gsi)
@@ -557,7 +559,7 @@ enum RiscvInterrupts {
         Madt.forEachEntry(acpi) { type, _ in
             if type == 0x19 || type == 0x1A || type == 0x1B { controllers += 1 }  // IMSIC, APLIC, PLIC
         }
-        Plic.initialize(acpi)
+        if !Aia.initialize(acpi) { Plic.initialize(acpi) }  // K12i: AIA where there is one
         initializeThisCpu()
     }
 
@@ -565,7 +567,9 @@ enum RiscvInterrupts {
         arch_rv_sie_clear(~0)
         arch_rv_sip_clear(1 << 1)
         arch_rv_sie_set(1 << 1)  // SSIE: software interrupts (IPIs)
-        if Plic.initializeThisCpu() {
+        if Aia.active {
+            Aia.initializeThisCpu()
+        } else if Plic.initializeThisCpu() {
             arch_rv_sie_set(1 << 9)  // SEIE: external interrupts
         }
     }

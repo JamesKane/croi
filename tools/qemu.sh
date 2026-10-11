@@ -15,7 +15,8 @@
 # prints every CPU's PC and frame-pointer backtrace (qemu-monitor.py): where
 # each CPU is when a lockup is reported. Alternatives are separated by '|'.
 # --iommu picks amd64's IOMMU (default intel; QEMU takes one at a time),
-# or on rv64 `base` for an IOMMU without MSI_FLAT.
+# or on rv64 `base` for an IOMMU without MSI_FLAT. --aia (rv64): the APLIC and
+# IMSICs instead of the PLIC (K12i).
 
 set -euo pipefail
 
@@ -24,6 +25,7 @@ exits=
 screendump=
 registers_on=
 iommu=intel
+aia=
 while [[ ${1:-} == --* ]]; do
   case $1 in
     --test) expect=${2:?--test needs the text to wait for}; shift 2 ;;
@@ -31,6 +33,7 @@ while [[ ${1:-} == --* ]]; do
     --screendump) screendump=${2:?--screendump needs a file}; shift 2 ;;
     --registers-on) registers_on=${2:?--registers-on needs the text to wait for}; shift 2 ;;
     --iommu) iommu=${2:?--iommu needs intel or amd}; shift 2 ;;
+    --aia) aia=1; shift ;;
     *) echo "qemu.sh: unknown option $1" >&2; exit 2 ;;
   esac
 done
@@ -102,7 +105,9 @@ case $arch in
       base) iommu_options=,intremap=off ;;
       *) echo "qemu.sh: --iommu on rv64 takes base" >&2; exit 2 ;;
     esac
-    qemu=(qemu-system-riscv64 -machine virt,acpi=on -cpu max -device ramfb
+    machine=virt,acpi=on
+    [[ -n $aia ]] && machine+=,aia=aplic-imsic
+    qemu=(qemu-system-riscv64 -machine "$machine" -cpu max -device ramfb
           -device "riscv-iommu-pci,addr=0x8$iommu_options" -device edu,addr=0x10
           -drive "if=pflash,format=raw,unit=0,readonly=on,file=$work/rv64-code.fd"
           -drive "if=pflash,format=raw,unit=1,file=$(vars "$edk2/riscv/RISCV_VIRT_VARS.fd" rv64-vars.fd 32M)")

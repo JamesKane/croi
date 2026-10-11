@@ -765,8 +765,14 @@ the SMC resource.
   compatibility-format MSIs whatever CFI says, so VT-d's blocking of
   them is per the specification, unverified. Not yet: GICv4, two-level
   device tables, several ITSs.
-- **K12i: the RISC-V IMSIC** (rv64 MSIs, and the RISC-V IOMMU's MSI page
-  tables for remapping).
+- **K12i: RISC-V AIA (rv64 MSIs).** **Done** (2026-10-11). IMSIC files
+  per hart (Ssaia CSRs), the APLIC in MSI delivery mode for wired
+  interrupts, global identities, MSIs through msi_allocate/msi_create;
+  the PLIC stays where there is no AIA. The RISC-V IOMMU now comes up at
+  boot (QEMU resets it Off, blocking its devices). Tested on QEMU virt
+  with aia=aplic-imsic (`boot-aia`). Not yet: the RISC-V IOMMU's MSI page
+  tables (remapping on rv64), IPIs through the IMSIC, guest files, APLIC
+  direct mode, several sockets.
 
 ### K13a (agreed with Todhchai, 2026-10-11): VMO slices and ZERO_CHILDREN
 

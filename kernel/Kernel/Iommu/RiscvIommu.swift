@@ -11,8 +11,8 @@ import Synchronization
 /// ACPI RIMT IOMMU node gives (a PCIe-based IOMMU: its BAR 0); bti_create's
 /// id is the PCI requester id, which the RIMT maps to a device id.
 ///
-/// One `RiscvIommuUnit` per IOMMU. Creation (refused if firmware left it
-/// translating: BAD_STATE) builds a device directory (2 levels of base
+/// One `RiscvIommuUnit` per IOMMU, brought up at boot (`boot`; skipped if
+/// firmware left it translating), bound by iommu_create. Bring-up builds a device directory (2 levels of base
 /// 32-byte device contexts, or 3 of extended 64-byte ones where MSI_FLAT
 /// makes them extended) with a pass-through context (valid, both stages
 /// Bare) for every device id the RIMT routes there, so devices keep
@@ -64,12 +64,22 @@ enum RiscvIommus {
             unit.pointee.bound = true
             return unit.address
         }
-        guard unitCount < units.count else { throw .noResources }
-        let unit = try RiscvIommuUnitPointer.make(index, base: base)
-        unit.pointee.bound = true
-        units[unitCount] = unit.address
-        unitCount += 1
-        return unit.address
+        throw .notSupported  // in the RIMT, but boot couldn't bring it up
+    }
+
+    /// Brings up every RIMT IOMMU at boot, every device it covers in pass-
+    /// through: firmware may leave one off, which blocks its devices
+    /// (QEMU's resets that way), MSIs included. iommu_create binds them.
+    static func boot(_ console: Uart) {
+        for i in 0..<Rimt.count where unitCount < units.count {
+            guard let base = Rimt.registerBase(i), let unit = try? RiscvIommuUnitPointer.make(i, base: base) else { continue }
+            units[unitCount] = unit.address
+            unitCount += 1
+        }
+        guard unitCount > 0 else { return }
+        console.write("  iommu:  RISC-V IOMMU, ")
+        console.write(decimal: UInt64(unitCount))
+        console.write(unitCount == 1 ? " unit, devices passed through\n" : " units, devices passed through\n")
     }
 
     static func unbind(_ address: UInt64) {
