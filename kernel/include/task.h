@@ -50,6 +50,7 @@ enum : uint32_t {
   // thread's own handle: its TLS bases (arm64 TPIDR_EL0 and rv64 tp are
   // user-writable registers). Then the exception's state.
   CROI_PROP_REGISTER_GS = 2,
+  CROI_PROP_NAME = 3,  // char[32] (K13e): processes, threads, jobs, VMOs, BTIs; resources read only
   CROI_PROP_REGISTER_FS = 4,
   CROI_PROP_EXCEPTION_STATE = 16,
   CROI_EXCEPTION_STATE_TRY_NEXT = 0,

@@ -71,6 +71,51 @@ typedef struct {
   uint32_t rd_num_handles;
 } croi_channel_call_args_t;
 
+// The channel *_etc calls (K13e, Zircon's): handle dispositions written,
+// handle infos read; channel_read(_etc)'s MAY_DISCARD.
+enum : uint32_t {
+  CROI_HANDLE_OP_MOVE = 0,
+  CROI_HANDLE_OP_DUPLICATE = 1,
+  CROI_CHANNEL_READ_MAY_DISCARD = 1,
+  CROI_WAIT_MANY_MAX_ITEMS = 64,
+};
+
+// zx_handle_disposition_t (20 bytes).
+typedef struct {
+  uint32_t operation;
+  uint32_t handle;
+  uint32_t type;     // 0: any
+  uint32_t rights;   // or CROI_RIGHT_SAME_RIGHTS
+  int32_t result;    // written back for entries that failed
+} croi_handle_disposition_t;
+
+// zx_handle_info_t.
+typedef struct {
+  uint32_t handle;
+  uint32_t type;
+  uint32_t rights;
+  uint32_t unused;
+} croi_handle_info_t;
+
+// zx_channel_call_etc_args_t.
+typedef struct {
+  uint64_t wr_bytes;    // const void *
+  uint64_t wr_handles;  // croi_handle_disposition_t *
+  uint64_t rd_bytes;    // void *
+  uint64_t rd_handles;  // croi_handle_info_t *
+  uint32_t wr_num_bytes;
+  uint32_t wr_num_handles;
+  uint32_t rd_num_bytes;
+  uint32_t rd_num_handles;
+} croi_channel_call_etc_args_t;
+
+// zx_wait_item_t.
+typedef struct {
+  uint32_t handle;
+  uint32_t waitfor;
+  uint32_t pending;
+} croi_wait_item_t;
+
 // zx_info_handle_basic_t.
 typedef struct {
   uint64_t koid;

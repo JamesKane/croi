@@ -85,6 +85,11 @@ struct PortObject: ~Copyable {
     let bindToInterrupt: Bool
     var interruptHead: UInt64 = 0
     var interruptTail: UInt64 = 0
+    /// K13e: the objects with async waits to this port, once per observer
+    /// (port_cancel_key finds them here). Under `packetsLock`; an entry
+    /// means an observer is registered, so the object is alive (objects
+    /// lose their observers before their last reference: handle close).
+    var watched = UniqueArray<UInt64>()
 
     /// ZX_DEFAULT_PORT_RIGHTS: no WAIT (ports are waited on with port_wait).
     static var defaultRights: Rights { Rights.basic.subtracting(.wait).union(.read | .write) }
@@ -285,6 +290,7 @@ enum Ports {
                 if case .port(let p, let k, let packet, _) = observer.pointee.kind, p == port.object.address, k == key,
                    observer.pointee.table == table.address, observer.pointee.handle == handle {
                     if let previous { previous.pointee.next = observer.pointee.next } else { source.object.header.observers = observer.pointee.next }
+                    untrack(p, source.object)
                     QueuedPacketPointer(address: packet).free()
                     port.object.release()  // the observer's reference
                     unsafe heap.free(UnsafeMutableRawPointer(bitPattern: UInt(observer.address))!)
@@ -313,6 +319,83 @@ enum Ports {
             }
         }
         while let record = removed.popLast() { release(record) }
+    }
+
+    /// An async wait on `object` to `port` was added / went. Object lock held.
+    static func track(_ port: UInt64, _ object: ObjectPointer) {
+        let p = PortPointer(object: ObjectPointer(address: port))
+        p.pointee.packetsLock.withLock { p.pointee.watched.append(object.address) }
+    }
+
+    static func untrack(_ port: UInt64, _ object: ObjectPointer) {
+        let p = PortPointer(object: ObjectPointer(address: port))
+        p.pointee.packetsLock.withLock {
+            for i in 0..<p.pointee.watched.count where p.pointee.watched[i] == object.address {
+                _ = p.pointee.watched.remove(at: i)
+                return
+            }
+        }
+    }
+
+    /// port_cancel_key (K13e): every async wait to this port with `key`,
+    /// whatever its source, and every queued packet with it (user packets
+    /// too; not kernel sources' or interrupts'). NOT_FOUND if none.
+    static func cancelKey(_ table: borrowing HandleTable, port portHandle: UInt32, options: UInt64,
+                          key: UInt64) throws(Status) {
+        guard options == 0 else { throw .invalidArgs }
+        let portRef = try table.get(portHandle, type: .port, rights: .write)
+        let port = PortPointer(object: portRef.object)
+        var objects = UniqueArray<UInt64>()
+        port.pointee.packetsLock.withLock {
+            for i in 0..<port.pointee.watched.count {
+                let address = port.pointee.watched[i]
+                var seen = false
+                for j in 0..<objects.count where objects[j] == address { seen = true }
+                if !seen, ObjectPointer(address: address).tryRetain() { objects.append(address) }
+            }
+        }
+        var found = false
+        for i in 0..<objects.count {
+            let source = ObjectPointer(address: objects[i])
+            source.header.lock.withLock {
+                var previous: ObserverPointer? = nil
+                var cursor = source.header.observers
+                while let observer = cursor {
+                    cursor = observer.pointee.next
+                    if case .port(let p, let k, let packet, _) = observer.pointee.kind, p == port.object.address, k == key {
+                        if let previous { previous.pointee.next = observer.pointee.next } else { source.header.observers = observer.pointee.next }
+                        untrack(p, source)
+                        QueuedPacketPointer(address: packet).free()
+                        port.object.release()  // the observer's reference
+                        unsafe heap.free(UnsafeMutableRawPointer(bitPattern: UInt(observer.address))!)
+                        found = true
+                    } else {
+                        previous = observer
+                    }
+                }
+            }
+            source.release()
+        }
+        var removed = UniqueArray<QueuedPacketPointer>()
+        port.pointee.packetsLock.withLock {
+            var previous: UInt64 = 0
+            var cursor = port.pointee.head
+            while cursor != 0 {
+                let record = QueuedPacketPointer(address: cursor)
+                cursor = record.pointee.next
+                if record.pointee.packet.key == key, record.pointee.source == 0 {
+                    if previous != 0 { QueuedPacketPointer(address: previous).pointee.next = record.pointee.next } else { port.pointee.head = record.pointee.next }
+                    if port.pointee.tail == record.address { port.pointee.tail = previous }
+                    port.pointee.queued -= 1
+                    removed.append(record)
+                } else {
+                    previous = record.address
+                }
+            }
+        }
+        if removed.count > 0 { found = true }
+        while let record = removed.popLast() { release(record) }
+        guard found else { throw .notFound }
     }
 
     static var queuedCount: (borrowing ObjectRef) -> Int {

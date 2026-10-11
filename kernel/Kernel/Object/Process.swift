@@ -21,6 +21,7 @@ import Synchronization
 
 struct JobObject: ~Copyable {
     var header = ObjectHeader(type: .job)
+    var name = ObjectName(repeating: 0)
     /// Retained; nil for the root job.
     let parent: ObjectPointer?
     /// Child processes and jobs (not retained: each removes itself).
@@ -56,6 +57,7 @@ struct ProcessObject: ~Copyable {
     enum State { case initial, running, dying, dead }
 
     var header = ObjectHeader(type: .process)
+    var name = ObjectName(repeating: 0)
     /// Retained.
     let job: ObjectPointer
     var state = State.initial
@@ -98,6 +100,7 @@ struct ThreadObject: ~Copyable {
     enum State { case initial, running, dead }
 
     var header = ObjectHeader(type: .thread)
+    var name = ObjectName(repeating: 0)
     /// Retained.
     let process: ObjectPointer
     var state = State.initial

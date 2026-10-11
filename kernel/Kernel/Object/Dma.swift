@@ -27,6 +27,7 @@ struct IommuObject: ~Copyable {
 
 struct BtiObject: ~Copyable {
     var header = ObjectHeader(type: .bti)
+    var name = ObjectName(repeating: 0)
     let btiId: UInt64
     /// Behind an IOMMU: its object (a reference) and the device's domain
     /// (an IoDomain).

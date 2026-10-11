@@ -1351,6 +1351,35 @@ syscalls 202-208; vmo.h; Todhchai's page cache and mmap for Taisce):
   during it, detach dropping clean pages; a TRAP_DIRTY VMO's DIRTY
   requests from vmo_write and a write fault.
 
+The small calls, K13e part 1 (syscalls 210-215 in User/IpcSyscalls.swift,
+Kernel/Object/Names.swift; ipc.h, task.h; the pinned tree's semantics):
+- object_wait_many (210, croi_wait_item_t): count 0 sleeps to the deadline
+  and is TIMED_OUT, over 64 OUT_OF_RANGE, a bad item writes nothing back,
+  otherwise every pending is written back (OK, TIMED_OUT, CANCELED; only
+  the closed handle's item gets HANDLE_CLOSED).
+- handle_close_many (211): 0 skipped, bad values BAD_HANDLE with the rest
+  still closed, 64 per chunk.
+- port_cancel_key (212): every async wait to the port with the key,
+  whatever its source, and every queued packet with it (user ones too;
+  not kernel sources' or interrupts'), NOT_FOUND if none. Each port keeps
+  `watched` (an object address per observer to it, under its packets
+  lock; Observers.add/remove, notify, handleClosed and port_cancel keep
+  it), safe because an object loses its observers before its last
+  reference.
+- channel_write_etc / read_etc / call_etc (213-215): croi_handle_
+  disposition_t (MOVE or DUPLICATE, type 0 = any, rights reduced or
+  SAME_RIGHTS, result per entry) and croi_handle_info_t, Zircon's order of
+  checks (TRANSFER, not the channel itself, type, rights subset; DUPLICATE
+  needs DUPLICATE); every entry processed, MOVE consumes whatever happens,
+  the array copied back if any failed. channel_read(_etc) now check the
+  handle first and refuse unknown options with NOT_SUPPORTED;
+  CROI_CHANNEL_READ_MAY_DISCARD drops a message that doesn't fit.
+- ZX_PROP_NAME (3): 32-byte names (31 + NUL) on processes, threads (BAD_
+  STATE once dead), jobs, BTIs and VMOs (in the VmoRecord), resources read
+  only, others WRONG_TYPE; process_create and thread_create now store
+  theirs.
+- Mode 17's `small_calls`.
+
 Randomness, K11b (Kernel/Random.swift, syscalls 181-182; handoff v5):
 - The loader reads 32 bytes from EFI_RNG_PROTOCOL if the firmware has
   one (edk2 over virtio-rng: qemu.sh adds `-device virtio-rng-pci`) into

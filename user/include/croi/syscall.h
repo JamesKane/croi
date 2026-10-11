@@ -156,6 +156,12 @@ enum : uint64_t {
   CROI_SYS_PAGER_OP_RANGE = 206,        // (pager, op, vmo, offset, length, data)
   CROI_SYS_PAGER_QUERY_DIRTY_RANGES = 207,  // (pager | vmo << 32, offset, length, buffer, buffer_size, size_t out[2]: actual, avail)
   CROI_SYS_PAGER_QUERY_VMO_STATS = 208, // (pager, vmo, options, buffer, buffer_size)
+  CROI_SYS_OBJECT_WAIT_MANY = 210,      // (croi_wait_item_t *items, count, deadline), K13e
+  CROI_SYS_HANDLE_CLOSE_MANY = 211,     // (const uint32_t *handles, count)
+  CROI_SYS_PORT_CANCEL_KEY = 212,       // (port, options, key)
+  CROI_SYS_CHANNEL_WRITE_ETC = 213,     // (channel, options, bytes, num_bytes, croi_handle_disposition_t *, num_handles)
+  CROI_SYS_CHANNEL_READ_ETC = 214,      // (channel, options, bytes, croi_handle_info_t *, num_bytes | num_handles << 32, actuals)
+  CROI_SYS_CHANNEL_CALL_ETC = 215,      // (channel, options, deadline, croi_channel_call_etc_args_t *, actual_bytes, actual_handles)
   CROI_SYS_SYSTEM_POWERCTL = 180,       // (power resource, cmd, const croi_system_powerctl_arg_t *)
 
   // The kernel's CPRNG (K11b; Zircon's): at most CROI_CPRNG_MAX_LEN bytes.

@@ -119,6 +119,7 @@ enum Observers {
                 previous = observer
             case .port(let port, _, let packet, let options):
                 if let previous { previous.pointee.next = observer.pointee.next } else { object.header.observers = observer.pointee.next }
+                Ports.untrack(port, object)
                 if observer.pointee.byValue {
                     fireValuePort(port, QueuedPacketPointer(address: packet), observer.pointee.atValue, value)
                 } else {
@@ -195,6 +196,7 @@ enum Observers {
         unsafe raw.bindMemory(to: Observer.self, capacity: 1).initialize(to: record)
         let pointer = ObserverPointer(address: UInt64(UInt(bitPattern: raw)))
         object.header.observers = pointer
+        if case .port(let port, _, _, _) = observer.kind { Ports.track(port, object) }
         return pointer
     }
 
@@ -205,6 +207,7 @@ enum Observers {
         while let current = cursor {
             if current == observer {
                 if let previous { previous.pointee.next = current.pointee.next } else { object.header.observers = current.pointee.next }
+                if case .port(let port, _, _, _) = current.pointee.kind { Ports.untrack(port, object) }
                 unsafe heap.free(UnsafeMutableRawPointer(bitPattern: UInt(current.address))!)
                 return
             }
@@ -236,6 +239,7 @@ enum Observers {
                     previous = observer
                 case .port(let port, _, let packet, _):
                     if let previous { previous.pointee.next = observer.pointee.next } else { object.header.observers = observer.pointee.next }
+                    Ports.untrack(port, object)
                     QueuedPacketPointer(address: packet).free()
                     ObjectPointer(address: port).release()
                     unsafe heap.free(UnsafeMutableRawPointer(bitPattern: UInt(observer.address))!)
@@ -331,8 +335,10 @@ enum ObjectWait {
                 items[i].pending = object.header.signals
             }
         }
-        if Scheduler.locked({ state.pointee.canceled }) {
-            for i in 0..<items.count { items[i].pending |= Signals.handleClosed }
+        let (canceled, which) = Scheduler.locked { (state.pointee.canceled, state.pointee.firedIndex) }
+        if canceled {
+            // The item whose handle closed (Zircon's on_cancel).
+            if which >= 0, which < items.count { items[which].pending |= Signals.handleClosed }
             throw .canceled
         }
         if interrupted { throw .canceled }  // killed: it exits on the way out

@@ -2904,6 +2904,131 @@ static int64_t pager(const startup_t *s) {
   return 0;
 }
 
+// K13e: the small calls. A server for channel_call_etc: reads a request
+// with read_etc and sends back its first word + 1 and the handle it got.
+static void etc_server(uint64_t channel) {
+  uint32_t request[2], actual[2];
+  croi_handle_info_t info[1];
+  if (wait_for((uint32_t)channel, CROI_SIGNAL_READABLE, 3000000000ull) & CROI_SIGNAL_READABLE &&
+      sys6(CROI_SYS_CHANNEL_READ_ETC, (uint32_t)channel, 0, (uint64_t)request, (uint64_t)info,
+           sizeof request | (uint64_t)1 << 32, (uint64_t)actual) == 0) {
+    request[1] += 1;
+    croi_handle_disposition_t back = {CROI_HANDLE_OP_MOVE, info[0].handle, 0, RIGHT_SAME, 0};
+    sys6(CROI_SYS_CHANNEL_WRITE_ETC, (uint32_t)channel, 0, (uint64_t)request, sizeof request, (uint64_t)&back,
+         actual[1]);
+  }
+  sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
+}
+
+static int64_t small_calls(const startup_t *s) {
+  // Names: set and read back (truncated to 31), WRONG_TYPE, thread names
+  // from thread_create, a short buffer.
+  uint32_t vmo = 0, ev = 0, ev2 = 0, thread = 0, sock[2] = {0, 0};
+  char name[32];
+  CHECK(490, sys(CROI_SYS_VMO_CREATE, PAGE, 0, (uint64_t)&vmo, 0, 0) == 0 &&
+                 sys(CROI_SYS_EVENT_CREATE, 0, (uint64_t)&ev, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_OBJECT_SET_PROPERTY, vmo, CROI_PROP_NAME, (uint64_t)"buffer\0junk", 11, 0) == 0 &&
+                 sys(CROI_SYS_OBJECT_GET_PROPERTY, vmo, CROI_PROP_NAME, (uint64_t)name, 31, 0) == ERR_BUFFER_TOO_SMALL &&
+                 sys(CROI_SYS_OBJECT_GET_PROPERTY, vmo, CROI_PROP_NAME, (uint64_t)name, 32, 0) == 0 &&
+                 name[0] == 'b' && name[5] == 'r' && name[6] == 0 && name[7] == 0 &&
+                 sys(CROI_SYS_OBJECT_SET_PROPERTY, vmo, CROI_PROP_NAME,
+                     (uint64_t)"0123456789abcdefghijklmnopqrstuvwxyz", 36, 0) == 0 &&
+                 sys(CROI_SYS_OBJECT_GET_PROPERTY, vmo, CROI_PROP_NAME, (uint64_t)name, 32, 0) == 0 &&
+                 name[30] == 'u' && name[31] == 0 &&
+                 sys(CROI_SYS_SOCKET_CREATE, 0, (uint64_t)&sock[0], (uint64_t)&sock[1], 0, 0) == 0 &&
+                 sys(CROI_SYS_OBJECT_SET_PROPERTY, sock[0], CROI_PROP_NAME, (uint64_t)"x", 1, 0) == ERR_WRONG_TYPE &&
+                 sys(CROI_SYS_OBJECT_SET_PROPERTY, ev, CROI_PROP_NAME, (uint64_t)"x", 1, 0) == ERR_ACCESS_DENIED &&
+                 sys(CROI_SYS_HANDLE_CLOSE_MANY, (uint64_t)sock, 2, 0, 0, 0) == 0 &&
+                 sys6(CROI_SYS_THREAD_CREATE, s->process, (uint64_t)"worker", 6, 0, (uint64_t)&thread, 0) == 0 &&
+                 sys(CROI_SYS_OBJECT_GET_PROPERTY, thread, CROI_PROP_NAME, (uint64_t)name, 32, 0) == 0 &&
+                 name[0] == 'w' && name[5] == 'r' && name[6] == 0);
+  sys(CROI_SYS_HANDLE_CLOSE, thread, 0, 0, 0, 0);
+  // object_wait_many: the second item fires; count 0 times out; 65 is too
+  // many; a bad handle writes nothing back.
+  croi_wait_item_t items[2] = {{vmo, 1u << 0, 0xAA}, {ev, SIGNALED, 0xAA}};  // a VMO is never readable
+  CHECK(491, sys(CROI_SYS_OBJECT_SIGNAL, ev, 0, SIGNALED, 0, 0) == 0 &&
+                 sys(CROI_SYS_OBJECT_WAIT_MANY, (uint64_t)items, 2, now_ns() + 1000000000ull, 0, 0) == 0 &&
+                 (items[1].pending & SIGNALED) && !(items[0].pending & 1u) && items[0].pending != 0xAA &&
+                 sys(CROI_SYS_OBJECT_WAIT_MANY, 0, 0, now_ns(), 0, 0) == ERR_TIMED_OUT &&
+                 sys(CROI_SYS_OBJECT_WAIT_MANY, (uint64_t)items, 65, 0, 0, 0) == ERR_OUT_OF_RANGE);
+  items[0].handle = 0x7FFFFFF0u;
+  items[1].pending = 0xAA;
+  CHECK(492, sys(CROI_SYS_OBJECT_WAIT_MANY, (uint64_t)items, 2, 0, 0, 0) == ERR_BAD_HANDLE && items[1].pending == 0xAA);
+  // handle_close_many: 0 skipped, a bad value reported, the rest closed.
+  uint32_t list[4] = {0, 0, 0, 0};
+  CHECK(493, sys(CROI_SYS_EVENT_CREATE, 0, (uint64_t)&list[0], 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_EVENT_CREATE, 0, (uint64_t)&list[3], 0, 0, 0) == 0 && (list[2] = 0x7FFFFFF0u) &&
+                 sys(CROI_SYS_HANDLE_CLOSE_MANY, (uint64_t)list, 4, 0, 0, 0) == ERR_BAD_HANDLE &&
+                 sys(CROI_SYS_HANDLE_CLOSE, list[0], 0, 0, 0, 0) == ERR_BAD_HANDLE &&
+                 sys(CROI_SYS_HANDLE_CLOSE, list[3], 0, 0, 0, 0) == ERR_BAD_HANDLE &&
+                 sys(CROI_SYS_HANDLE_CLOSE_MANY, (uint64_t)list, 2, 0, 0, 0) == ERR_BAD_HANDLE &&  // list[0] went
+                 (list[0] = 0, sys(CROI_SYS_HANDLE_CLOSE_MANY, (uint64_t)list, 2, 0, 0, 0) == 0));  // zeros skipped
+  // port_cancel_key: an async wait and a queued user packet with key 5
+  // go; key 6's stays.
+  uint32_t port = 0;
+  croi_port_packet_t packet = {0};
+  CHECK(494, sys(CROI_SYS_PORT_CREATE, 0, (uint64_t)&port, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_EVENT_CREATE, 0, (uint64_t)&ev2, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_OBJECT_WAIT_ASYNC, ev2, port, 5, SIGNALED, 0) == 0 && (packet.key = 5) &&
+                 sys(CROI_SYS_PORT_QUEUE, port, (uint64_t)&packet, 0, 0, 0) == 0 && (packet.key = 6) &&
+                 sys(CROI_SYS_PORT_QUEUE, port, (uint64_t)&packet, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_PORT_CANCEL_KEY, port, 1, 5, 0, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_PORT_CANCEL_KEY, port, 0, 5, 0, 0) == 0 &&
+                 sys(CROI_SYS_PORT_CANCEL_KEY, port, 0, 5, 0, 0) == ERR_NOT_FOUND &&
+                 sys(CROI_SYS_OBJECT_SIGNAL, ev2, 0, SIGNALED, 0, 0) == 0 &&
+                 sys(CROI_SYS_PORT_WAIT, port, 0, (uint64_t)&packet, 0, 0) == 0 && packet.key == 6 &&
+                 sys(CROI_SYS_PORT_WAIT, port, 0, (uint64_t)&packet, 0, 0) == ERR_TIMED_OUT);
+  sys(CROI_SYS_HANDLE_CLOSE, port, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, ev2, 0, 0, 0, 0);
+  // Channel *_etc: a duplicate with fewer rights and its type checked
+  // arrives as such; a wrong type is WRONG_TYPE in the entry's result and
+  // consumes a MOVE; rights beyond the handle's INVALID_ARGS, the source
+  // kept for a DUPLICATE.
+  uint32_t a = 0, b = 0, actual[2] = {0, 0};
+  croi_handle_info_t infos[2];
+  char bytes[8];
+  croi_handle_disposition_t dup = {CROI_HANDLE_OP_DUPLICATE, ev, 5, RIGHT_TRANSFER | RIGHT_WAIT, 0};
+  CHECK(495, sys(CROI_SYS_CHANNEL_CREATE, 0, (uint64_t)&a, (uint64_t)&b, 0, 0) == 0 &&
+                 sys6(CROI_SYS_CHANNEL_WRITE_ETC, a, 0, (uint64_t)"hi", 2, (uint64_t)&dup, 1) == 0 &&
+                 sys6(CROI_SYS_CHANNEL_READ_ETC, b, 0, (uint64_t)bytes, (uint64_t)infos,
+                      sizeof bytes | (uint64_t)2 << 32, (uint64_t)actual) == 0 &&
+                 actual[0] == 2 && actual[1] == 1 && infos[0].type == 5 &&
+                 infos[0].rights == (RIGHT_TRANSFER | RIGHT_WAIT) && infos[0].unused == 0 &&
+                 sys(CROI_SYS_HANDLE_CLOSE, infos[0].handle, 0, 0, 0, 0) == 0);
+  uint32_t moved = 0;
+  CHECK(496, sys(CROI_SYS_HANDLE_DUPLICATE, ev, RIGHT_SAME, (uint64_t)&moved, 0, 0) == 0);
+  croi_handle_disposition_t two[2] = {{CROI_HANDLE_OP_MOVE, moved, 4, RIGHT_SAME, 0},
+                                      {CROI_HANDLE_OP_DUPLICATE, ev, 0, 0xFFFFFFFu, 0}};
+  CHECK(497, sys6(CROI_SYS_CHANNEL_WRITE_ETC, a, 0, (uint64_t)"x", 1, (uint64_t)two, 2) == ERR_WRONG_TYPE &&
+                 two[0].result == ERR_WRONG_TYPE && two[1].result == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_HANDLE_CLOSE, moved, 0, 0, 0, 0) == ERR_BAD_HANDLE &&
+                 (wait_for(ev, SIGNALED, 0) & SIGNALED) &&  // the duplicated one still works
+                 sys6(CROI_SYS_CHANNEL_READ_ETC, b, 1, (uint64_t)bytes, (uint64_t)infos, 0, (uint64_t)actual) ==
+                     ERR_SHOULD_WAIT);
+  // MAY_DISCARD drops a message that doesn't fit; call_etc round trip.
+  uint32_t server = start_thread(s, etc_server, b);
+  uint32_t request[2] = {0, 41}, reply[2] = {0, 0};
+  croi_handle_disposition_t give = {CROI_HANDLE_OP_DUPLICATE, ev, 0, RIGHT_SAME, 0};
+  croi_channel_call_etc_args_t args = {(uint64_t)request, (uint64_t)&give, (uint64_t)reply, (uint64_t)infos,
+                                       sizeof request, 1, sizeof reply, 2};
+  uint32_t got_bytes = 0, got_handles = 0;
+  CHECK(498, sys6(CROI_SYS_CHANNEL_CALL_ETC, a, 0, now_ns() + 3000000000ull, (uint64_t)&args, (uint64_t)&got_bytes,
+                  (uint64_t)&got_handles) == 0 &&
+                 got_bytes == 8 && got_handles == 1 && reply[1] == 42 && infos[0].type == 5 &&
+                 sys(CROI_SYS_HANDLE_CLOSE, infos[0].handle, 0, 0, 0, 0) == 0);
+  join(server);
+  uint32_t c = 0, d = 0;
+  CHECK(499, sys(CROI_SYS_CHANNEL_CREATE, 0, (uint64_t)&c, (uint64_t)&d, 0, 0) == 0 &&
+                 sys6(CROI_SYS_CHANNEL_WRITE, c, 0, (uint64_t)"long message", 12, 0, 0) == 0 &&
+                 sys6(CROI_SYS_CHANNEL_READ_ETC, d, 2, (uint64_t)bytes, 0, 4, (uint64_t)actual) == ERR_NOT_SUPPORTED &&
+                 sys6(CROI_SYS_CHANNEL_READ_ETC, d, CROI_CHANNEL_READ_MAY_DISCARD, (uint64_t)bytes, 0, 4,
+                      (uint64_t)actual) == ERR_BUFFER_TOO_SMALL && actual[0] == 12 &&
+                 sys6(CROI_SYS_CHANNEL_READ_ETC, d, 0, (uint64_t)bytes, 0, 4, (uint64_t)actual) == ERR_SHOULD_WAIT);
+  uint32_t rest[6] = {a, b, c, d, ev, vmo};
+  sys(CROI_SYS_HANDLE_CLOSE_MANY, (uint64_t)rest, 6, 0, 0, 0);
+  return 0;
+}
+
 // K13b: FIFOs (Zircon's: records into the peer's ring, READABLE /
 // WRITABLE / PEER_CLOSED, user signals to the peer) and
 // vmo_replace_as_executable (a VMEX resource; the handle consumed).
@@ -3223,6 +3348,8 @@ static int64_t extensions(const startup_t *s) {
   if (strs != 0) return strs;
   int64_t pg = pager(s);
   if (pg != 0) return pg;
+  int64_t small = small_calls(s);
+  if (small != 0) return small;
   int64_t random = cprng_checks();
   if (random != 0) return random;
 

@@ -809,6 +809,12 @@ THREAD, VMO, maps, handle table) and the NAME property.
   DIRTY, WRITEBACK_BEGIN/END, query_dirty_ranges, query_vmo_stats, clean
   pages dropped at detach). Not yet: eviction, zero intervals, resizable
   or unbounded pager VMOs (croi has no resizable VMOs).
+- **K13e: the small calls.** Part 1 **done** (2026-10-11):
+  object_wait_many, handle_close_many, port_cancel_key, the channel *_etc
+  calls, ZX_PROP_NAME. Part 2 next: vmar_op_range and the info topics
+  (PROCESS, THREAD, VMO, PROCESS_MAPS, PROCESS_VMOS, HANDLE_TABLE,
+  TASK_RUNTIME, THREAD_STATS, JOB, JOB_CHILDREN, JOB_PROCESSES,
+  PROCESS_THREADS). Then clock objects (UTC) and the debug calls.
 
 ### K13a (agreed with Todhchai, 2026-10-11): VMO slices and ZERO_CHILDREN
 

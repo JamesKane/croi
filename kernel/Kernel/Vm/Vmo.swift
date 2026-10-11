@@ -74,6 +74,8 @@ struct VmoRecord: ~Copyable {
     /// whether it was written since the stats were last reset.
     var states = PageList(pages: 0)
     var modified = false
+    /// ZX_PROP_NAME (K13e).
+    var name = ObjectName(repeating: 0)
 
     var pageCount: Int { Int(size / KernelLayout.pageSize) }
 }

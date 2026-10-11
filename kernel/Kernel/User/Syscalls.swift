@@ -357,7 +357,7 @@ enum Syscalls {
             try exceptionCall(number, a, table)
         case 86 where a[1] == UInt64(CROI_INFO_CPU_STATS):  // returns a count
             return try CpuStatistics.info(a, table)
-        case 80...89:
+        case 80...89, 210...215:
             try ipcCall(number, a, table)
         case 90...99:
             try syncCall(number, a, table)

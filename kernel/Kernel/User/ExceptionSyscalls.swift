@@ -42,6 +42,16 @@ extension Syscalls {
                 return
             }
             #endif
+            if a[1] == UInt64(CROI_PROP_NAME) {
+                guard a[2] != 0 else { throw .invalidArgs }
+                let object = try table.get(handle, rights: .getProperty)
+                guard a[3] >= UInt64(Names.maxLength) else { throw .bufferTooSmall }
+                var name = try Names.get(object.object)
+                var span = name.mutableSpan
+                let failed = span.withUnsafeMutableBytes { unsafe UserCopy.to(a[2], UnsafeRawPointer($0.baseAddress!), 32) }
+                guard failed == 0 else { throw .invalidArgs }
+                return
+            }
             if a[1] == UInt64(CROI_PROP_VMO_CONTENT_SIZE) {
                 guard a[3] >= 8 else { throw .bufferTooSmall }
                 try check(a[2], 8)
@@ -86,6 +96,12 @@ extension Syscalls {
                 return
             }
             #endif
+            if a[1] == UInt64(CROI_PROP_NAME) {
+                guard a[2] != 0 else { throw .invalidArgs }
+                let object = try table.get(handle, rights: .setProperty)
+                try Names.set(object.object, try Names.fromUser(a[2], a[3]))
+                return
+            }
             if a[1] == UInt64(CROI_PROP_VMO_CONTENT_SIZE) {
                 guard a[3] >= 8 else { throw .bufferTooSmall }
                 var value: UInt64 = 0

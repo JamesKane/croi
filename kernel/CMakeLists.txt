@@ -56,6 +56,7 @@ add_library(kernel-swift OBJECT
   Kernel/Object/Socket.swift
   Kernel/Object/Stream.swift
   Kernel/Object/Pager.swift
+  Kernel/Object/Names.swift
   Kernel/Object/Futex.swift
   Kernel/Object/TimerObject.swift
   Kernel/Object/Exception.swift

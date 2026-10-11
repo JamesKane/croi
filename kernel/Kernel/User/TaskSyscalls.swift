@@ -23,6 +23,7 @@ extension Syscalls {
             try check(a[5], 4)
             let job = try table.get(handle, type: .job, rights: .manageProcess)
             let created = try Processes.create(job: job.object)
+            try? Names.set(created.process, (try? Names.fromUser(a[1], a[2])) ?? ObjectName(repeating: 0))
             let process: UInt32
             do throws(Status) {
                 process = try table.add(created.process, rights: ProcessObject.defaultRights)
@@ -54,6 +55,7 @@ extension Syscalls {
             try check(a[4], 4)
             let process = try table.get(handle, type: .process, rights: .manageThread)
             let thread = try Processes.createThread(process: process.object)
+            try? Names.set(thread, (try? Names.fromUser(a[1], a[2])) ?? ObjectName(repeating: 0))
             try put(try table.add(thread, rights: ThreadObject.defaultRights), a[4])
         case 65:  // thread_start(thread, entry, stack, arg1, arg2)
             let thread = try table.get(handle, type: .thread, rights: .manageThread)
