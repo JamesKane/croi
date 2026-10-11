@@ -708,8 +708,17 @@ the SMC resource.
   remapping, IVHD device scopes (a unit covers its segment), ATS, 5/6
   levels, restarting the event log after an overflow. Unverified on
   hardware (this host has an AMD IOMMU, but croi doesn't boot it here).
-- **K12c and on:** SMMUv3 (QEMU's `iommu=smmuv3` is already on arm64's
-  command line; Fuchsia's reference code), the RISC-V IOMMU.
+- **K12c: Arm SMMUv3.** **Done** (2026-10-11). Zircon's ARM_SMMU type
+  and descriptor; IORT for SMMUs and requester-to-stream id mappings;
+  linear stream table (bypass until claimed), command queue with
+  CMD_SYNC, event queue on its wired interrupt; stage-1 domains (one CD,
+  ASID per domain) on the shared `IoDomain` layer. Tested on QEMU's virt
+  SMMUv3 with edu (mode 18 on arm64). Not yet: two-level stream tables
+  (a linear one is 64 bytes per stream id: 4 MiB for QEMU's 65536),
+  stage 2, queue MSIs, ATS/PRI, named-component stream ids.
+- **K12d and on:** SMMUv2 (Qualcomm's SMMU-500 on the SC8280XP board;
+  Fuchsia's arm_smmu driver is the reference, from ACPI's IORT type 3
+  here), the RISC-V IOMMU, and interrupt remapping for all of them.
 
 ### After M3 (requirements 14–19 and the remaining extensions)
 - IOMMUs: VT-d first, then AMD-Vi, SMMUv3 (Fuchsia reference code) and

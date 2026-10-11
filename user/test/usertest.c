@@ -310,6 +310,7 @@ typedef struct {
   uint32_t bootdata, padding2;  // the boot data VMO (read only)
   uint64_t iommu_base;          // amd64: the first IOMMU's registers (DMAR or IVRS), or 0
   uint32_t iommu_type, padding3;  // its iommu_create type
+  uint64_t ecam;                  // segment 0's ECAM (the MCFG's first window), or 0
 } startup_t;
 
 #define CHILD_CODE 0x1000000ull
@@ -1575,8 +1576,7 @@ static int64_t virtual_interrupts(const startup_t *s, uint32_t port) {
 // bus 0 and skipped if absent (other machines boot this kernel too), and
 // every config register touched is put back. Elsewhere msi_allocate is
 // NOT_SUPPORTED until the ITS / IMSIC.
-#if defined(__x86_64__)
-#define ECAM 0xE0000000ull
+#define ECAM 0xE0000000ull  // q35's (amd64's MSI test)
 // A physical VMO over [base, base + size) under the root resource, and a
 // read/write uncached mapping of it.
 static uint32_t physical_vmo(const startup_t *s, uint64_t base, uint64_t size, volatile uint8_t **at) {
@@ -1620,6 +1620,7 @@ static uint32_t find_device(volatile uint8_t *bus, uint32_t vendor_mask, uint32_
   return 0;
 }
 
+#if defined(__x86_64__)
 static int64_t msi_test(const startup_t *s, uint32_t port) {
   volatile uint8_t *bus = 0;
   uint32_t bus_vmo = physical_vmo(s, ECAM, 32 * 0x8000, &bus);  // bus 0, devices 0-31, function 0
@@ -2006,10 +2007,11 @@ static int64_t dma(const startup_t *s) {
   return 0x600D;
 }
 
-#if defined(__x86_64__)
-// Mode 18, K12a/b: VT-d with QEMU's intel-iommu (its DMAR covers the
-// whole segment) or AMD-Vi with its amd-iommu (the unit covers its
-// segment), whichever the kernel found (it passes the unit's registers and
+#if defined(__x86_64__) || defined(__aarch64__)
+// Mode 18, K12: VT-d with QEMU's intel-iommu (its DMAR covers the whole
+// segment), AMD-Vi with its amd-iommu (the unit covers its segment) or
+// arm64's SMMUv3 (Zircon's ARM_SMMU descriptor, requester ids through the
+// IORT), whichever the kernel found (it passes the unit's registers and
 // type in the startup block, where a driver would read the DMAR or IVRS),
 // and edu's DMA engine (00:10.0, a 28-bit DMA mask). Through a pinned page and back; then to a read-only
 // IOVA and to an unpinned one, which the IOMMU refuses (the kernel checks
@@ -2028,9 +2030,9 @@ static int edu_dma(volatile uint8_t *regs, uint64_t src, uint64_t dst, uint32_t 
 }
 
 static int64_t iommu_test(const startup_t *s) {
-  if (s->iommu_base == 0) return 0x600E;
+  if (s->iommu_base == 0 || s->ecam == 0) return 0x600E;
   volatile uint8_t *bus = 0;
-  uint32_t bus_vmo = physical_vmo(s, ECAM, 32 * 0x8000, &bus);
+  uint32_t bus_vmo = physical_vmo(s, s->ecam, 32 * 0x8000, &bus);
   uint32_t cap = 0;
   uint32_t edu_at = find_device(bus, ~0u, 0x11e81234, 0x05, &cap);
   if (edu_at == 0) {
@@ -2041,22 +2043,24 @@ static int64_t iommu_test(const startup_t *s) {
   volatile uint8_t *edu = bus + edu_at;
 
   // The unit: its registers must be the firmware's; one object at a time.
-  // Both descriptors are 16 bytes with the register base first.
+  // The x86 descriptors are 16 bytes with the register base first; the
+  // SMMU's is the base alone.
   croi_iommu_desc_intel_t intel = {.register_base = s->iommu_base, .pci_segment = 0, .whole_segment = true};
   croi_iommu_desc_amd_t amd = {.register_base = s->iommu_base, .pci_segment = 0};
   void *desc_bytes = s->iommu_type == CROI_IOMMU_TYPE_AMD ? (void *)&amd : (void *)&intel;
   uint32_t type = s->iommu_type;
   uint64_t desc[2];
   __builtin_memcpy(desc, desc_bytes, sizeof desc);
-  uint64_t elsewhere[2] = {desc[0] + 0x10000, desc[1]};
+  uint64_t desc_size = type == CROI_IOMMU_TYPE_ARM_SMMU ? 8 : sizeof desc;
+  uint64_t elsewhere[2] = {desc[0] + 0x100000, desc[1]};
   uint32_t iommu = 0, again = 0, bti = 0, bti2 = 0;
-  CHECK(400, sys(CROI_SYS_IOMMU_CREATE, s->resource, type, (uint64_t)&elsewhere, sizeof desc,
+  CHECK(400, sys(CROI_SYS_IOMMU_CREATE, s->resource, type, (uint64_t)&elsewhere, desc_size,
                  (uint64_t)&iommu) == ERR_NOT_FOUND &&
-                 sys(CROI_SYS_IOMMU_CREATE, s->resource, type, (uint64_t)&desc, sizeof desc + 8,
+                 sys(CROI_SYS_IOMMU_CREATE, s->resource, type, (uint64_t)&desc, desc_size + 8,
                      (uint64_t)&iommu) == ERR_INVALID_ARGS &&
-                 sys(CROI_SYS_IOMMU_CREATE, s->resource, type, (uint64_t)&desc, sizeof desc,
+                 sys(CROI_SYS_IOMMU_CREATE, s->resource, type, (uint64_t)&desc, desc_size,
                      (uint64_t)&iommu) == 0 &&
-                 sys(CROI_SYS_IOMMU_CREATE, s->resource, type, (uint64_t)&desc, sizeof desc,
+                 sys(CROI_SYS_IOMMU_CREATE, s->resource, type, (uint64_t)&desc, desc_size,
                      (uint64_t)&again) == ERR_ALREADY_BOUND);
   // A device per BTI; no trust-decision record (it is translated).
   CHECK(401, sys(CROI_SYS_BTI_CREATE, iommu, 0, 0x10000, (uint64_t)&bti, 0) == ERR_OUT_OF_RANGE &&
@@ -2106,7 +2110,7 @@ static int64_t iommu_test(const startup_t *s) {
                  sys(CROI_SYS_VMO_OP_RANGE, vmo, CROI_VMO_OP_DECOMMIT, 0, 3 * PAGE, 0) == 0 &&
                  sys(CROI_SYS_BTI_CREATE, iommu, 0, bdf, (uint64_t)&bti, 0) == 0 &&
                  sys(CROI_SYS_HANDLE_CLOSE, bti, 0, 0, 0, 0) == 0 && sys(CROI_SYS_HANDLE_CLOSE, iommu, 0, 0, 0, 0) == 0 &&
-                 sys(CROI_SYS_IOMMU_CREATE, s->resource, type, (uint64_t)&desc, sizeof desc,
+                 sys(CROI_SYS_IOMMU_CREATE, s->resource, type, (uint64_t)&desc, desc_size,
                      (uint64_t)&iommu) == 0 &&
                  sys(CROI_SYS_HANDLE_CLOSE, iommu, 0, 0, 0, 0) == 0);
   sys(CROI_SYS_HANDLE_CLOSE, vmo, 0, 0, 0, 0);
@@ -2753,7 +2757,7 @@ __attribute__((section(".text.start"))) [[noreturn]] void _start(uint64_t mode, 
             : mode == 15 ? timelines((const startup_t *)handle)
             : mode == 16 ? deadline_wakeups((const startup_t *)handle)
             : mode == 17 ? extensions((const startup_t *)handle)
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
             : mode == 18 ? iommu_test((const startup_t *)handle)
 #endif
             : mode >= 0x400 ? child((uint32_t)mode, handle, vdso_base)

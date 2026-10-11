@@ -3,6 +3,7 @@ add_library(kernel-swift OBJECT
   Kernel/Acpi/Madt.swift
   Kernel/Acpi/Pptt.swift
   Kernel/Acpi/Rhct.swift
+  Kernel/Acpi/Mcfg.swift
   Kernel/BootAllocator.swift
   Kernel/BootOptions.swift
   Kernel/Exceptions.swift
@@ -58,6 +59,7 @@ add_library(kernel-swift OBJECT
   Kernel/Iommu/IoDomain.swift
   Kernel/Iommu/IntelIommu.swift
   Kernel/Iommu/AmdIommu.swift
+  Kernel/Iommu/SmmuV3.swift
   Kernel/Object/KernelMemory.swift
   Kernel/Object/Counter.swift
   Kernel/Object/Timeline.swift

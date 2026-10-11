@@ -28,7 +28,13 @@
 //   as INTEL's (bti_create's id is the device id, bus << 8 | device << 3 |
 //   function). Faults go to the event log (an MSI the kernel programs into
 //   the IOMMU's PCI function) and are logged.
-// - ARM_SMMU: NOT_SUPPORTED yet (as is the RISC-V IOMMU).
+// - ARM_SMMU (K12c, arm64): Zircon's zx_iommu_desc_arm_smmu_t (the
+//   register base alone), which must be an IORT SMMUv3 node's (NOT_FOUND;
+//   an SMMUv1/v2 node's is NOT_SUPPORTED until that driver). bti_create's
+//   id is the PCI requester id, which the IORT maps to the device's stream
+//   id (OUT_OF_RANGE if it doesn't reach this SMMU). Faults go to the
+//   event queue (its wired interrupt) and are logged.
+// - The RISC-V IOMMU: NOT_SUPPORTED yet.
 //
 // bti_pin(bti | options << 32, vmo | addrs_count << 32, offset, size,
 // addrs, pmt out) pins [offset, offset+size) (page aligned) of the VMO and

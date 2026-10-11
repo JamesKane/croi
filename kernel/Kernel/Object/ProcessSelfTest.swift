@@ -220,7 +220,7 @@ enum ProcessSelfTest {
     /// K12a: VT-d from user mode (mode 18): a device's DMA through its own
     /// domain, and refused (read only, unpinned): the unit counts faults.
     static func runIommu(_ console: Uart) {
-        #if arch(x86_64)
+        #if arch(x86_64) || arch(arm64)
         let before = Counts()
         let faults = Iommus.faultsCounted()
         let exitCode = runInProcess(mode: 18)
@@ -245,7 +245,9 @@ enum ProcessSelfTest {
             panic("IOMMU self-test: faults")
         }
         before.expectUnchanged(console)
-        console.write(Dmar.count > 0 ? "  iommu:  VT-d: " : "  iommu:  AMD-Vi: ")
+        console.write("  iommu:  ")
+        console.write(Iommus.firstUnitName)
+        console.write(": ")
         console.write("edu's DMA through its domain; refused read only and unpinned (faults ")
         console.write("logged); blocked when its BTI went, claimed again; the unit bound again\n")
         #endif
@@ -387,21 +389,20 @@ enum ProcessSelfTest {
                                                      to: process)
             let resource = try Processes.addHandle(Resources.root, rights: ResourceObject.defaultRights, to: process)
             let bootData = try Processes.addHandle(BootData.object, rights: BootData.rights, to: process)
-            var block = InlineArray<7, UInt64>(repeating: 0)
+            var block = InlineArray<8, UInt64>(repeating: 0)
             block[0] = UInt64(job) | UInt64(me) << 32
             block[1] = UInt64(root) | UInt64(codeHandle) << 32
             block[2] = codeSize
             block[3] = UInt64(resource)
             block[4] = UInt64(bootData)
-            #if arch(x86_64)
             if let unit = Iommus.firstUnit() {
                 block[5] = unit.base
                 block[6] = UInt64(unit.type)
             }
-            #endif
+            block[7] = Mcfg.count > 0 ? Mcfg.windows[0].base : 0  // segment 0's ECAM
             var span = block.mutableSpan
             span.withUnsafeMutableBytes { raw in
-                startup.writeBytes(at: 0, from: UInt64(UInt(bitPattern: raw.baseAddress!)), count: 56)
+                startup.writeBytes(at: 0, from: UInt64(UInt(bitPattern: raw.baseAddress!)), count: 64)
             }
             codeVmo.release()
             startupVmo.release()

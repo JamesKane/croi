@@ -1,16 +1,17 @@
 import CKernel
 import PageTables
 
-#if arch(x86_64)
 /// What the IOMMU drivers share (K12): a claimed device's translation
 /// domain, its I/O virtual address allocator and its page tables, whose
 /// formats differ only in their bits (VT-d second-level tables, AMD-Vi
-/// host page tables; both 512 entries of 64 bits, 4 KiB pages, addresses
-/// in bits 51:12). The unit-specific parts (making a table write visible,
-/// invalidating the IOTLB) dispatch on `kind`.
+/// host page tables, SMMUv3 stage-1 VMSA tables; all 512 entries of 64
+/// bits, 4 KiB pages, addresses in bits 51:12). The unit-specific parts
+/// (making a table write visible, invalidating the IOTLB) dispatch on
+/// `kind`; each arch compiles its own drivers.
 enum IommuKind: UInt8 {
     case vtd
     case amd
+    case smmu
 }
 
 struct IoDomain: ~Copyable {
@@ -22,6 +23,8 @@ struct IoDomain: ~Copyable {
     let deviceId: UInt16
     let root: UInt64  // physical
     let levels: Int
+    /// Driver data (SMMUv3: the context descriptor's page).
+    var extra: UInt64 = 0
     let lock = SpinLock()
     /// Allocated IOVA ranges, sorted by base.
     var used = UniqueArray<IovaRange>()
@@ -130,12 +133,18 @@ enum IoDomains {
         kind == .vtd ? entry & 3 != 0 : entry & 1 != 0
     }
 
+    /// SMMUv3 stage-1 leaf attributes: AF, inner shareable, MAIR index 0
+    /// (normal write-back), AP[1] set (the SMMU's transactions are
+    /// unprivileged), AP[2] for read only.
+    private static var smmuPage: UInt64 { 3 | 1 << 10 | 3 << 8 | 1 << 6 }
+
     /// A table entry pointing at the next level's table (`level` is the
     /// level of the table holding it); permissions are the leaves'.
     private static func directory(_ kind: IommuKind, _ next: UInt64, level: Int) -> UInt64 {
         switch kind {
         case .vtd: return next | 3                                            // read, write
         case .amd: return next | 1 | UInt64(level - 1) << 9 | 1 << 61 | 1 << 62  // PR, next level, IR, IW
+        case .smmu: return next | 3                                                // a table
         }
     }
 
@@ -143,6 +152,7 @@ enum IoDomains {
         switch kind {
         case .vtd: return phys | 1 | (write ? 2 : 0)
         case .amd: return phys | 1 | 1 << 61 | (write ? 1 << 62 : 0)  // next level 0: a page
+        case .smmu: return phys | smmuPage | (write ? 0 : 1 << 7)
         }
     }
 
@@ -168,9 +178,11 @@ enum IoDomains {
             unsafe slot.pointee = leaf(kind, phys, write: write)
             wrote(domain, table + UInt64(index) * 8, 8)
         }
+        #if arch(x86_64)
         if kind == .vtd, VtdUnitPointer(address: domain.pointee.unit).pointee.cachingMode {
             invalidate(domain)  // caching mode caches not-present entries too
         }
+        #endif
     }
 
     /// Unmaps [iova, iova+size) and invalidates the domain's IOTLB: when it
@@ -203,55 +215,104 @@ enum IoDomains {
 
     /// The CPU wrote [phys, phys+size) of a table.
     private static func wrote(_ domain: IoDomainPointer, _ phys: UInt64, _ size: UInt64) {
+        #if arch(x86_64)
         if domain.pointee.kind == .vtd { VtdUnitPointer(address: domain.pointee.unit).flushTables(phys, size) }
         // AMD-Vi page walks snoop the CPU's caches.
+        #elseif arch(arm64)
+        SmmuUnitPointer(address: domain.pointee.unit).flushTables(phys, size)
+        #endif
     }
 
     /// The domain's cached translations go.
     static func invalidate(_ domain: IoDomainPointer) {
+        #if arch(x86_64)
         switch domain.pointee.kind {
         case .vtd:
             let unit = VtdUnitPointer(address: domain.pointee.unit)
             unit.pointee.lock.withLock { try? unit.invalidateIotlbLocked(domain: domain.pointee.domainId) }
         case .amd:
             AmdviUnitPointer(address: domain.pointee.unit).invalidatePages(domain: domain.pointee.domainId)
+        case .smmu:
+            break
         }
+        #elseif arch(arm64)
+        SmmuUnitPointer(address: domain.pointee.unit).invalidateAsid(domain.pointee.domainId)
+        #endif
     }
 }
 
 /// What Dma.swift calls: claiming and releasing devices, whatever the unit.
 enum Iommus {
+    /// `deviceId` is the PCI requester id (bus << 8 | device << 3 |
+    /// function); the SMMU maps it to a stream id through the IORT.
     static func attach(_ kind: IommuKind, unit: UInt64, deviceId: UInt16) throws(Status) -> IoDomainPointer {
+        #if arch(x86_64)
         switch kind {
         case .vtd: return try Vtd.attach(VtdUnitPointer(address: unit), bdf: deviceId)
         case .amd: return try Amdvi.attach(AmdviUnitPointer(address: unit), deviceId: deviceId)
+        case .smmu: throw .notSupported
         }
+        #elseif arch(arm64)
+        return try SmmuV3.attach(SmmuUnitPointer(address: unit), requesterId: deviceId)
+        #else
+        throw .notSupported
+        #endif
     }
 
     /// Blocks the device and frees its domain.
     static func detach(_ domain: IoDomainPointer) {
+        #if arch(x86_64)
         switch domain.pointee.kind {
         case .vtd: Vtd.detach(domain)
         case .amd: Amdvi.detach(domain)
+        case .smmu: break
         }
+        #elseif arch(arm64)
+        SmmuV3.detach(domain)
+        #endif
     }
 
     static func unbind(_ kind: IommuKind, unit: UInt64) {
+        #if arch(x86_64)
         switch kind {
         case .vtd: Vtd.unbind(unit)
         case .amd: Amdvi.unbind(unit)
+        case .smmu: break
         }
+        #elseif arch(arm64)
+        SmmuV3.unbind(unit)
+        #endif
     }
 
     /// Faults every unit has recorded (self-test).
-    static func faultsCounted() -> UInt64 { Vtd.faultsCounted() + Amdvi.faultsCounted() }
+    static func faultsCounted() -> UInt64 {
+        #if arch(x86_64)
+        return Vtd.faultsCounted() + Amdvi.faultsCounted()
+        #elseif arch(arm64)
+        return SmmuV3.faultsCounted()
+        #else
+        return 0
+        #endif
+    }
 
     /// The first unit the firmware describes, for the self-test's user
     /// side (a driver reads the ACPI tables itself): its type and registers.
     static func firstUnit() -> (type: UInt32, base: UInt64)? {
+        #if arch(x86_64)
         if Dmar.count > 0 { return (UInt32(CROI_IOMMU_TYPE_INTEL), Dmar.units[0].registerBase) }
         if Ivrs.count > 0 { return (UInt32(CROI_IOMMU_TYPE_AMD), Ivrs.units[0].registerBase) }
+        #elseif arch(arm64)
+        if Iort.smmuCount > 0 { return (UInt32(CROI_IOMMU_TYPE_ARM_SMMU), Iort.smmus[0].registerBase) }
+        #endif
         return nil
     }
+
+    /// The name the self-test prints.
+    static var firstUnitName: StaticString {
+        #if arch(x86_64)
+        return Dmar.count > 0 ? "VT-d" : "AMD-Vi"
+        #else
+        return "SMMUv3"
+        #endif
+    }
 }
-#endif

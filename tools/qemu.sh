@@ -70,7 +70,9 @@ case $arch in
     ;;
   arm64)
     # ramfb gives the firmware a linear GOP framebuffer.
+    # edu: DMA through the SMMUv3 for the IOMMU boot test (K12c).
     qemu=(qemu-system-aarch64 -machine virt,acpi=on,iommu=smmuv3,gic-version=3 -cpu max -device ramfb
+          -device edu,addr=0x10
           -drive "if=pflash,format=raw,readonly=on,file=$edk2/aarch64/QEMU_EFI-pflash.raw"
           -drive "if=pflash,format=raw,file=$(vars "$edk2/aarch64/vars-template-pflash.raw" arm64-vars.raw)")
     ;;

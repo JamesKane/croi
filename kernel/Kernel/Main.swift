@@ -201,9 +201,12 @@ func kernel_main_continue() -> Never {
         guard Interrupts.initializeBootCpu(acpi) else { panic("no usable interrupt controller") }
         guard Clock.initialize(acpi) else { panic("no usable clock") }  // interrupts still masked
         Timers.initialize(acpi)
+        Mcfg.initialize(acpi)
         #if arch(x86_64)
         Dmar.initialize(acpi)
         Ivrs.initialize(acpi)
+        #elseif arch(arm64)
+        Iort.initialize(acpi)
         #endif
         unsafe UnsafePointer<PerCpu>(bitPattern: UInt(Smp.records[0]))!.pointee.interruptsReady
             .store(true, ordering: .releasing)

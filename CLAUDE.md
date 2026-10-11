@@ -743,11 +743,17 @@ syscalls 150-156; Todhchai item 14 without an IOMMU):
   depend on where pages land. Not covered: quarantine through process
   death, and a BTI dying with PMTs quarantined.
 
-IOMMUs, K12 (Kernel/Iommu/, include/dma.h; amd64). `IoDomain.swift` is
-shared: a claimed device's `IoDomain` (unit, kind, domain id, device id,
-root, levels), its IOVA allocator and page-table walks (VT-d and AMD-Vi
-entries differ only in bits; table writes and IOTLB invalidation dispatch
-on `IommuKind`), and `Iommus` (attach/detach/unbind for Dma.swift).
+IOMMUs, K12 (Kernel/Iommu/, include/dma.h; amd64 and arm64). `IoDomain.swift`
+is shared: a claimed device's `IoDomain` (unit, kind, domain id, device id,
+root, levels, `extra`), its IOVA allocator and page-table walks (VT-d,
+AMD-Vi and SMMUv3 stage-1 entries differ only in bits; table writes and
+IOTLB invalidation dispatch on `IommuKind`), and `Iommus` (attach/detach/
+unbind for Dma.swift, `firstUnit` for the boot test). `Mcfg`
+(Acpi/Mcfg.swift, every arch) has the ECAM windows. Kernel-owned
+interrupts: `DeviceIrqs.setKernelMsiHandler` (amd64 MSIs) and
+`setKernelHandler` (wired numbers, which drivers then can't bind), both
+dispatched without `tableLock`. Boot test mode 18's startup block carries
+the first unit's registers and type and segment 0's ECAM (words 5-7).
 
 Intel VT-d, K12a (Kernel/Iommu/IntelIommu.swift):
 - `Dmar` reads ACPI's DMAR at boot (its DRHDs); iommu_create(INTEL,
@@ -797,6 +803,23 @@ AMD-Vi, K12b (Kernel/Iommu/AmdIommu.swift; croi's type CROI_IOMMU_TYPE_AMD
   edu's test DMA wrote physical memory); test `boot-amd-iommu`. QEMU's
   events carry address 0, and a refused 64-byte DMA logs one fault per
   4-byte access.
+
+Arm SMMUv3, K12c (Kernel/Iommu/SmmuV3.swift; Zircon's ARM_SMMU type and
+descriptor, but Zircon's driver is SMMUv2 from a device tree):
+- `Iort` reads SMMUv3 nodes (registers, COHACC, event GSIV), SMMUv1/v2
+  bases (NOT_SUPPORTED) and root-complex id mappings into SMMUv3s:
+  bti_create's id is a requester id, `Iort.streamId` maps it.
+- `SmmuUnit`: a linear stream table sized to the highest stream id the
+  IORT routes there (entries bypass, SHCFG incoming), a 256-entry command
+  queue (batches end with CMD_SYNC; consumption = done; CMDQ_ERR logged),
+  a 128-entry event queue on the wired event interrupt (edge, boot CPU),
+  CR1 cacheable walks only when coherent (else tables, CDs and commands
+  are cleaned to memory). Claimed: break-before-make to stage-1 (config
+  101) through a context descriptor page per domain (ASID = domain id,
+  T0SZ 16, 4 KiB, AA64, R and A, AFFD, MAIR 0x44FF); leaves are AF, inner
+  shareable, AP[1] set, AP[2] for read only. Released: abort (config 000).
+- QEMU arm64 now has `-device edu,addr=0x10` behind its `iommu=smmuv3`;
+  mode 18 runs there (F_PERMISSION and F_TRANSLATION events).
 
 Counters, K10a (Kernel/Object/Counter.swift, User/CounterSyscalls.swift,
 include/counter.h, syscalls 160-165):

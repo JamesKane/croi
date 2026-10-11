@@ -47,7 +47,7 @@ enum DeviceIrqs {
     /// A number a driver may have: the controller has it and the kernel
     /// doesn't use it.
     static func isValid(_ number: UInt32) -> Bool {
-        guard number < limit else { return false }
+        guard number < limit, !kernelOwns(number) else { return false }
         #if arch(x86_64)
         return IoApic.isValid(number)
         #elseif arch(arm64)
@@ -132,6 +132,10 @@ enum DeviceIrqs {
     /// end of interrupt). A number nobody handles is masked.
     static func dispatch(_ number: UInt32) {
         guard number < limit else { return }
+        for i in 0..<kernelWiredCount.load(ordering: .acquiring) where kernelWired[i].number == number {
+            kernelWired[i].handler?(kernelWired[i].argument)
+            return
+        }
         tableLock.withLock {
             guard let handlers = unsafe handlers, let lastCpus = unsafe lastCpus else { return }
             unsafe lastCpus[Int(number)] = UInt8(truncatingIfNeeded: Cpu.current)
@@ -142,6 +146,37 @@ enum DeviceIrqs {
                 mask(number)
             }
         }
+    }
+
+    // MARK: Kernel-owned interrupts
+
+    /// A kernel-owned interrupt's handler (an IOMMU's fault or event
+    /// interrupt): a C-convention function and its argument.
+    typealias KernelHandler = @convention(c) (UInt64) -> Void
+    typealias KernelMsiHandler = KernelHandler
+
+    /// Wired numbers the kernel handles: written once, before the device
+    /// can raise them, never removed, read without `tableLock`; drivers
+    /// can't bind them (`isValid`).
+    nonisolated(unsafe) private static var kernelWired = InlineArray<8, (number: UInt32, handler: KernelHandler?, argument: UInt64)>(
+        repeating: (0, nil, 0))
+    private static let kernelWiredCount = Atomic<Int>(0)
+
+    /// Takes `number` for the kernel: configured with the mode, routed to
+    /// the boot CPU and unmasked. False if it isn't a usable number.
+    static func setKernelHandler(_ number: UInt32, level: Bool, _ handler: KernelHandler, _ argument: UInt64) -> Bool {
+        let index = kernelWiredCount.load(ordering: .relaxed)
+        guard index < kernelWired.count, isValid(number) else { return false }
+        kernelWired[index] = (number, handler, argument)
+        kernelWiredCount.store(index + 1, ordering: .releasing)
+        guard (try? configure(number, level: level, activeLow: false, cpu: 0)) != nil else { return false }
+        unmask(number)
+        return true
+    }
+
+    private static func kernelOwns(_ number: UInt32) -> Bool {
+        for i in 0..<kernelWiredCount.load(ordering: .acquiring) where kernelWired[i].number == number { return true }
+        return false
     }
 
     // MARK: MSI (K9d)
@@ -198,10 +233,6 @@ enum DeviceIrqs {
             unsafe handlers[cpu * Int(msiVectorCount) + Int(vector - msiFirstVector)] = object
         }
     }
-
-    /// A kernel-owned MSI's handler (the IOMMU's fault event): a C-convention
-    /// function and its argument.
-    typealias KernelMsiHandler = @convention(c) (UInt64) -> Void
 
     /// Kernel handlers by (CPU, vector): written once, before the device
     /// can send the MSI, never removed, read without `tableLock` (their
