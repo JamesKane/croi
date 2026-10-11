@@ -11,7 +11,8 @@ extension Syscalls {
         let handle = UInt32(truncatingIfNeeded: a[0])
         switch number {
         case 45:  // vmo_op_range(vmo, op, offset, size, buffer, buffer_size)
-            try vmoOpRange(table, handle, op: UInt32(truncatingIfNeeded: a[1]), offset: a[2], size: a[3])
+            try vmoOpRange(table, handle, op: UInt32(truncatingIfNeeded: a[1]), offset: a[2], size: a[3],
+                           buffer: a[4], bufferSize: a[5])
         case 46:  // vmo_set_cache_policy(vmo, policy)
             let ref = try table.get(handle, type: .vmo, rights: .map)
             let policy: CachePolicy
@@ -163,7 +164,7 @@ extension Syscalls {
     /// out to pages; DECOMMIT needs page alignment; ZERO and the cache ops
     /// take bytes (cache ops refuse size 0). Out of the VMO: OUT_OF_RANGE.
     private static func vmoOpRange(_ table: borrowing HandleTable, _ handle: UInt32, op: UInt32, offset: UInt64,
-                                   size: UInt64) throws(Status) {
+                                   size: UInt64, buffer: UInt64, bufferSize: UInt64) throws(Status) {
         let ref = try table.get(handle, type: .vmo)
         let rights = try table.rights(of: handle)
         let record = VmoPointer(address: UnsafeVmoObject(ref.object).vmo)
@@ -233,10 +234,30 @@ extension Syscalls {
         case UInt32(CROI_VMO_OP_CACHE_INVALIDATE):
             try need(.write)
             throw .notSupported  // Zircon: debugging syscalls only (it can drop dirty lines)
-        case 3, 4, 11:  // LOCK, UNLOCK, TRY_LOCK: discardable VMOs only
-            throw .notSupported
-        case 12, 13:  // DONT_NEED, ALWAYS_NEED: hints
+        case UInt32(CROI_VMO_OP_LOCK):  // K14a: discardable VMOs only
+            guard rights.contains(.read) || rights.contains(.write) else { throw .accessDenied }
+            let was = try Reclaim.lock(record, offset: offset, size: size, tryOnly: false)
+            // Zircon's order: locked, then the buffer checked (the lock undone).
+            do throws(Status) {
+                guard bufferSize >= UInt64(MemoryLayout<croi_vmo_lock_state_t>.size) else { throw .invalidArgs }
+                try Syscalls.put(croi_vmo_lock_state_t(offset: offset, size: size, discarded_offset: 0,
+                                                       discarded_size: was ? size : 0), buffer)
+            } catch {
+                try? Reclaim.unlock(record, offset: offset, size: size)
+                throw error
+            }
+            return
+        case UInt32(CROI_VMO_OP_TRY_LOCK):
+            guard rights.contains(.read) || rights.contains(.write) else { throw .accessDenied }
+            _ = try Reclaim.lock(record, offset: offset, size: size, tryOnly: true)
+            return
+        case UInt32(CROI_VMO_OP_UNLOCK):
+            guard rights.contains(.read) || rights.contains(.write) else { throw .accessDenied }
+            try Reclaim.unlock(record, offset: offset, size: size)
+            return
+        case UInt32(CROI_VMO_OP_DONT_NEED), UInt32(CROI_VMO_OP_ALWAYS_NEED):  // hints: no rights (Zircon's)
             try inRange()
+            Reclaim.hint(record, offset: offset, size: size, alwaysNeed: op == UInt32(CROI_VMO_OP_ALWAYS_NEED))
             return
         default:
             throw .invalidArgs

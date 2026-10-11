@@ -83,8 +83,30 @@ struct VmoRecord: ~Copyable {
     /// ZX_PROP_NAME (K13e), and its object's koid (kept after the object goes).
     var name = ObjectName(repeating: 0)
     var koid: UInt64 = 0
+    /// K14a (Vm/Reclaim.swift): on the reclaimable list (a pager VMO or a
+    /// discardable one), its links there, and how often reclamation took
+    /// pages (ZX_INFO_VMO's committed_change_events).
+    var reclaimable = false
+    var reclaimNext: UInt64 = 0
+    var reclaimPrev: UInt64 = 0
+    var reclamationEvents: UInt64 = 0
+    /// DISCARDABLE (K14a): LOCK / UNLOCK nest; unlocked it may be
+    /// discarded whole.
+    var discardable = false
+    var lockCount: UInt64 = 0
+    var discard = DiscardState.unset
 
     var pageCount: Int { Int(size / KernelLayout.pageSize) }
+}
+
+/// A discardable VMO's state (Zircon's DiscardableVmoTracker): reclaimable
+/// only once it has been locked and unlocked; discarded, every access
+/// fails (NOT_FOUND) until the next LOCK, which finds it empty.
+enum DiscardState: UInt8 {
+    case unset
+    case locked
+    case reclaimable
+    case discarded
 }
 
 @safe struct VmoPointer: Equatable {
@@ -103,6 +125,7 @@ struct VmoRecord: ~Copyable {
     /// Drops an owner; the last frees the VMO and the pages it owns.
     func release() {
         guard pointee.references.subtract(1, ordering: .acquiringAndReleasing).newValue == 0 else { return }
+        if pointee.reclaimable { Reclaim.unregister(self) }
         if let source = pointee.pager { Pagers.vmoGone(source) }
         if let account = pointee.account {
             switch pointee.kind {
@@ -185,8 +208,12 @@ struct VmoRecord: ~Copyable {
             }
             return pointee.lock.withLock { () -> UInt64? in
                 guard offset < pointee.size else { return nil }  // past the end (a resizable VMO, K13h)
+                guard pointee.discard != .discarded else { return nil }  // K14a: NOT_FOUND until locked
                 let present = pointee.pages.lookup(index)
-                if present != 0 { return present }
+                if present != 0 {
+                    if pointee.reclaimable { Reclaim.touch(present) }
+                    return present
+                }
                 // A pager's page is the pager's to supply, except where the
                 // VMO grew: zeros, dirty (K13h).
                 let grown = pointee.pager != nil && offset >= pointee.pagerZeroFrom
@@ -261,6 +288,9 @@ struct VmoRecord: ~Copyable {
             return pointee.lock.withLock { () -> UInt64? in
                 guard offset < pointee.size else { return nil }  // shrunk (K13h)
                 let phys = pointee.pages.lookup(index)
+                // A lookup is an access (Zircon's LookupCursor): a reader
+                // copying from the page keeps it from eviction meanwhile.
+                if phys != 0, pointee.reclaimable { Reclaim.touch(phys) }
                 return phys == 0 ? nil : phys
             }
         }
@@ -678,6 +708,8 @@ struct Vmo: ~Copyable {
         try record.pointee.lock.withLock { () throws(VmError) in
             // Slices share their parent's policy, so neither side changes it.
             guard !record.pointee.slice, record.pointee.children == 0 else { throw .badState }
+            // K14a: a pager-backed or discardable VMO stays cached (Zircon's).
+            guard policy == .cached || (record.pointee.pager == nil && !record.pointee.discardable) else { throw .badState }
             guard !record.pointee.cachedFirmware || policy == .cached else { throw .denied(0) }
             guard !record.pointee.sharedReadOnly else { throw .denied(0) }  // the kernel writes it cached
             guard record.pointee.mappers.count == 0 else { throw .alreadyMapped(0) }

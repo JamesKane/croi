@@ -36,6 +36,11 @@ struct Page {
     var heapInUse: UInt16 = 0
     /// Slab: offset of the first free object, or `Heap.endOfList`.
     var heapFree: UInt16 = 0
+    /// K14a, a VMO page of a reclaimable VMO (Vm/Reclaim.swift): aging
+    /// passes since its last access (saturating), and the ALWAYS_NEED /
+    /// DONT_NEED hints. Reset when the page is allocated.
+    var reclaimAge: UInt8 = 0
+    var reclaimFlags: UInt8 = 0
 
     fileprivate init(physical: UInt64) {
         self.physical = physical
@@ -69,6 +74,15 @@ let pmmLock = SpinLock()
     /// A page of free RAM below 1 MiB kept out of the free list, for the
     /// amd64 SMP trampoline (0 if there is none).
     private(set) var lowTrampolinePage: UInt64 = 0
+    /// K14a: the free-page band the memory watchdog last evaluated; the
+    /// first allocation or free leaving it tells the watchdog
+    /// (`Reclaim.freeMemoryChanged`) and opens the band until it is set
+    /// again. A single page allocation failing does too (Zircon's
+    /// trigger-on-alloc-failure).
+    private var signalLow: UInt64 = 0
+    private var signalHigh = UInt64.max
+    private var watching = false
+    private(set) var singleAllocationFailed = false
 
     enum InitError: Error {
         case tooManyArenas
@@ -157,7 +171,15 @@ let pmmLock = SpinLock()
 
     /// One page, not zeroed. Returns its physical address.
     mutating func allocatePage(_ state: PageState = .alloc) -> UInt64? {
-        pmmLock.withLock { allocatePageLocked(state) }
+        var crossed = false
+        let phys = pmmLock.withLock { () -> UInt64? in
+            let phys = allocatePageLocked(state)
+            if phys == nil, watching { singleAllocationFailed = true }
+            crossed = leftBandLocked(failed: phys == nil)
+            return phys
+        }
+        if crossed { Reclaim.freeMemoryChanged() }
+        return phys
     }
 
     private mutating func allocatePageLocked(_ state: PageState) -> UInt64? {
@@ -165,7 +187,36 @@ let pmmLock = SpinLock()
         let page = unsafe pointer(freeHead)
         unsafe unlinkFree(page)
         unsafe page.pointee.state = state
+        unsafe page.pointee.reclaimAge = 0
+        unsafe page.pointee.reclaimFlags = 0
         return unsafe page.pointee.physical
+    }
+
+    /// Whether the free count just left the watchdog's band (closing it).
+    private mutating func leftBandLocked(failed: Bool = false) -> Bool {
+        // An open band: the watchdog has been told and hasn't looked yet.
+        guard watching, signalLow != 0 || signalHigh != .max else { return false }
+        guard failed || freePages < signalLow || freePages > signalHigh else { return false }
+        signalLow = 0
+        signalHigh = .max
+        return true
+    }
+
+    /// K14a: asks to hear when the free page count leaves [low, high].
+    /// False, setting nothing, if it is outside already (or a single page
+    /// allocation failed since `clearAllocationFailure`).
+    mutating func setFreeMemorySignal(low: UInt64, high: UInt64) -> Bool {
+        pmmLock.withLock { () -> Bool in
+            watching = true
+            guard !singleAllocationFailed, freePages >= low, freePages <= high else { return false }
+            signalLow = low
+            signalHigh = high
+            return true
+        }
+    }
+
+    mutating func clearAllocationFailure() {
+        pmmLock.withLock { singleAllocationFailed = false }
     }
 
     /// `count` physically contiguous pages whose base is aligned to
@@ -173,7 +224,14 @@ let pmmLock = SpinLock()
     /// `limit` (e.g. 4 GiB for a 32-bit DMA engine). Not zeroed.
     mutating func allocateContiguous(_ count: UInt64, alignLog2: Int = 12, _ state: PageState = .alloc,
                                      floor: UInt64 = 0, limit: UInt64 = .max) -> UInt64? {
-        pmmLock.withLock { allocateContiguousLocked(count, alignLog2: alignLog2, state, floor: floor, limit: limit) }
+        var crossed = false
+        let phys = pmmLock.withLock { () -> UInt64? in
+            let phys = allocateContiguousLocked(count, alignLog2: alignLog2, state, floor: floor, limit: limit)
+            crossed = leftBandLocked()
+            return phys
+        }
+        if crossed { Reclaim.freeMemoryChanged() }
+        return phys
     }
 
     private mutating func allocateContiguousLocked(_ count: UInt64, alignLog2: Int, _ state: PageState,
@@ -196,6 +254,8 @@ let pmmLock = SpinLock()
                         let page = unsafe page(arena, first + i)
                         unsafe unlinkFree(page)
                         unsafe page.pointee.state = state
+                        unsafe page.pointee.reclaimAge = 0
+                        unsafe page.pointee.reclaimFlags = 0
                     }
                     return phys
                 }
@@ -225,15 +285,21 @@ let pmmLock = SpinLock()
     /// Returns a page to the free list. Freeing a page that isn't allocated
     /// (double free, or not RAM the PMM manages) panics.
     mutating func free(_ phys: UInt64) {
-        pmmLock.withLock { freeLocked(phys) }
+        let crossed = pmmLock.withLock { () -> Bool in
+            freeLocked(phys)
+            return leftBandLocked()
+        }
+        if crossed { Reclaim.freeMemoryChanged() }
     }
 
     mutating func free(_ phys: UInt64, count: UInt64) {
-        pmmLock.withLock {
+        let crossed = pmmLock.withLock { () -> Bool in
             for i in 0..<count {
                 freeLocked(phys + i * KernelLayout.pageSize)
             }
+            return leftBandLocked()
         }
+        if crossed { Reclaim.freeMemoryChanged() }
     }
 
     private mutating func freeLocked(_ phys: UInt64) {

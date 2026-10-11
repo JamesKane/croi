@@ -319,6 +319,7 @@ extension Syscalls {
                 flags |= UInt32(CROI_INFO_VMO_TYPE_PAGED)
                 if vmo.pointee.resizable { flags |= UInt32(CROI_INFO_VMO_RESIZABLE) }
                 if vmo.pointee.pager != nil { flags |= UInt32(CROI_INFO_VMO_PAGER_BACKED) }
+                if vmo.pointee.discardable { flags |= UInt32(CROI_INFO_VMO_DISCARDABLE) }
                 if vmo.pointee.parent != nil { flags |= UInt32(CROI_INFO_VMO_IS_COW_CLONE) }
             case .contiguous:
                 flags |= UInt32(CROI_INFO_VMO_TYPE_PAGED) | UInt32(CROI_INFO_VMO_CONTIGUOUS)
@@ -326,6 +327,7 @@ extension Syscalls {
                 break
             }
             info.flags = flags
+            info.committed_change_events = vmo.pointee.reclamationEvents  // K14a
             info.handle_rights = rights
             switch vmo.pointee.cache {
             case .cached: info.cache_policy = UInt32(CROI_CACHE_POLICY_CACHED)

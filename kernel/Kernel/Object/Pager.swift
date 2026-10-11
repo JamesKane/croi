@@ -220,6 +220,7 @@ enum Pagers {
         vmo.record.pointee.resizable = resizable
         vmo.record.pointee.states = PageList(pages: vmo.record.pointee.pageCount)
         if size & pageMask != 0 { vmo.record.pointee.streamSize = size }
+        Reclaim.register(vmo.record)  // K14a: its clean pages may be evicted
         return try VmoObject.wrap(vmo.record)
     }
 

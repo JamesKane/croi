@@ -225,7 +225,7 @@ extension Syscalls {
     }
 
     /// vmar_op_range (K13e, Zircon's order of checks): COMMIT, DECOMMIT,
-    /// MAP_RANGE, ZERO, DONT_NEED (nothing: no eviction), ALWAYS_NEED,
+    /// MAP_RANGE, ZERO, DONT_NEED and ALWAYS_NEED (K14a's hints),
     /// PREFETCH over the mappings of [addr, addr+len), which must leave no
     /// gap (BAD_STATE) and, unless the handle has OP_CHILDREN (and for
     /// COMMIT, DECOMMIT and PREFETCH always), be the VMAR's own. Checked
@@ -302,12 +302,12 @@ extension Syscalls {
                 try Pagers.ensureRange(p.vmo, p.offset, p.size)
                 v.aspace.mapPresent(p.base, p.size)
             case alwaysNeedOp:
-                try? Pagers.ensureRange(p.vmo, p.offset, p.size)  // errors ignored (Zircon's)
+                Reclaim.hint(p.vmo, offset: p.offset, size: p.size, alwaysNeed: true)  // pages in, errors ignored
                 v.aspace.mapPresent(p.base, p.size)
             case mapRangeOp:
                 v.aspace.mapPresent(p.base, p.size)
             default:
-                break  // DONT_NEED: croi doesn't evict
+                Reclaim.hint(p.vmo, offset: p.offset, size: p.size, alwaysNeed: false)  // DONT_NEED
             }
         }
     }

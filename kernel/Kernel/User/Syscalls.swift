@@ -202,7 +202,7 @@ enum Syscalls {
         case 1: return write(a[0], a[1])
         case 2: Processes.exitThread(Int(Int64(bitPattern: a[0])))
         case 63: Processes.exitProcess(Int64(bitPattern: a[0]))  // process_exit: no handles needed
-        case 6: return TestHooks.profile(a[0])
+        case 6: return a[0] >= 6 ? Reclaim.testHook(a) : TestHooks.profile(a[0])
         case 3: return Int64(bitPattern: Clock.now())
         case 4:
             Scheduler.sleepInterruptible(until: a[0])
@@ -388,6 +388,8 @@ enum Syscalls {
             try streamCall(number, a, table)
         case 234:  // smc_call(resource, const croi_smc_parameters_t *, croi_smc_result_t *), K13i
             try smcCall(a, table)
+        case 235:  // system_get_event(root job, kind, out), K14a
+            try put(try Reclaim.systemEvent(table, handle, kind: a[1]), a[2])
         case 233:  // vmo_set_size(vmo, size), K13h
             try VmoObject.setSize(table, handle, a[1])
         case 230...232:
@@ -527,6 +529,7 @@ enum Syscalls {
             }
             // Reading a child's untouched page reads its parent's (no copy).
             guard let phys = toUser ? (vmo.content(at: at) ?? vmo.commit(at: at)) : vmo.commit(at: at) else {
+                if vmo.pointee.discard == .discarded { throw .notFound }  // K14a: until locked
                 throw at >= vmo.pointee.size ? .outOfRange : .noMemory  // shrunk meanwhile (K13h)
             }
             let within = at % KernelLayout.pageSize

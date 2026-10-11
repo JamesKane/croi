@@ -282,6 +282,7 @@ func kernel_main_continue() -> Never {
         Processes.initialize()
         BootData.makeObject()
         DebugLog.initialize()
+        Reclaim.initialize()  // K14a: aging, eviction, the memory watchdog
         SharedPages.initialize()
         Vdso.initialize()
         if SelfTests.enabled { runSelfTests(console) }

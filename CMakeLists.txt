@@ -158,6 +158,21 @@ add_test(NAME boot-reboot
           ${CROI_ARCH} ${_esp_reboot} ${CMAKE_BINARY_DIR}/qemu-reboot ${CROI_EDK2_DIR})
 set_tests_properties(boot-reboot PROPERTIES TIMEOUT 120)
 
+# Out of memory (K14a): watermarks above all of RAM, so the watchdog finds
+# the boot out of memory at once, evicts what it can, signals OOM and
+# reboots (Zircon's default) after the timeout; -no-reboot exits QEMU.
+set(_esp_oom ${CMAKE_BINARY_DIR}/esp-oom)
+file(CONFIGURE OUTPUT ${CMAKE_BINARY_DIR}/cmdline-oom
+     CONTENT "${CROI_CMDLINE} userboot.next=${CROI_USERBOOT_NEXT} croi.selftest=off croi.oom.outofmemory_mb=4000 croi.oom.critical_mb=4100 croi.oom.warning_mb=4200 croi.oom.reboot_timeout_ms=200\n")
+add_custom_target(esp-oom ALL
+  COMMAND ${CMAKE_COMMAND} -E copy_directory ${CROI_ESP_DIR} ${_esp_oom}
+  COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_BINARY_DIR}/cmdline-oom ${_esp_oom}/croi/cmdline
+  DEPENDS esp)
+add_test(NAME boot-oom
+  COMMAND ${CROI_QEMU} --test "out of memory; rebooting in 200 ms" --exits
+          ${CROI_ARCH} ${_esp_oom} ${CMAKE_BINARY_DIR}/qemu-oom ${CROI_EDK2_DIR})
+set_tests_properties(boot-oom PROPERTIES TIMEOUT 120)
+
 if(CROI_ARCH STREQUAL amd64)
   # Interrupt remapping off (K12f): TCG boots remap every interrupt, so
   # this keeps the compatibility-format MSI and IOAPIC paths covered.

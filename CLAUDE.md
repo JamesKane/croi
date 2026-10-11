@@ -1345,8 +1345,8 @@ syscalls 202-208; vmo.h; Todhchai's page cache and mmap for Taisce):
 - Differences from Zircon: a packet per request (Zircon: one in flight
   per VMO), none withdrawn when a request resolves before it is read; the
   source holds its port.
-- Not yet: eviction of clean pages (ALWAYS_NEED/DONT_NEED hints), zero
-  intervals, resizable and unbounded pager VMOs.
+- Not yet: zero intervals, unbounded pager VMOs. (Eviction of clean
+  pages and the hints came in K14a, resizable pager VMOs in K13h.)
 - Mode 17's `pager`: a pager thread serving a fault, a two-page vmo_read
   (one request), a FAIL, a snapshot child reading through; writes through
   a mapping and vmo_write, dirty ranges, stats, a writeback with a write
@@ -1404,8 +1404,8 @@ TaskSyscalls `vmarOpRange`, syscall 76; task.h, vmo.h):
   entries), HANDLE_TABLE (INSPECT | MANAGE_PROCESS | MANAGE_THREAD;
   `HandleTable.snapshot`). Not tracked: page-fault and lock-contention
   time. (Debugger attachment: K13g.)
-- vmar_op_range (76): COMMIT, DECOMMIT, MAP_RANGE, ZERO, DONT_NEED (a
-  no-op: no eviction), ALWAYS_NEED, PREFETCH; rights by op on the VMAR
+- vmar_op_range (76): COMMIT, DECOMMIT, MAP_RANGE, ZERO, DONT_NEED and
+  ALWAYS_NEED (K14a's hints), PREFETCH; rights by op on the VMAR
   handle, then per mapping; gaps BAD_STATE; mappings of sub-VMARs only
   with OP_CHILDREN (never for COMMIT/DECOMMIT/PREFETCH). Checked whole
   under the aspace lock, then done piece by piece without it (pagers may
@@ -1533,8 +1533,8 @@ cpu.S `arch_debug_*`; task.h):
 Resizable VMOs, K13h (Vmo.swift `resize`, VmoObject `create`/`setSize`,
 PageList `grow`, syscall 233; vmo.h, task.h):
 - vmo_create's options (it ignored them): RESIZABLE (1 << 1); UNBOUNDED
-  NOT_SUPPORTED (with RESIZABLE INVALID_ARGS, first), DISCARDABLE
-  NOT_SUPPORTED, others INVALID_ARGS; an unaligned size is the content
+  NOT_SUPPORTED (with RESIZABLE INVALID_ARGS, first), DISCARDABLE (K14a),
+  others INVALID_ARGS; an unaligned size is the content
   size. RESIZE (1 << 22) only on a resizable VMO's handles; snapshot
   children are resizable with CHILD_RESIZABLE (RESIZE then, never the
   parent's); pager_create_vmo takes RESIZABLE. ZX_INFO_VMO's RESIZABLE.
@@ -1640,8 +1640,72 @@ resource.h, UserAspace.taskStats, Kernel/Object/KernelMemory.swift):
 - object_get_info(INFO system resource or root, CROI_INFO_KMEM_STATS =
   17 | 1 << 28, or _V1 = 17): total, free, wired, heap (slab + large
   pages, free = less bytes in use), vmo, mmu, other (allocated), from a
-  scan of the PMM's page records (`Pmm.pageCounts`). The rest are 0.
+  scan of the PMM's page records (`Pmm.pageCounts`), and K14a's reclaim
+  fields. The rest are 0.
 - Boot test mode 13 (`ProcessSelfTest.runMemoryStats`).
+
+Reclamation, K14a (Kernel/Vm/Reclaim.swift, vmo.h, syscall 235; Zircon's
+PageQueues + Evictor + MemoryWatchdog without the page queues):
+- Reclaimable VMOs (pager VMOs from creation, DISCARDABLE ones) are on one
+  list (`Reclaim.register`, links in VmoRecord, unlinked by the last
+  release; `tryRetain` to walk it). Each page record has `reclaimAge`
+  (aging passes since its last access, up to 7) and `reclaimFlags`
+  (ALWAYS_NEED, DONT_NEED), reset at allocation.
+- Accesses make a page newest (`Reclaim.touch`): `commit(at:)` and
+  `lookup(at:)` of a reclaimable VMO (under its lock, so a reader that
+  just looked a page up keeps it), the fault path, and accessed bits,
+  harvested from every mapping before each aging pass and eviction
+  (`ArchAspace.harvestAccessed` clears them, local invalidate, then
+  `flushAccessed`). arm64 has no hardware AF management (TCR.HA off) and
+  rv64 may be Svade: an access then faults on a present PTE, and
+  handleFault's present branch sets the bit (`markAccessed`); without it
+  the fault loops (verified: arm64 hangs).
+- The "reclaim" kernel thread ages every `croi.reclaim.aging_ms` (15 s)
+  only while reclaimable VMOs exist, so an idle machine still makes no
+  wakeups. Eviction (`Reclaim.evict(target:minAge:ignoreHint:)`, one at a
+  time under a Mutex): DONT_NEED first, then oldest first down to
+  `minAge` (6 for the watchdog, 2 at OOM, ages 0-1 never); clean,
+  unpinned pages of attached pager VMOs, ALWAYS_NEED only with
+  ignoreHint; a discardable VMO goes whole when its first committed
+  page's turn comes. Pages are taken out under the VMO lock, unmapped run
+  by run, then freed; the pager is asked again on the next access.
+  `reclamationEvents` is ZX_INFO_VMO's committed_change_events.
+- DISCARDABLE (vmo_create option 4, with RESIZABLE allowed; no children,
+  cache policy stays cached): LOCK / TRY_LOCK / UNLOCK through
+  vmo_op_range (READ or WRITE; whole VMO else OUT_OF_RANGE; LOCK checks
+  its buffer after locking and unlocks on failure; UNLOCK at count 0
+  BAD_STATE; TRY_LOCK of a discarded VMO UNAVAILABLE). States unset /
+  locked / reclaimable / discarded (`DiscardState`): reclaimable only
+  after a lock and unlock; discarded, commit and lookups fail (faults
+  kill, vmo_read/write NOT_FOUND) until LOCK, which reports
+  discarded_size = size.
+- Hints (vmo_op_range and vmar_op_range 12/13, no rights): pager VMOs
+  (a snapshot child's go to its pager ancestor), others ignore them.
+  ALWAYS_NEED pages the range in and is sticky for those pages.
+- Memory watchdog (Zircon's, `croi.oom.*`: outofmemory_mb 50,
+  imminent_oom_delta_mb 10, critical_mb 150, warning_mb 300, debounce_mb
+  1, hysteresis_seconds 10, eviction_delay_ms 5000, evict_at_warning,
+  eviction_delta_at_oom_mb 10, reboot_timeout_ms 50000,
+  trigger_on_alloc_failure, enable=0; out of order: off). The PMM wakes
+  it when the free count leaves the current level's band
+  (`Pmm.setFreeMemorySignal`; also a failed single-page allocation) via a
+  zero-delay timer, since it may be under any lock. One event object per
+  level, exactly one SIGNALED; system_get_event(root job, kind): handles
+  WAIT | DUPLICATE | TRANSFER, OUT_OF_MEMORY needs MANAGE_PROCESS, other
+  jobs ACCESS_DENIED. Worse levels signal at once, better ones after the
+  hysteresis; a worse level at or below critical evicts (after the
+  delay) to the critical watermark + debounce; OOM evicts at once (ages
+  2+, hints ignored), then signals, logs and reboots after the timeout
+  (`Power.reboot`). Log lines go to the debuglog (`KernelLog.write`, which
+  DMA's warnings use too).
+- KMEM_STATS: vmo_reclaim_total/newest/oldest bytes, discardable
+  locked/unlocked bytes. Test hooks (syscall 6): 6 aging passes, 7 evict,
+  8 watermarks/hysteresis/delay (0: the command line's), 9 free bytes.
+- Tests: mode 17's `reclaim` (checks 600-619: eviction order, refault from
+  the pager, hints, dirty pages kept, discardable states, the events moved
+  by test watermarks); `boot-oom` (watermarks above RAM: OOM at boot,
+  reboot). Lock order: aspace -> vmo (harvest); the registry lock is a
+  leaf (heap below it).
 
 Boot budgets, K9f (Kernel/Trace/Budgets.swift, BootOptions.swift's
 `SelfTests`, tools/bench.py):

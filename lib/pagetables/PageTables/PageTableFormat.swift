@@ -61,6 +61,8 @@ public enum PageTableFormat {
     @inlinable static var cacheDisable: UInt64 { 1 << 4 }
     @inlinable static var accessed: UInt64 { 1 << 5 }
     @inlinable static var dirty: UInt64 { 1 << 6 }
+    /// A leaf's accessed bit (set by the hardware; K14a's page aging clears it).
+    @inlinable public static var accessedBit: UInt64 { accessed }
     @inlinable static var large: UInt64 { 1 << 7 }
     @inlinable static var globalBit: UInt64 { 1 << 8 }
     @inlinable static var noExecute: UInt64 { 1 << 63 }
@@ -114,6 +116,9 @@ public enum PageTableFormat {
     @inlinable static var readOnly: UInt64 { 2 << 6 }
     @inlinable static var innerShareable: UInt64 { 3 << 8 }
     @inlinable static var accessFlag: UInt64 { 1 << 10 }
+    /// A leaf's access flag (no hardware management: clear, an access
+    /// faults, and the fault handler sets it; K14a's page aging).
+    @inlinable public static var accessedBit: UInt64 { accessFlag }
     @inlinable static var notGlobal: UInt64 { 1 << 11 }
     @inlinable static var privilegedNoExecute: UInt64 { 1 << 53 }
     @inlinable static var unprivilegedNoExecute: UInt64 { 1 << 54 }
@@ -178,6 +183,9 @@ public enum PageTableFormat {
     @inlinable static var globalBit: UInt64 { 1 << 5 }
     @inlinable static var accessed: UInt64 { 1 << 6 }
     @inlinable static var dirty: UInt64 { 1 << 7 }
+    /// A leaf's A bit (Svadu sets it; under Svade an access faults and the
+    /// fault handler sets it; K14a's page aging clears it).
+    @inlinable public static var accessedBit: UInt64 { accessed }
 
     @inlinable public static func leafAllowed(level: Int) -> Bool { true }
     @inlinable public static func table(_ phys: UInt64) -> UInt64 { (phys >> 12) << 10 | valid }

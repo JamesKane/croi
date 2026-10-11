@@ -17,6 +17,7 @@ enum KernelMemory {
         k.vmo_bytes = counts[Int(PageState.vmo.rawValue)] * page
         k.mmu_overhead_bytes = counts[Int(PageState.mmu.rawValue)] * page
         k.other_bytes = counts[Int(PageState.alloc.rawValue)] * page
+        Reclaim.fill(&k)  // K14a: reclaimable and discardable bytes
         return k
     }
 }

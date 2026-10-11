@@ -5,8 +5,8 @@
 #include <stdint.h>
 
 enum : uint32_t {
-  // vmo_op_range ops (croi has no pager or discardable VMOs: LOCK,
-  // UNLOCK, TRY_LOCK, DONT_NEED, ALWAYS_NEED are NOT_SUPPORTED).
+  // vmo_op_range ops (Zircon's values; LOCK, UNLOCK, TRY_LOCK and the
+  // DONT_NEED / ALWAYS_NEED hints with K14a's reclamation, below).
   // vmo_create_child options (Zircon's ZX_VMO_CHILD_*). K11a supports
   // SNAPSHOT_AT_LEAST_ON_WRITE (each page copied in at the child's first
   // touch of it) with or without NO_WRITE. K13a: SLICE (with NO_WRITE or
@@ -124,6 +124,7 @@ enum : uint32_t {
   CROI_INFO_VMO_VIA_MAPPING = 1u << 4,
   CROI_INFO_VMO_PAGER_BACKED = 1u << 5,
   CROI_INFO_VMO_CONTIGUOUS = 1u << 6,
+  CROI_INFO_VMO_DISCARDABLE = 1u << 7,  // K14a
 };
 
 typedef struct {
@@ -170,3 +171,31 @@ enum : uint32_t {
   CROI_RIGHT_RESIZE = 1u << 22,
 };
 
+// Reclamation (K14a, Zircon's): DISCARDABLE VMOs (vmo_create option; whole
+// VMO LOCK / TRY_LOCK / UNLOCK through vmo_op_range, needing READ or WRITE;
+// LOCK writes a croi_vmo_lock_state_t whose discarded_size is the VMO's
+// size if it had been discarded, else 0; a discarded VMO's pages are gone
+// and every access fails NOT_FOUND until the next LOCK), the eviction
+// hints DONT_NEED / ALWAYS_NEED (pager VMOs; no rights needed; ignored
+// elsewhere), and the memory-pressure events of system_get_event (root
+// job; OUT_OF_MEMORY needs MANAGE_PROCESS; one level signaled at a time).
+enum : uint32_t {
+  CROI_VMO_CREATE_DISCARDABLE = 1u << 2,
+  CROI_VMO_OP_LOCK = 3,
+  CROI_VMO_OP_UNLOCK = 4,
+  CROI_VMO_OP_TRY_LOCK = 11,
+  CROI_VMO_OP_DONT_NEED = 12,
+  CROI_VMO_OP_ALWAYS_NEED = 13,
+  CROI_SYSTEM_EVENT_OUT_OF_MEMORY = 1,
+  CROI_SYSTEM_EVENT_MEMORY_PRESSURE_CRITICAL = 2,
+  CROI_SYSTEM_EVENT_MEMORY_PRESSURE_WARNING = 3,
+  CROI_SYSTEM_EVENT_MEMORY_PRESSURE_NORMAL = 4,
+  CROI_SYSTEM_EVENT_IMMINENT_OUT_OF_MEMORY = 5,
+};
+
+typedef struct {
+  uint64_t offset;
+  uint64_t size;
+  uint64_t discarded_offset;
+  uint64_t discarded_size;
+} croi_vmo_lock_state_t;

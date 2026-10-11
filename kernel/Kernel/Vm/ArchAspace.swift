@@ -256,6 +256,57 @@ struct ArchAspace {
         return nil
     }
 
+    // MARK: Accessed bits (K14a: page aging)
+
+    /// The leaf entry mapping `virt`, if anything is mapped there.
+    @unsafe private func leafSlot(_ virt: UInt64) -> UnsafeMutablePointer<UInt64>? {
+        var table = root(virt)
+        for level in 0..<Format.levels {
+            let slot = unsafe entries(table) + Format.index(virt, level: level)
+            let entry = unsafe slot.pointee
+            guard Format.isPresent(entry) else { return nil }
+            if Format.isTable(entry, level: level) {
+                table = Format.address(entry)
+                continue
+            }
+            return unsafe slot
+        }
+        return nil
+    }
+
+    /// Clears the accessed bit of the leaf mapping `virt` and says whether
+    /// it was set; nil if nothing is mapped there. Only this CPU's entry is
+    /// invalidated: the caller flushes the others once it has harvested a
+    /// range (`flushAccessed`), so an access after that sets the bit again
+    /// (or, where the hardware doesn't, faults to `markAccessed`). A store,
+    /// not an atomic: the hardware only ever sets A (and D, which croi's
+    /// leaves start with), so a race loses at most an access just made.
+    func harvestAccessed(_ virt: UInt64) -> Bool? {
+        guard let slot = unsafe leafSlot(virt) else { return nil }
+        let entry = unsafe slot.pointee
+        guard entry & Format.accessedBit != 0 else { return false }
+        unsafe slot.pointee = entry & ~Format.accessedBit
+        arch_tlb_invalidate_page(virt & ~(Self.smallPage - 1))
+        return true
+    }
+
+    /// Sets the accessed bit of the leaf mapping `virt` (an access-flag
+    /// fault on arm64, a Svade fault on rv64). False if nothing is mapped.
+    func markAccessed(_ virt: UInt64) -> Bool {
+        guard let slot = unsafe leafSlot(virt) else { return false }
+        let entry = unsafe slot.pointee
+        if entry & Format.accessedBit == 0 {
+            unsafe slot.pointee = entry | Format.accessedBit
+            arch_tlb_invalidate_page(virt & ~(Self.smallPage - 1))
+        }
+        return true
+    }
+
+    /// The other CPUs' half of harvesting [start, start+size).
+    func flushAccessed(_ start: UInt64, _ size: UInt64) {
+        flushOthers(start, size)
+    }
+
     // MARK: User address spaces
 
     /// Top-level slots of the kernel half, in the root that holds it.

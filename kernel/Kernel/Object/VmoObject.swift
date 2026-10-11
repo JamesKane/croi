@@ -40,7 +40,8 @@ struct VmoObject: ~Copyable {
     /// (Zircon's RoundSize: OUT_OF_RANGE if that overflows); an unaligned
     /// size is the content size. RESIZABLE (K13h): vmo_set_size may change
     /// it, and its handle gets RESIZE. UNBOUNDED: NOT_SUPPORTED (with
-    /// RESIZABLE INVALID_ARGS, first); DISCARDABLE NOT_SUPPORTED.
+    /// RESIZABLE INVALID_ARGS, first). DISCARDABLE (K14a, with or without
+    /// RESIZABLE): reclaimable while unlocked (Reclaim).
     static func create(size: UInt64, options: UInt64 = 0) throws(Status) -> (ObjectPointer, Rights) {
         let resizable = UInt64(CROI_VMO_CREATE_RESIZABLE), unbounded = UInt64(CROI_VMO_CREATE_UNBOUNDED)
         let discardable: UInt64 = 1 << 2
@@ -48,7 +49,7 @@ struct VmoObject: ~Copyable {
         guard options & ~(resizable | unbounded | discardable) == 0 else { throw .invalidArgs }
         let pageMask = KernelLayout.pageSize - 1
         guard size <= UInt64.max - pageMask else { throw .outOfRange }
-        if options & (unbounded | discardable) != 0 { throw .notSupported }
+        if options & unbounded != 0 { throw .notSupported }
         let vmo: Vmo
         do throws(VmError) {
             vmo = try Vmo(anonymous: (size + pageMask) & ~pageMask)
@@ -57,6 +58,10 @@ struct VmoObject: ~Copyable {
         }
         vmo.record.pointee.resizable = options & resizable != 0
         if size & pageMask != 0 { vmo.record.pointee.streamSize = size }
+        if options & discardable != 0 {
+            vmo.record.pointee.discardable = true
+            Reclaim.register(vmo.record)
+        }
         return (try wrap(vmo.record), options & resizable != 0 ? defaultRights | .resize : defaultRights)
     }
 
@@ -124,6 +129,7 @@ struct VmoObject: ~Copyable {
         let ref = try table.get(handle, type: .vmo, rights: .duplicate | .read)
         var rights = try table.rights(of: handle)
         let parent = VmoPointer(address: UnsafeVmoObject(ref.object).vmo)
+        guard !parent.pointee.discardable else { throw .notSupported }  // K14a, Zircon's
         let child: Vmo
         do throws(VmError) {
             child = kind == slice

@@ -172,7 +172,7 @@ enum Dma {
         #endif
         guard let object = Objects.allocate(BtiObject(btiId: id)) else { throw .noMemory }
         let (pid, _) = DebugLogs.writerKoids()
-        log(UInt8(CROI_LOG_WARNING)) { out in
+        KernelLog.write(UInt8(CROI_LOG_WARNING)) { out in
             out.write("bti: no-IOMMU BTI ")
             out.write(hex: id)
             out.write(" for process ")
@@ -206,7 +206,7 @@ enum Dma {
         if bti.pointee.quarantined > 0 {
             // Nobody can release them now; the device may still be writing.
             // Leave them pinned for good (Zircon's orphaned BTI).
-            log(UInt8(CROI_LOG_WARNING)) { out in
+            KernelLog.write(UInt8(CROI_LOG_WARNING)) { out in
                 out.write("bti: BTI ")
                 out.write(hex: bti.pointee.btiId)
                 out.write(" went with ")
@@ -431,39 +431,5 @@ enum Dma {
         // unpinned ones get here.
         guard PmtPointer(object: object).pointee.state == .unpinned else { panic("pmt: destroyed while pinned") }
         Objects.free(object, as: PmtObject.self)
-    }
-
-    // MARK: Logging
-
-    /// A kernel debuglog record built with TextOutput calls (one line, up
-    /// to 128 bytes).
-    private static func log(_ severity: UInt8, _ body: (LineBuffer) -> Void) {
-        guard let raw = unsafe heap.allocate(size: 136) else { return }
-        let line = unsafe LineBuffer(raw)
-        body(line)
-        unsafe DebugLog.write(severity: severity, flags: 0,
-                              Span(_unsafeStart: raw.assumingMemoryBound(to: UInt8.self) + 8,
-                                   count: raw.load(as: Int.self)),
-                              pid: 0, tid: 0)
-        unsafe heap.free(raw)
-    }
-}
-
-/// A 128-byte line in heap memory: a count word, then the bytes.
-@safe private struct LineBuffer: TextOutput {
-    let raw: UnsafeMutableRawPointer
-
-    @unsafe init(_ raw: UnsafeMutableRawPointer) {
-        unsafe self.raw = raw
-        unsafe raw.storeBytes(of: 0, as: Int.self)
-    }
-
-    func write(utf8: Span<UInt8>) {
-        var count = unsafe raw.load(as: Int.self)
-        for i in 0..<utf8.count where count < 128 {
-            unsafe raw.storeBytes(of: utf8[i], toByteOffset: 8 + count, as: UInt8.self)
-            count += 1
-        }
-        unsafe raw.storeBytes(of: count, as: Int.self)
     }
 }

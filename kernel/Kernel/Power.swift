@@ -146,6 +146,12 @@ enum Power {
     nonisolated(unsafe) private static var sleepTypes: (UInt8, UInt8) = (0, 0)
     #endif
 
+    /// K14a: the memory watchdog's out-of-memory reboot (Zircon's default
+    /// OOM behavior); halts if the machine can't.
+    static func reboot() -> Never {
+        halt(.reboot, started: Clock.now())
+    }
+
     /// Whether this machine can do `action` at all (before anything stops).
     private static func check(_ action: Action) throws(Status) {
         #if arch(x86_64)

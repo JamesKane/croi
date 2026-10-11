@@ -309,3 +309,37 @@ enum DebugLogs {
         return 0
     }
 }
+
+/// Kernel debuglog records (pid and tid 0) built with TextOutput calls:
+/// one line, up to 128 bytes (DMA's trust warnings, memory pressure).
+enum KernelLog {
+    static func write(_ severity: UInt8, _ body: (LineBuffer) -> Void) {
+        guard let raw = unsafe heap.allocate(size: 136) else { return }
+        let line = unsafe LineBuffer(raw)
+        body(line)
+        unsafe DebugLog.write(severity: severity, flags: 0,
+                              Span(_unsafeStart: raw.assumingMemoryBound(to: UInt8.self) + 8,
+                                   count: raw.load(as: Int.self)),
+                              pid: 0, tid: 0)
+        unsafe heap.free(raw)
+    }
+}
+
+/// A 128-byte line in heap memory: a count word, then the bytes.
+@safe struct LineBuffer: TextOutput {
+    let raw: UnsafeMutableRawPointer
+
+    @unsafe init(_ raw: UnsafeMutableRawPointer) {
+        unsafe self.raw = raw
+        unsafe raw.storeBytes(of: 0, as: Int.self)
+    }
+
+    func write(utf8: Span<UInt8>) {
+        var count = unsafe raw.load(as: Int.self)
+        for i in 0..<utf8.count where count < 128 {
+            unsafe raw.storeBytes(of: utf8[i], toByteOffset: 8 + count, as: UInt8.self)
+            count += 1
+        }
+        unsafe raw.storeBytes(of: count, as: Int.self)
+    }
+}

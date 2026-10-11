@@ -94,7 +94,8 @@ static_assert(sizeof(croi_info_cpu_stats_t) == 144);
 // croi fills: total (RAM the PMM manages), free, wired (kernel image,
 // boot allocations, pinned firmware memory), heap total and free,
 // vmo, mmu_overhead (page tables), and other (allocated, untracked).
-// The rest (loaned, ipc, cache, slab, zram, reclaim, discardable) are 0.
+// K14a fills the reclaim and discardable fields (Vm/Reclaim.swift); the
+// rest (loaned, ipc, cache, slab, zram, reclaim_disabled) are 0.
 // _V1 is Zircon's zx_info_kmem_stats_v1_t.
 enum : uint32_t {
   CROI_INFO_KMEM_STATS = 17u | (1u << 28),

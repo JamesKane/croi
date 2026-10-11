@@ -88,9 +88,6 @@ matches the pinned tree where upstream docs or expectations say otherwise).
   the child's parent limit permanently. Kind: deliberate (simplification).
   Impact: low; within at-least-on-write semantics. Fix: a per-child parent
   limit clamped at shrink.
-- **DISCARDABLE VMOs** — NOT_SUPPORTED: croi has no eviction or reclaim
-  yet (clean pager pages are never evicted either). Kind: not yet. Impact:
-  low until memory-pressure reclaim exists.
 - **UNBOUNDED VMOs** — NOT_SUPPORTED in vmo_create and pager_create_vmo.
   Kind: not yet. Impact: matters if Fuchsia filesystem code (which uses
   unbounded pager VMOs) is ported; moderate work (near-2^64 sizes, an
@@ -116,13 +113,51 @@ matches the pinned tree where upstream docs or expectations say otherwise).
   (Zircon makes a zero interval); WRITEBACK_BEGIN's IS_ZERO is a no-op
   (K13h's grown space is the one dirty-zero range). Kind: not yet. Impact:
   memory use for sparse zeroed files.
-- **vmar_op_range DONT_NEED / ALWAYS_NEED** — accepted, no effect (no
-  eviction). Kind: not yet. Impact: none until reclaim exists.
-- **KMEM_STATS fields** — total, free, wired, heap, vmo, mmu, other filled;
-  the rest are 0. Kind: not yet. Impact: memory dashboards.
+- **KMEM_STATS fields** — total, free, wired, heap, vmo, mmu, other and
+  (K14a) the reclaim and discardable fields filled; loaned, ipc, cache,
+  slab, zram and reclaim_disabled are 0. Kind: not yet. Impact: memory
+  dashboards.
 - **Page loaning** — Zircon lends decommitted contiguous VMOs' pages;
   croi uses a boot contiguous pool (`croi.contiguous_pool`) and has no
   loaning. Kind: not yet. Impact: contiguous memory held idle.
+
+## Reclamation (K14a)
+
+- **No page queues** — Zircon keeps every page on one of its queues (an
+  8-generation LRU ring, isolate lists); croi keeps a list of reclaimable
+  VMOs and an age in each page record, and walks them. Ages, the two
+  protected newest ages, DONT_NEED first and the watchdog's oldest-only
+  eviction behave as Zircon's. Kind: deliberate (simplification). Impact:
+  eviction and aging cost grows with reclaimable pages, not with need.
+- **Aging only while reclaimable VMOs exist** — no aging thread wakeups on
+  a machine with no pager or discardable VMOs (M4's idle machine); no
+  active-ratio early aging (the 15 s maximum interval only). Kind:
+  deliberate. Impact: low.
+- **Single pages** — evicted page by page; Zircon takes the aligned 64 KiB
+  block around a chosen page. Kind: deliberate. Impact: more READ
+  requests on refault.
+- **Discardable VMOs age like pager pages** — reclaimable once unlocked,
+  by their first page's age; with Zircon's default options (anonymous
+  reclaim off) a discardable VMO is never discarded. Kind: deliberate (the
+  documented behaviour). Impact: discardable memory actually goes.
+- **Discard takes pages before unmapping** — croi takes a discarded VMO's
+  (or an evicted page's) pages under its lock, then unmaps, then frees
+  (Zircon unmaps under the VMO lock, which croi's aspace -> vmo lock order
+  doesn't allow); a write through a stale mapping in that window is lost,
+  which for a discard only matters if a LOCK lands in the same window.
+  Kind: deliberate. Impact: very low.
+- **OOM** — reboot only (`croi.oom.reboot_timeout_ms`, Zircon's 50 s
+  default), and no HaltToken, so the wait is never cut short; no jobkill
+  behaviour, no ZX_PROP_JOB_KILL_ON_OOM; no continuous eviction mode; no
+  delayed CAN_WAIT allocations below OOM. Kind: not yet. Impact: a system
+  that wants to survive OOM by killing jobs.
+- **Hints on snapshot children** — DONT_NEED / ALWAYS_NEED through a child
+  of a pager VMO apply to the pager VMO's pages over the whole range,
+  including pages the child has already copied. Kind: deliberate. Impact:
+  none.
+- **Not yet**: compression (zram), zero-page dedupe, page-table reclaim,
+  page loaning, high-priority VMOs (`reclaim_disabled_bytes` 0), memory
+  stall watching. Kind: not yet.
 
 ## Pager
 

@@ -3741,6 +3741,171 @@ static int64_t postmortem_checks(const startup_t *s, uint32_t *channel_out) {
   return 0;
 }
 
+// K14a: reclamation. A pager VMO's clean pages are evicted oldest first
+// (DONT_NEED first, ALWAYS_NEED and dirty pages kept, ALWAYS_NEED given up
+// at OOM) and come back from the pager; a discardable VMO's lock states and
+// its discard; the memory-pressure events, moved with test watermarks.
+// Test hooks (syscall 6): 6 aging passes, 7 evict(pages, min age, ignore
+// hints), 8 watermarks, 9 free bytes.
+static int64_t reclaim_hook(uint64_t op, uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e) {
+  return sys6(CROI_SYS_TEST_PROFILE, op, a, b, c, d, e);
+}
+
+static uint64_t committed_of(uint32_t vmo, uint64_t *events) {
+  croi_info_vmo_t v;
+  uint64_t counts[2] = {0, 0};
+  if (get_info(vmo, CROI_INFO_VMO, &v, sizeof v, counts) != 0) return ~0ull;
+  if (events) *events = v.committed_change_events;
+  return v.committed_bytes;
+}
+
+static int64_t reclaim(const startup_t *s) {
+  uint32_t pg = 0, port = 0, vmo = 0, aux = 0;
+  CHECK(600, sys(CROI_SYS_PAGER_CREATE, 0, (uint64_t)&pg, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_PORT_CREATE, 0, (uint64_t)&port, 0, 0, 0) == 0 &&
+                 sys6(CROI_SYS_PAGER_CREATE_VMO, pg, 0, port, 90, 8 * PAGE, (uint64_t)&vmo) == 0 &&
+                 sys(CROI_SYS_VMO_CREATE, 8 * PAGE, 0, (uint64_t)&aux, 0, 0) == 0);
+  // Supplied up front as 'a' + index; the server supplies 'A' + index
+  // later, so a page read again after eviction shows where it came from.
+  char page[PAGE];
+  for (uint64_t i = 0; i < 8; i++) {
+    for (int j = 0; j < PAGE; j++) page[j] = (char)('a' + i);
+    sys(CROI_SYS_VMO_WRITE, aux, (uint64_t)page, i * PAGE, PAGE, 0);
+  }
+  volatile uint64_t slot[8] = {port, pg, vmo, 0, 0, 0, 0, 90};
+  uint64_t at = 0, events = 0;
+  CHECK(601, sys6(CROI_SYS_PAGER_SUPPLY_PAGES, pg, vmo, 0, 8 * PAGE, aux, 0) == 0 &&
+                 sys6(CROI_SYS_VMAR_MAP, s->vmar | (uint64_t)CROI_VM_PERM_READ << 32, 0, vmo, 0, 8 * PAGE,
+                      (uint64_t)&at) == 0);
+  uint32_t server = start_thread(s, pager_server, (uint64_t)slot);
+  int touched = 1;
+  for (uint64_t i = 0; i < 8; i++) touched &= *(volatile char *)(at + i * PAGE) == (char)('a' + i);
+  // An aging pass takes the accessed bits (every page age 1); then page 1
+  // ALWAYS_NEED, page 2 DONT_NEED, page 3 dirty. The watchdog's eviction
+  // (ages 6 and up) takes only page 2.
+  CHECK(602, touched && committed_of(vmo, &events) == 8 * PAGE && events == 0 &&
+                 reclaim_hook(6, 1, 0, 0, 0, 0) == 0 &&
+                 sys6(CROI_SYS_VMO_OP_RANGE, vmo, CROI_VMO_OP_ALWAYS_NEED, PAGE, PAGE, 0, 0) == 0 &&
+                 sys6(CROI_SYS_VMO_OP_RANGE, vmo, CROI_VMO_OP_DONT_NEED, 2 * PAGE, PAGE, 0, 0) == 0 &&
+                 sys6(CROI_SYS_VMO_OP_RANGE, vmo, CROI_VMO_OP_DONT_NEED, 0, 9 * PAGE, 0, 0) == ERR_OUT_OF_RANGE &&
+                 sys6(CROI_SYS_VMO_OP_RANGE, aux, CROI_VMO_OP_DONT_NEED, 0, PAGE, 0, 0) == 0 &&  // ignored
+                 sys(CROI_SYS_VMO_WRITE, vmo, (uint64_t)"D", 3 * PAGE, 1, 0) == 0);
+  CHECK(603, reclaim_hook(7, 100, 6, 0, 0, 0) == 1 && committed_of(vmo, &events) == 7 * PAGE && events == 1 &&
+                 slot[3] == 0);
+  // Read again: the pager is asked (one READ) and supplies 'C'.
+  CHECK(604, *(volatile char *)(at + 2 * PAGE) == 'C' && slot[3] == 1 && committed_of(vmo, 0) == 8 * PAGE);
+  // Six passes untouched: every clean page is old; ALWAYS_NEED and the
+  // dirty page stay.
+  croi_info_kmem_stats_t k;
+  CHECK(605, reclaim_hook(6, 6, 0, 0, 0, 0) == 0 &&
+                 info(s->resource, CROI_INFO_KMEM_STATS, &k, sizeof k) == 0 &&
+                 k.vmo_reclaim_total_bytes >= 7 * PAGE && k.vmo_reclaim_oldest_bytes >= 7 * PAGE &&
+                 reclaim_hook(7, 100, 6, 0, 0, 0) == 6 && committed_of(vmo, &events) == 2 * PAGE && events >= 2 &&
+                 *(volatile char *)(at + PAGE) == 'b' && slot[3] == 1);
+  // At OOM the hint gives way (ages 2 and up; page 1 was just read, so
+  // two passes first); the dirty page stays.
+  CHECK(606, reclaim_hook(6, 2, 0, 0, 0, 0) == 0 && reclaim_hook(7, 100, 2, 1, 0, 0) == 1 && committed_of(vmo, 0) == PAGE &&
+                 *(volatile char *)(at + 3 * PAGE) == 'D' && *(volatile char *)at == 'A' && slot[3] == 2);
+  sys(CROI_SYS_VMAR_UNMAP, s->vmar, at, 8 * PAGE, 0, 0);
+  CHECK(607, sys(CROI_SYS_PAGER_DETACH_VMO, pg, vmo, 0, 0, 0) == 0 &&
+                 wait_for(server, CROI_SIGNAL_TASK_TERMINATED, 3000000000ull));
+  sys(CROI_SYS_HANDLE_CLOSE, server, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, vmo, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, port, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, pg, 0, 0, 0, 0);
+
+  // Discardable: the whole range only, nested locks, the state LOCK
+  // reports; unlocked and old, discarded whole; NOT_FOUND until locked.
+  uint32_t d = 0, child = 0;
+  croi_vmo_lock_state_t st;
+  char buf[4] = {1, 1, 1, 1};
+  croi_info_vmo_t v;
+  uint64_t counts[2] = {0, 0};
+  CHECK(610, sys(CROI_SYS_VMO_CREATE, 4 * PAGE, CROI_VMO_CREATE_DISCARDABLE, (uint64_t)&d, 0, 0) == 0 &&
+                 get_info(d, CROI_INFO_VMO, &v, sizeof v, counts) == 0 && (v.flags & CROI_INFO_VMO_DISCARDABLE) &&
+                 sys6(CROI_SYS_VMO_OP_RANGE, d, CROI_VMO_OP_UNLOCK, 0, 4 * PAGE, 0, 0) == ERR_BAD_STATE &&
+                 sys6(CROI_SYS_VMO_OP_RANGE, d, CROI_VMO_OP_LOCK, 0, PAGE, (uint64_t)&st, sizeof st) ==
+                     ERR_OUT_OF_RANGE &&
+                 sys6(CROI_SYS_VMO_OP_RANGE, d, CROI_VMO_OP_LOCK, 0, 4 * PAGE, (uint64_t)&st, 8) == ERR_INVALID_ARGS &&
+                 sys6(CROI_SYS_VMO_OP_RANGE, d, CROI_VMO_OP_UNLOCK, 0, 4 * PAGE, 0, 0) == ERR_BAD_STATE &&
+                 sys6(CROI_SYS_VMO_OP_RANGE, aux, CROI_VMO_OP_LOCK, 0, 8 * PAGE, (uint64_t)&st, sizeof st) ==
+                     ERR_NOT_SUPPORTED &&
+                 sys6(CROI_SYS_VMO_CREATE_CHILD, d, CROI_VMO_CHILD_SNAPSHOT_AT_LEAST_ON_WRITE, 0, PAGE,
+                      (uint64_t)&child, 0) == ERR_NOT_SUPPORTED &&
+                 sys(CROI_SYS_VMO_SET_CACHE_POLICY, d, CROI_CACHE_POLICY_UNCACHED, 0, 0, 0) == ERR_BAD_STATE);
+  CHECK(611, sys6(CROI_SYS_VMO_OP_RANGE, d, CROI_VMO_OP_LOCK, 0, 4 * PAGE, (uint64_t)&st, sizeof st) == 0 &&
+                 st.offset == 0 && st.size == 4 * PAGE && st.discarded_size == 0 &&
+                 sys6(CROI_SYS_VMO_OP_RANGE, d, CROI_VMO_OP_TRY_LOCK, 0, 4 * PAGE, 0, 0) == 0 &&
+                 sys(CROI_SYS_VMO_WRITE, d, (uint64_t)"xyz", PAGE, 3, 0) == 0 &&
+                 sys6(CROI_SYS_VMO_OP_RANGE, d, CROI_VMO_OP_UNLOCK, 0, 4 * PAGE, 0, 0) == 0 &&
+                 reclaim_hook(6, 6, 0, 0, 0, 0) == 0 &&
+                 reclaim_hook(7, 100, 6, 0, 0, 0) == 0 &&  // still locked once
+                 committed_of(d, 0) == PAGE &&
+                 sys6(CROI_SYS_VMO_OP_RANGE, d, CROI_VMO_OP_UNLOCK, 0, 4 * PAGE, 0, 0) == 0 &&
+                 info(s->resource, CROI_INFO_KMEM_STATS, &k, sizeof k) == 0 &&
+                 k.vmo_discardable_unlocked_bytes >= PAGE);
+  CHECK(612, reclaim_hook(6, 6, 0, 0, 0, 0) == 0 && reclaim_hook(7, 100, 6, 0, 0, 0) == 1 &&
+                 committed_of(d, &events) == 0 && events == 1 &&
+                 sys(CROI_SYS_VMO_READ, d, (uint64_t)buf, PAGE, 3, 0) == ERR_NOT_FOUND &&
+                 sys6(CROI_SYS_VMO_OP_RANGE, d, CROI_VMO_OP_TRY_LOCK, 0, 4 * PAGE, 0, 0) == ERR_UNAVAILABLE &&
+                 sys6(CROI_SYS_VMO_OP_RANGE, d, CROI_VMO_OP_LOCK, 0, 4 * PAGE, (uint64_t)&st, sizeof st) == 0 &&
+                 st.discarded_size == 4 * PAGE &&
+                 sys(CROI_SYS_VMO_READ, d, (uint64_t)buf, PAGE, 3, 0) == 0 && buf[0] == 0 && buf[2] == 0);
+  sys(CROI_SYS_HANDLE_CLOSE, d, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, aux, 0, 0, 0, 0);
+
+  // Memory pressure: the root job only (OUT_OF_MEMORY with
+  // MANAGE_PROCESS); one event signaled; holders can't signal them.
+  uint32_t ev[6] = {0}, job = 0, wrong = 0, limited = 0;
+  CHECK(615, sys(CROI_SYS_SYSTEM_GET_EVENT, s->job, 9, (uint64_t)&wrong, 0, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_JOB_CREATE, s->job, 0, (uint64_t)&job, 0, 0) == 0 &&
+                 sys(CROI_SYS_SYSTEM_GET_EVENT, job, CROI_SYSTEM_EVENT_MEMORY_PRESSURE_NORMAL, (uint64_t)&wrong, 0,
+                     0) == ERR_ACCESS_DENIED &&
+                 sys(CROI_SYS_HANDLE_DUPLICATE, s->job, RIGHT_WAIT, (uint64_t)&limited, 0, 0) == 0 &&
+                 sys(CROI_SYS_SYSTEM_GET_EVENT, limited, CROI_SYSTEM_EVENT_OUT_OF_MEMORY, (uint64_t)&wrong, 0, 0) ==
+                     ERR_ACCESS_DENIED &&
+                 sys(CROI_SYS_SYSTEM_GET_EVENT, limited, CROI_SYSTEM_EVENT_MEMORY_PRESSURE_NORMAL, (uint64_t)&ev[0], 0,
+                     0) == 0);
+  sys(CROI_SYS_HANDLE_CLOSE, ev[0], 0, 0, 0, 0);
+  int got = 1;
+  for (uint32_t kind = 1; kind <= 5; kind++)
+    got &= sys(CROI_SYS_SYSTEM_GET_EVENT, s->job, kind, (uint64_t)&ev[kind], 0, 0) == 0;
+  CHECK(616, got && (wait_for(ev[CROI_SYSTEM_EVENT_MEMORY_PRESSURE_NORMAL], CROI_SIGNAL_SIGNALED, 0) &
+                     CROI_SIGNAL_SIGNALED) &&
+                 !(wait_for(ev[CROI_SYSTEM_EVENT_MEMORY_PRESSURE_WARNING], CROI_SIGNAL_SIGNALED, 0) &
+                   CROI_SIGNAL_SIGNALED) &&
+                 sys(CROI_SYS_OBJECT_SIGNAL, ev[1], 0, CROI_SIGNAL_SIGNALED, 0, 0) == ERR_ACCESS_DENIED);
+  // Watermarks just below free memory (no hysteresis, no eviction delay):
+  // 16 MiB committed is Warning, 32 MiB Critical, both freed Normal again.
+  uint64_t free = (uint64_t)reclaim_hook(9, 0, 0, 0, 0, 0);
+  uint64_t mib = 1ull << 20;
+  uint32_t big[2] = {0, 0};
+  CHECK(617, free > 64 * mib && reclaim_hook(8, free / 4, free - 24 * mib, free - 12 * mib, 0, 0) == 0 &&
+                 sys(CROI_SYS_VMO_CREATE, 16 * mib, 0, (uint64_t)&big[0], 0, 0) == 0 &&
+                 sys6(CROI_SYS_VMO_OP_RANGE, big[0], CROI_VMO_OP_COMMIT, 0, 16 * mib, 0, 0) == 0 &&
+                 (wait_for(ev[CROI_SYSTEM_EVENT_MEMORY_PRESSURE_WARNING], CROI_SIGNAL_SIGNALED, 2000000000ull) &
+                  CROI_SIGNAL_SIGNALED) &&
+                 !(wait_for(ev[CROI_SYSTEM_EVENT_MEMORY_PRESSURE_NORMAL], CROI_SIGNAL_SIGNALED, 0) &
+                   CROI_SIGNAL_SIGNALED));
+  CHECK(618, sys(CROI_SYS_VMO_CREATE, 16 * mib, 0, (uint64_t)&big[1], 0, 0) == 0 &&
+                 sys6(CROI_SYS_VMO_OP_RANGE, big[1], CROI_VMO_OP_COMMIT, 0, 16 * mib, 0, 0) == 0 &&
+                 (wait_for(ev[CROI_SYSTEM_EVENT_MEMORY_PRESSURE_CRITICAL], CROI_SIGNAL_SIGNALED, 2000000000ull) &
+                  CROI_SIGNAL_SIGNALED) &&
+                 !(wait_for(ev[CROI_SYSTEM_EVENT_MEMORY_PRESSURE_WARNING], CROI_SIGNAL_SIGNALED, 0) &
+                   CROI_SIGNAL_SIGNALED));
+  sys(CROI_SYS_HANDLE_CLOSE, big[0], 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, big[1], 0, 0, 0, 0);
+  CHECK(619, (wait_for(ev[CROI_SYSTEM_EVENT_MEMORY_PRESSURE_NORMAL], CROI_SIGNAL_SIGNALED, 2000000000ull) &
+              CROI_SIGNAL_SIGNALED) &&
+                 !(wait_for(ev[CROI_SYSTEM_EVENT_MEMORY_PRESSURE_CRITICAL], CROI_SIGNAL_SIGNALED, 0) &
+                   CROI_SIGNAL_SIGNALED) &&
+                 reclaim_hook(8, 0, 0, 0, 0, 0) == 0);
+  for (uint32_t kind = 1; kind <= 5; kind++) sys(CROI_SYS_HANDLE_CLOSE, ev[kind], 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, limited, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, job, 0, 0, 0, 0);
+  return 0;
+}
+
 // K13b: FIFOs (Zircon's: records into the peer's ring, READABLE /
 // WRITABLE / PEER_CLOSED, user signals to the peer) and
 // vmo_replace_as_executable (a VMEX resource; the handle consumed).
@@ -4078,6 +4243,8 @@ static int64_t extensions(const startup_t *s) {
   if (smcs != 0) return smcs;
   int64_t frozen = postmortem(s);
   if (frozen != 0) return frozen;
+  int64_t reclaimed = reclaim(s);
+  if (reclaimed != 0) return reclaimed;
   int64_t random = cprng_checks();
   if (random != 0) return random;
 

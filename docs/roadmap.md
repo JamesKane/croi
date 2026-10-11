@@ -93,7 +93,7 @@ as information).
 | 13 | Resources, interrupt objects, MSI, SMC | **Done**: resources and physical VMOs (K9a), interrupt objects (K9c), MSI/MSI-X on amd64 (K9d), the GICv3 ITS (K12h), RISC-V AIA (K12i), `smc_call` (K13i) |
 | 14 | BTI/PMT and IOMMUs | **Done** (K9e, K12): VT-d, AMD-Vi, SMMUv3, SMMUv2 (unverified on hardware), the RISC-V IOMMU, interrupt remapping |
 | 15 | FIFO, counter, stream, socket, clock, debuglog | **Done** (K8a, K10a, K13b, K13c, K13f) |
-| 16 | Pager | **Done** (K13d, K13h); no eviction yet |
+| 16 | Pager | **Done** (K13d, K13h), with eviction of clean pages under memory pressure (K14a) |
 | 17 | Rings | Nothing needed from croi; Zircon's IOB not implemented |
 | 19 | Debug syscalls | **Done** (K7d, K13g); a crashed process is kept frozen by its exception handler holding the exception (Fuchsia's Limbo pattern, tested) |
 | 20 | Firmware data for user space (ACPI tables and op regions, GOP framebuffer) behind resources | **Done** (K9b) |
@@ -810,8 +810,8 @@ THREAD, VMO, maps, handle table) and the NAME property.
   commit, pin, snapshot children reading through), supply, FAIL, detach
   and COMPLETE; then dirty tracking (TRAP_DIRTY and DIRTY requests, op
   DIRTY, WRITEBACK_BEGIN/END, query_dirty_ranges, query_vmo_stats, clean
-  pages dropped at detach). Not yet: eviction, zero intervals (beyond
-  K13h's grown space), unbounded pager VMOs.
+  pages dropped at detach). Not yet (eviction came in K14a): zero
+  intervals (beyond K13h's grown space), unbounded pager VMOs.
 - **K13e: the small calls.** **Done** (2026-10-11), in two parts:
   object_wait_many, handle_close_many, port_cancel_key, the channel *_etc
   calls, ZX_PROP_NAME; then vmar_op_range and the info topics (PROCESS,
@@ -825,6 +825,15 @@ THREAD, VMO, maps, handle table) and the NAME property.
   that can be), process_read/write_memory; debugger channels (process and
   job), PROCESS/THREAD_STARTING and THREAD_EXITING, second chance,
   exception reports; single-step and hardware breakpoints (amd64, arm64).
+- **K14a: eviction and reclaim.** **Done** (2026-10-11): page ages from
+  accessed bits (arm64 access-flag and rv64 Svade faults set them again),
+  an aging pass every 15 s while reclaimable VMOs exist, eviction of clean
+  pager pages oldest first (DONT_NEED first, ALWAYS_NEED kept short of
+  OOM), DISCARDABLE VMOs (LOCK / TRY_LOCK / UNLOCK, discarded whole),
+  Zircon's memory watchdog (levels, one event each through
+  system_get_event, eviction at critical, OOM eviction then reboot),
+  KMEM_STATS' reclaim fields, committed_change_events. Not yet: jobkill
+  at OOM, compression, zero-page dedupe, page-table reclaim, page loaning.
 - **K13j: load balancing.** **Done** (2026-10-11): idle-time work
   stealing of fair threads (Zircon's), from a CPU going idle and an idle
   CPU waking. Interleaved bench: irq.wait_wake_median -60%..-67%, the rest
@@ -856,8 +865,8 @@ from Zircon, see docs/zircon-divergences.md.
   governor and the frequency floor: KP, which needs the power service).
 
 **Zircon pieces not yet in croi**
-- VM: eviction and reclaim (clean pager pages, DISCARDABLE, DONT_NEED /
-  ALWAYS_NEED hints), UNBOUNDED VMOs, SNAPSHOT (isolated), REFERENCE and
+- VM (eviction and reclaim came in K14a): UNBOUNDED VMOs, SNAPSHOT
+  (isolated), REFERENCE and
   SNAPSHOT_MODIFIED children, slices of anonymous VMOs.
 - IOB, restricted mode, membarrier, thread_raise_exception (ZX_EXCP_USER
   to job debuggers), the ktrace/sampler syscalls (croi has its own).

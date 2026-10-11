@@ -639,9 +639,20 @@ enum UserAspaces {
                 let tracked = mapping.vmo.pointee.pager != nil
                 let dirty = tracked && mapping.vmo.pointee.lock.withLock { mapping.vmo.dirtLocked(offset) == PageDirt.dirty }
                 if let present = aspace.pointee.arch.query(page) {
-                    // Another CPU paged it in first, or a permission fault the
-                    // rights would allow: nothing to do but retry.
-                    if !write || present.attributes.writable { return true }
+                    // Another CPU paged it in first, a permission fault the
+                    // rights would allow, or (K14a) an access to a page whose
+                    // accessed bit aging cleared, where the hardware faults
+                    // instead of setting it (arm64, rv64 Svade): set it, and
+                    // the page is newest again.
+                    if !write || present.attributes.writable {
+                        if mapping.vmo.pointee.reclaimable {
+                            _ = aspace.pointee.arch.markAccessed(page)
+                            mapping.vmo.pointee.lock.withLock { Reclaim.touch(present.physical) }
+                        } else {
+                            _ = aspace.pointee.arch.markAccessed(page)
+                        }
+                        return true
+                    }
                     guard tracked else { return false }
                     guard dirty else {
                         mapping.vmo.retain()  // the mapping may go while we wait
