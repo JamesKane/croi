@@ -16,6 +16,7 @@ module CroiAbi {
   header "zbi.h"
   header "interrupt.h"
   header "dma.h"
+  header "counter.h"
   export *
 }
 

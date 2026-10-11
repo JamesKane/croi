@@ -1460,6 +1460,7 @@ enum Scheduler {
             }
         }
         ExtendedState.free(thread.pointee.extendedState)
+        if thread.pointee.waitState != 0 { WaitStatePointer(address: thread.pointee.waitState).free() }
         Pmu.release(thread)
         let raw = unsafe UnsafeMutablePointer<Thread>(bitPattern: UInt(thread.address))!
         unsafe raw.deinitialize(count: 1)

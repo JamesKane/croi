@@ -56,6 +56,8 @@ RULES = {
     "ipc.channel_call": (0.15, 150),
     "port.wake_median": (0.25, 300),
     "port.wake_p99": (0.50, 5_000),
+    "counter.wake_median": (0.25, 300),
+    "counter.wake_p99": (0.50, 5_000),
     "timer.wake_error_p99": (0.50, 20_000),
     "process.spawn_to_main": (0.50, 30_000),
     "trace.probe_enabled": (0.25, 5),

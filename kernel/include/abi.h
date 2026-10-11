@@ -16,3 +16,4 @@
 #include "zbi.h"
 #include "interrupt.h"
 #include "dma.h"
+#include "counter.h"

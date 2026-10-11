@@ -153,6 +153,9 @@ struct M2 {
         budget("ipc.channel_call", r.channelCall, limit: channelCallCeiling, target: budgets.channelCall)
         budget("port.wake_median", r.portWakeMedian, limit: budgets.portWake)
         budget("port.wake_p99", r.portWakeP99)
+        // K10a: a counter reaching the value a thread waits for (as port wake).
+        budget("counter.wake_median", r.counterWakeMedian, limit: budgets.portWake)
+        budget("counter.wake_p99", r.counterWakeP99)
         budget("timer.wake_error_p99", r.wakeErrorP99, limit: budgets.wakeErrorP99)
         if let spawned = environmentNumber("croi.spawn_ns="), entered > spawned {
             print("m2: spawn to main \((entered - spawned) / 1000) us (budget \(spawnToMainLimit / 1000))")

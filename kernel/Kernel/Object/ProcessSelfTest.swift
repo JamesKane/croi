@@ -231,6 +231,21 @@ enum ProcessSelfTest {
         console.write("  mem:    task stats (mapped, private, shared, scaled with its fraction), kmem stats\n")
     }
 
+    /// K10a: counters from user mode (mode 14).
+    static func runCounters(_ console: Uart) {
+        let before = Counts()
+        let exitCode = runInProcess(mode: 14)
+        guard exitCode == 0x600D else {
+            console.write("  counter: user program failed check ")
+            console.write(decimal: UInt64(bitPattern: exitCode))
+            console.write("\n")
+            panic("counter self-test: user side")
+        }
+        before.expectUnchanged(console)
+        console.write("  counter: Zircon's (signals, overflow, rights); waits at a value: blocking, cancelled by ")
+        console.write("a close, port packets (at once, later, cancelled)\n")
+    }
+
     /// Live processes, address spaces and objects, to check nothing leaked.
     struct Counts {
         let processes = Processes.live.load(ordering: .relaxed)

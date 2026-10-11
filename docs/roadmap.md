@@ -546,7 +546,8 @@ M4 brings the compositor up before audio, and K10c must land before the
 synth program can meet its zero-underrun exit; K10e may move to the end
 if K10 splits (nothing else in M4 depends on it).
 
-- **K10a: counters (item 15, ext).** Zircon's counter object (type 34:
+- **K10a: counters (item 15, ext).** **Done** (2026-10-10): syscalls
+  160-165, counter wake ~1.6 µs under KVM (limit 2 µs). Zircon's counter object (type 34:
   `counter_create`, `add`, `read`, `write`; POSITIVE / NON_POSITIVE
   signals) plus the extension: waitable at a value. `counter_wait(counter,
   value, deadline)` blocks until the counter reaches `value`, and a

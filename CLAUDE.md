@@ -738,6 +738,26 @@ syscalls 150-156; Todhchai item 14 without an IOMMU):
   depend on where pages land. Not covered: quarantine through process
   death, and a BTI dying with PMTs quarantined.
 
+Counters, K10a (Kernel/Object/Counter.swift, User/CounterSyscalls.swift,
+include/counter.h, syscalls 160-165):
+- Zircon's counter (type 34; create, add, read, write; POSITIVE /
+  NON_POSITIVE; add needs READ and WRITE, OUT_OF_RANGE on overflow) plus
+  croi's waits at a value: `counter_wait(counter, value, deadline)` and
+  `counter_wait_async(counter, port, key, value)` (one packet of type
+  0x82: target, value reached, time), needing WAIT and READ.
+- A value wait is an observer with a threshold (`Observer.byValue`,
+  `atValue`): `Observers.notify` fires it when the counter's value
+  reaches it, so registration, cancellation on handle close, port_cancel
+  and port delivery are the signal waits'.
+- Each thread keeps its WaitState (`Thread.waitState`, freed with the
+  thread; `WaitStatePointer.forCurrentThread`), so a counter wait
+  allocates only its observer; the wait reads how it ended in the same
+  scheduler-lock pass that blocks. That took counter wake from ~2.5 to
+  ~1.6 µs. ObjectWait still allocates a WaitState per wait.
+- Budget `counter.wake_median` (m2, as port wake: counter_add's entry on
+  CPU 1 to counter_wait's exit on CPU 2; limit 2 µs): KVM ~1.6 µs.
+- Boot test mode 14 (`ProcessSelfTest.runCounters`).
+
 Memory statistics (Todhchai's M3 resident-memory budget; task.h,
 resource.h, UserAspace.taskStats, Kernel/Object/KernelMemory.swift):
 - object_get_info(process, CROI_INFO_TASK_STATS = 12 | 1 << 28, or _V1 =

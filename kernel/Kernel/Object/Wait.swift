@@ -20,6 +20,10 @@ struct Observer {
     /// The handle it was registered through (cancelled when that closes).
     let table: UInt64
     let handle: UInt32
+    /// A counter's value wait (K10a): satisfied when the counter's value
+    /// is at least `atValue`, whatever the signals.
+    var byValue = false
+    var atValue: Int64 = 0
 }
 
 @safe struct ObserverPointer: Equatable {
@@ -55,6 +59,20 @@ struct WaitState {
         return WaitStatePointer(address: UInt64(UInt(bitPattern: raw)))
     }
 
+    /// The running thread's own wait state, reset for a new wait: kept on
+    /// the thread, so waiting allocates nothing after the first time.
+    static func forCurrentThread() throws(Status) -> WaitStatePointer {
+        let thread = Scheduler.current
+        if thread.pointee.waitState == 0 { thread.pointee.waitState = try allocate().address }
+        let state = WaitStatePointer(address: thread.pointee.waitState)
+        Scheduler.locked {
+            state.pointee.done = false
+            state.pointee.canceled = false
+            state.pointee.firedIndex = -1
+        }
+        return state
+    }
+
     func free() {
         pointee.queue.deallocate()
         unsafe heap.free(UnsafeMutableRawPointer(bitPattern: UInt(address))!)
@@ -81,11 +99,14 @@ enum Observers {
     /// observers fire once and go. Object lock held.
     static func notify(_ object: ObjectPointer) {
         let signals = object.header.signals
+        let value = object.header.type == .counter ? Counters.valueLocked(object) : 0
         var previous: ObserverPointer? = nil
         var cursor = object.header.observers
         while let observer = cursor {
             cursor = observer.pointee.next
-            guard observer.pointee.trigger & signals != 0 else {
+            let satisfied = observer.pointee.byValue ? value >= observer.pointee.atValue
+                                                     : observer.pointee.trigger & signals != 0
+            guard satisfied else {
                 previous = observer
                 continue
             }
@@ -95,7 +116,11 @@ enum Observers {
                 previous = observer
             case .port(let port, _, let packet, let options):
                 if let previous { previous.pointee.next = observer.pointee.next } else { object.header.observers = observer.pointee.next }
-                firePort(port, QueuedPacketPointer(address: packet), observer.pointee.trigger, signals, options)
+                if observer.pointee.byValue {
+                    fireValuePort(port, QueuedPacketPointer(address: packet), observer.pointee.atValue, value)
+                } else {
+                    firePort(port, QueuedPacketPointer(address: packet), observer.pointee.trigger, signals, options)
+                }
                 unsafe heap.free(UnsafeMutableRawPointer(bitPattern: UInt(observer.address))!)
             }
         }
@@ -106,6 +131,17 @@ enum Observers {
         record.pointee.packet.payload[0] = UInt64(observed) << 32 | UInt64(trigger)
         record.pointee.packet.payload[1] = 1  // count
         if options & timestamp != 0 { record.pointee.packet.payload[2] = Clock.now() }
+        let pointer = ObjectPointer(address: port)
+        Ports.enqueue(PortPointer(object: pointer), record)
+        pointer.release()  // the observer's reference; the queue keeps the port alive
+    }
+
+    /// A counter value wait's packet: what was waited for, what the counter
+    /// reached, and when.
+    static func fireValuePort(_ port: UInt64, _ record: QueuedPacketPointer, _ target: Int64, _ value: Int64) {
+        record.pointee.packet.payload[0] = UInt64(bitPattern: target)
+        record.pointee.packet.payload[1] = UInt64(bitPattern: value)
+        record.pointee.packet.payload[2] = Clock.now()
         let pointer = ObjectPointer(address: port)
         Ports.enqueue(PortPointer(object: pointer), record)
         pointer.release()  // the observer's reference; the queue keeps the port alive

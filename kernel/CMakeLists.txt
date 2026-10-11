@@ -24,6 +24,7 @@ add_library(kernel-swift OBJECT
   Kernel/User/IpcSyscalls.swift
   Kernel/User/DriverSyscalls.swift
   Kernel/User/DmaSyscalls.swift
+  Kernel/User/CounterSyscalls.swift
   Kernel/User/IoPorts.swift
   Kernel/User/SyncSyscalls.swift
   Kernel/User/ExceptionSyscalls.swift
@@ -53,6 +54,7 @@ add_library(kernel-swift OBJECT
   Kernel/Object/MsiObject.swift
   Kernel/Object/Dma.swift
   Kernel/Object/KernelMemory.swift
+  Kernel/Object/Counter.swift
   Kernel/Object/ProcessSelfTest.swift
   Kernel/Object/VmoObject.swift
   Kernel/Object/ObjectSelfTest.swift

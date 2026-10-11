@@ -113,6 +113,14 @@ enum : uint64_t {
   CROI_SYS_PMT_UNPIN = 154,             // (pmt): the handle is consumed
   CROI_SYS_VMO_CREATE_CONTIGUOUS = 155, // (bti, size, alignment_log2, uint32_t *out)
   CROI_SYS_BTI_SET_PROPERTIES = 156,    // (bti, const croi_bti_properties_t *): croi's, narrowing only
+
+  // Counters (K10a): Zircon's calls, plus waiting at a value (counter.h).
+  CROI_SYS_COUNTER_CREATE = 160,        // (options 0, uint32_t *out)
+  CROI_SYS_COUNTER_ADD = 161,           // (counter, int64_t amount)
+  CROI_SYS_COUNTER_READ = 162,          // (counter, int64_t *value)
+  CROI_SYS_COUNTER_WRITE = 163,         // (counter, int64_t value)
+  CROI_SYS_COUNTER_WAIT = 164,          // (counter, int64_t value, deadline): croi's
+  CROI_SYS_COUNTER_WAIT_ASYNC = 165,    // (counter, port, key, int64_t value): croi's
 };
 
 enum : uint32_t {  // timer_create options (Zircon's ZX_TIMER_SLACK_*)
@@ -134,6 +142,7 @@ enum : uint32_t {  // timer_create options (Zircon's ZX_TIMER_SLACK_*)
 #include "zbi.h"      // boot data items (CROI_PA_VMO_BOOTDATA)
 #include "interrupt.h" // interrupt options, port binding, packet type
 #include "dma.h"      // IOMMU types, bti_pin options, BTI info and properties
+#include "counter.h"  // counter signals, value waits
 
 enum : uint64_t {  // CROI_SYS_TRACE_CONFIGURE ops
   CROI_TRACE_OP_START = 0,   // a: categories, b: pages per CPU, c: mode;

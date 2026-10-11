@@ -60,6 +60,8 @@ enum Bench {
         var channelCall: UInt64 = 0      // ns, median of batch means
         var portWakeMedian: UInt64 = 0   // ns
         var portWakeP99: UInt64 = 0
+        var counterWakeMedian: UInt64 = 0  // ns (K10a)
+        var counterWakeP99: UInt64 = 0
         var wakeErrorP99: UInt64 = 0     // ns
     }
 
@@ -71,6 +73,7 @@ enum Bench {
         results.nullSyscall = try nullSyscall()
         results.channelCall = try channelCall(resource: resource, thread: thread)
         (results.portWakeMedian, results.portWakeP99) = try portWake(resource: resource, thread: thread)
+        (results.counterWakeMedian, results.counterWakeP99) = try counterWake(resource: resource, thread: thread)
         results.wakeErrorP99 = try wakeError(resource: resource, thread: thread)
         return results
     }
@@ -228,6 +231,62 @@ enum Bench {
         }
         latencies.sort()
         guard !latencies.isEmpty else { throw Failure(what: "measuring port wakes", status: -1) }
+        return (latencies[latencies.count / 2], latencies[latencies.count * 99 / 100])
+    }
+
+    // MARK: Counter wake from another core (K10a)
+
+    nonisolated(unsafe) static var wakeCounter: UInt32 = 0
+
+    static let counterWaiter: Sys.ThreadEntry = { _, _ in
+        Sys.take(goEvent)  // pinned to its CPU first
+        for i in 0..<wakes {
+            Sys.signal(readyEvent, set: UInt32(CROI_SIGNAL_SIGNALED))
+            _ = Sys.call(CROI_SYS_COUNTER_WAIT, UInt64(wakeCounter), i + 1, .max)
+        }
+        Sys.exitThread()
+    }
+
+    /// From counter_add's entry on one CPU to counter_wait's exit on
+    /// another, the waiter waiting for the value the add reaches: median
+    /// and p99, ns (as port wake).
+    static func counterWake(resource: UInt32, thread: UInt32) throws(Failure) -> (UInt64, UInt64) {
+        readyEvent = try Sys.event()
+        goEvent = try Sys.event()
+        try Sys.check("creating a counter", Sys.call(CROI_SYS_COUNTER_CREATE, 0, Sys.address(&wakeCounter)))
+        try Tracing.start(UInt32(CROI_TRACE_SYSCALL))
+        let worker = try Sys.spawn(counterWaiter, 0)
+        let waiterProfile = try Sys.profile(resource, priority: Int32(CROI_PRIORITY_DEFAULT), mask: cpus.waiter)
+        try Sys.apply(waiterProfile, to: worker)
+        Sys.close(waiterProfile)
+        Sys.signal(goEvent, set: UInt32(CROI_SIGNAL_SIGNALED))
+        for _ in 0..<wakes {
+            Sys.take(readyEvent)
+            _ = Sys.call(CROI_SYS_NANOSLEEP, Sys.now() + 100_000)  // the waiter is blocked by now
+            _ = Sys.call(CROI_SYS_COUNTER_ADD, UInt64(wakeCounter), 1)
+        }
+        var observed: UInt32 = 0
+        _ = Sys.call(CROI_SYS_OBJECT_WAIT_ONE, UInt64(worker), UInt64(CROI_SIGNAL_TASK_TERMINATED), .max,
+                     Sys.address(&observed))
+        Tracing.stop()
+        for handle in [worker, wakeCounter, readyEvent, goEvent] { Sys.close(handle) }
+        let (records, frequency) = try Tracing.records()
+        let adds = records.filter {
+            $0.kind == UInt16(CROI_TK_SYSCALL_ENTER) && $0.a == CROI_SYS_COUNTER_ADD && (1 << UInt64($0.cpu)) == cpus.client
+        }
+        let returns = records.filter {
+            $0.kind == UInt16(CROI_TK_SYSCALL_EXIT) && $0.a == CROI_SYS_COUNTER_WAIT
+                && (1 << UInt64($0.cpu)) == cpus.waiter
+        }
+        guard adds.count == Int(wakes), returns.count == Int(wakes) else {
+            throw Failure(what: "pairing counter wakes", status: Int64(adds.count) << 16 | Int64(returns.count))
+        }
+        var latencies: [UInt64] = []
+        for i in 0..<Int(wakes) where returns[i].time >= adds[i].time {
+            latencies.append(Tracing.ns(returns[i].time - adds[i].time, frequency))
+        }
+        latencies.sort()
+        guard !latencies.isEmpty else { throw Failure(what: "measuring counter wakes", status: -1) }
         return (latencies[latencies.count / 2], latencies[latencies.count * 99 / 100])
     }
 

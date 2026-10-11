@@ -2024,6 +2024,83 @@ static int64_t memory_stats(const startup_t *s) {
   return 0x600D;
 }
 
+// Mode 14 (K10a): counters. Zircon's semantics (signals, overflow,
+// rights), then croi's waits at a value: blocking, cancelled by a close,
+// and as port packets (immediate, later, cancelled).
+typedef struct {
+  uint32_t handle;
+  int64_t target;
+  volatile int64_t status;
+} counter_waiter_t;
+static void counter_waiter(uint64_t arg) {
+  counter_waiter_t *w = (counter_waiter_t *)arg;
+  w->status = sys(CROI_SYS_COUNTER_WAIT, w->handle, (uint64_t)w->target, ~0ull, 0, 0);
+  sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
+}
+
+static int64_t counters(const startup_t *s) {
+  uint32_t c = 0, weak = 0, port = 0;
+  int64_t value = -1;
+  CHECK(340, sys(CROI_SYS_COUNTER_CREATE, 1, (uint64_t)&c, 0, 0, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_COUNTER_CREATE, 0, (uint64_t)&c, 0, 0, 0) == 0 &&
+                 (wait_for(c, CROI_COUNTER_NON_POSITIVE, 0) & CROI_COUNTER_NON_POSITIVE) &&
+                 sys(CROI_SYS_COUNTER_READ, c, (uint64_t)&value, 0, 0, 0) == 0 && value == 0);
+  CHECK(341, sys(CROI_SYS_COUNTER_ADD, c, 5, 0, 0, 0) == 0 &&
+                 (wait_for(c, CROI_COUNTER_POSITIVE, 0) & (CROI_COUNTER_POSITIVE | CROI_COUNTER_NON_POSITIVE)) ==
+                     CROI_COUNTER_POSITIVE &&
+                 sys(CROI_SYS_COUNTER_WRITE, c, (uint64_t)-3, 0, 0, 0) == 0 &&
+                 (wait_for(c, CROI_COUNTER_NON_POSITIVE, 0) & CROI_COUNTER_NON_POSITIVE) &&
+                 sys(CROI_SYS_COUNTER_WRITE, c, 0x7FFFFFFFFFFFFFFFull, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_COUNTER_ADD, c, 1, 0, 0, 0) == ERR_OUT_OF_RANGE &&
+                 sys(CROI_SYS_COUNTER_READ, c, (uint64_t)&value, 0, 0, 0) == 0 && value == 0x7FFFFFFFFFFFFFFFll &&
+                 sys(CROI_SYS_COUNTER_READ, c, 0, 0, 0, 0) == ERR_INVALID_ARGS);
+  // Rights: add needs READ and WRITE, a value wait WAIT and READ.
+  CHECK(342, sys(CROI_SYS_HANDLE_DUPLICATE, c, 1u << 2 | 1u << 14, (uint64_t)&weak, 0, 0) == 0 &&  // READ, WAIT
+                 sys(CROI_SYS_COUNTER_ADD, weak, 1, 0, 0, 0) == ERR_ACCESS_DENIED_ &&
+                 sys(CROI_SYS_COUNTER_WRITE, weak, 1, 0, 0, 0) == ERR_ACCESS_DENIED_ &&
+                 sys(CROI_SYS_COUNTER_READ, weak, (uint64_t)&value, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_HANDLE_CLOSE, weak, 0, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_HANDLE_DUPLICATE, c, 1u << 14, (uint64_t)&weak, 0, 0) == 0 &&  // WAIT only
+                 sys(CROI_SYS_COUNTER_WAIT, weak, 0, 0, 0, 0) == ERR_ACCESS_DENIED_ &&
+                 sys(CROI_SYS_HANDLE_CLOSE, weak, 0, 0, 0, 0) == 0);
+  // Waits at a value: met at once, timed out, woken only once reached.
+  CHECK(343, sys(CROI_SYS_COUNTER_WRITE, c, 0, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_COUNTER_WAIT, c, 0, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_COUNTER_WAIT, c, (uint64_t)-5, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_COUNTER_WAIT, c, 3, now_ns() + 1000000, 0, 0) == ERR_TIMED_OUT);
+  counter_waiter_t w = {.handle = c, .target = 10, .status = 1};
+  uint32_t worker = start_thread(s, counter_waiter, (uint64_t)&w);
+  sleep_ns(10000000);
+  CHECK(344, sys(CROI_SYS_COUNTER_ADD, c, 5, 0, 0, 0) == 0);
+  sleep_ns(10000000);
+  CHECK(345, w.status == 1 && sys(CROI_SYS_COUNTER_ADD, c, 5, 0, 0, 0) == 0);
+  join_checked(worker);
+  CHECK(346, w.status == 0);
+  // Closing the handle a thread waits through cancels its wait.
+  CHECK(347, sys(CROI_SYS_HANDLE_DUPLICATE, c, 1u << 31, (uint64_t)&weak, 0, 0) == 0);
+  w.handle = weak, w.target = 1000, w.status = 1;
+  worker = start_thread(s, counter_waiter, (uint64_t)&w);
+  sleep_ns(10000000);
+  CHECK(348, sys(CROI_SYS_HANDLE_CLOSE, weak, 0, 0, 0, 0) == 0);
+  join_checked(worker);
+  CHECK(349, w.status == ERR_CANCELED);
+  // Port packets: later, at once, cancelled.
+  croi_port_packet_t p;
+  uint64_t before = now_ns();
+  CHECK(350, sys(CROI_SYS_PORT_CREATE, 0, (uint64_t)&port, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_COUNTER_WAIT_ASYNC, c, port, 7, 20, 0) == 0 && port_next(port, 0, &p) == ERR_TIMED_OUT &&
+                 sys(CROI_SYS_COUNTER_WRITE, c, 25, 0, 0, 0) == 0 && port_next(port, 0, &p) == 0 &&
+                 p.type == CROI_PKT_TYPE_COUNTER && p.key == 7 && p.payload[0] == 20 && p.payload[1] == 25 &&
+                 p.payload[2] >= before && port_next(port, 0, &p) == ERR_TIMED_OUT);
+  CHECK(351, sys(CROI_SYS_COUNTER_WAIT_ASYNC, c, port, 8, 25, 0) == 0 && port_next(port, 0, &p) == 0 && p.key == 8 &&
+                 p.payload[1] == 25 && sys(CROI_SYS_COUNTER_WAIT_ASYNC, c, port, 9, 100, 0) == 0 &&
+                 sys(CROI_SYS_PORT_CANCEL, port, c, 9, 0, 0) == 0 && sys(CROI_SYS_COUNTER_WRITE, c, 200, 0, 0, 0) == 0 &&
+                 port_next(port, 0, &p) == ERR_TIMED_OUT);
+  sys(CROI_SYS_HANDLE_CLOSE, port, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, c, 0, 0, 0, 0);
+  return 0x600D;
+}
+
 // Mode 4: something to sample. Three frames deep, spin for `ns`, with a
 // clock syscall every 64 iterations (so some samples land in the kernel
 // and must continue into these frames).
@@ -2066,6 +2143,7 @@ __attribute__((section(".text.start"))) [[noreturn]] void _start(uint64_t mode, 
             : mode == 11 ? interrupts((const startup_t *)handle)
             : mode == 12 ? dma((const startup_t *)handle)
             : mode == 13 ? memory_stats((const startup_t *)handle)
+            : mode == 14 ? counters((const startup_t *)handle)
             : mode >= 0x400 ? child((uint32_t)mode, handle, vdso_base)
                         : objects());
 }

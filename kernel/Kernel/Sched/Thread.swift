@@ -92,6 +92,9 @@ struct Thread: ~Copyable {
     var extendedState: UInt64 = 0
     /// Per-thread PMU counters (Pmu.ThreadCounters on the heap), or 0.
     var pmu: UInt64 = 0
+    /// Its WaitState, kept for its next wait (a thread is in one wait at a
+    /// time), or 0 until it first waits.
+    var waitState: UInt64 = 0
     /// The thread object it runs (K7: a reference it holds), or 0.
     var object: UInt64 = 0
     /// Killed (task_kill): it exits on its way back to user mode, and its
