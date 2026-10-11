@@ -102,6 +102,35 @@ enum SchedulerSelfTest {
         guard spinner.join() == 0, setter.join() == 0 else { panic("sched self-test: no preemption") }
         let preemptedAfter = Clock.now() - start
 
+        // Work stealing: two spinners pinned to one CPU (one runs, one
+        // waits), then free to go anywhere; a thread blocking on another
+        // CPU makes that CPU idle, and it takes the waiting one.
+        var stole = true
+        if Smp.count >= 3 {
+            let home = 1, thief = 2
+            let before = Scheduler.locked { Scheduler.steals }
+            stealStop.store(false, ordering: .relaxed)
+            stealCpus.store(0, ordering: .relaxed)
+            let a = spawn("pinned-a", home, spinRecording, 0)
+            let b = spawn("pinned-b", home, spinRecording, 1)
+            Scheduler.sleep(until: Clock.now() + 5 * ms)  // both queued there
+            Scheduler.locked {
+                a.thread.pointee.affinity = Scheduler.allCpus
+                b.thread.pointee.affinity = Scheduler.allCpus
+            }
+            let blocker = spawn("blocker", thief, sleepBriefly, 0)
+            let giveUp = Clock.now() + 1000 * ms
+            while stealCpus.load(ordering: .relaxed) & ~(1 << UInt64(home)) == 0, Clock.now() < giveUp {
+                Scheduler.sleep(until: Clock.now() + ms)
+            }
+            stealStop.store(true, ordering: .relaxed)
+            _ = a.join()
+            _ = b.join()
+            _ = blocker.join()
+            stole = Scheduler.locked { Scheduler.steals } > before && stealCpus.load(ordering: .relaxed) & ~(1 << UInt64(home)) != 0
+        }
+        guard stole else { panic("sched self-test: an idle CPU didn't take waiting work") }
+
         // Reapers on every CPU free stacks (unmaps, TLB shootdowns) while
         // this thread maps and unmaps kernel memory: masked reaping
         // deadlocked here.
@@ -132,7 +161,7 @@ enum SchedulerSelfTest {
         console.write(decimal: UInt64(used))
         console.write(" CPUs; ping-pong local and cross-CPU, sleep, timeouts, preemption (")
         console.write(decimal: preemptedAfter / ms)
-        console.write(" ms), reaping ok\n")
+        console.write(" ms), an idle CPU stealing waiting work, reaping ok\n")
     }
 
     nonisolated(unsafe) static var dueAt: UInt64 = 0
@@ -201,6 +230,23 @@ enum SchedulerSelfTest {
                 Scheduler.wakeAll(queue)
             }
         }
+        return 0
+    }
+
+    static let stealStop = Atomic<Bool>(false)
+    /// The CPUs the pinned spinners ran on, a bit each.
+    static let stealCpus = Atomic<UInt64>(0)
+
+    private static let spinRecording: Thread.Entry = { _ in
+        let giveUp = Clock.now() + 2_000_000_000
+        while !stealStop.load(ordering: .relaxed), Clock.now() < giveUp {
+            stealCpus.bitwiseOr(1 << UInt64(Cpu.current), ordering: .relaxed)
+        }
+        return 0
+    }
+
+    private static let sleepBriefly: Thread.Entry = { _ in
+        Scheduler.sleep(until: Clock.now() + 2_000_000)
         return 0
     }
 

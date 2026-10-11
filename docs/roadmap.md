@@ -825,6 +825,11 @@ THREAD, VMO, maps, handle table) and the NAME property.
   that can be), process_read/write_memory; debugger channels (process and
   job), PROCESS/THREAD_STARTING and THREAD_EXITING, second chance,
   exception reports; single-step and hardware breakpoints (amd64, arm64).
+- **K13j: load balancing.** **Done** (2026-10-11): idle-time work
+  stealing of fair threads (Zircon's), from a CPU going idle and an idle
+  CPU waking. Interleaved bench: irq.wait_wake_median -60%..-67%, the rest
+  within noise. Fixed on the way: a thread moved by `requeue` kept its old
+  CPU's vruntime (a ~300 ms stall).
 - **K13i: smc_call.** **Done** (2026-10-11): Zircon's call and layouts,
   SMC resources by function-ID range, the FADT's conduit, the kernel's
   PSCI calls refused, Qualcomm's resume protocol behind
@@ -860,7 +865,6 @@ from Zircon, see docs/zircon-divergences.md.
   32-entry limit.
 
 **Kernel internals**
-- Load balancing of fair threads between CPUs beyond wakeup placement.
 - PT_GNU_RELRO enforcement in the loaders.
 - amd64 5-level paging, KASLR, VHE-only arm64 CPUs, pointer
   authentication (EL2 doesn't un-trap it yet).

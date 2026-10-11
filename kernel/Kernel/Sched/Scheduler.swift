@@ -195,6 +195,8 @@ enum Scheduler {
             _ = arch_interrupts_save()
             lock.lockMasked()
             refreshEligibility(me, Clock.now())
+            // Idle and woken: waiting work elsewhere is ours to take.
+            if !cpus[me].hasRunnable, let stolen = steal(me) { enqueue(stolen, on: me, Clock.now()) }
             // Loop: coming back here, `finishSwitch` may have just made a
             // thread ready on this CPU (a joiner woken by an exit), with
             // only a local request and no IPI to end the wait below.
@@ -319,7 +321,7 @@ enum Scheduler {
     /// Context switches CPU `cpu` has made (read racily; CPU stats).
     static func switchCount(_ cpu: Int) -> UInt64 { cpus[cpu].switches }
 
-    private static var allCpus: UInt64 { Smp.count >= 64 ? .max : (1 << UInt64(Smp.count)) - 1 }
+    static var allCpus: UInt64 { Smp.count >= 64 ? .max : (1 << UInt64(Smp.count)) - 1 }
 
     // MARK: Threads
 
@@ -1356,6 +1358,45 @@ enum Scheduler {
         thread.pointee.runQueue = .none
     }
 
+    /// Fair threads moved by `steal` (the self-test's evidence).
+    nonisolated(unsafe) static var steals = 0
+
+    /// Load balancing (Zircon's idle-time work stealing): `me` has nothing
+    /// to run, so it takes the first waiting fair thread it may run (affinity
+    /// and reservation; not one admitted to a CPU) from the CPU with the most
+    /// fair threads waiting, its lag carried over as at a wakeup. Queued
+    /// threads are always switched out (the lock is held across a switch),
+    /// so any of them may move. Lock held.
+    private static func steal(_ me: Int) -> ThreadPointer? {
+        guard cpus[me].ready else { return nil }
+        var source = -1, sourceCount = 0
+        var candidate: ThreadPointer? = nil
+        for cpu in 0..<Smp.count where cpu != me && cpus[cpu].fair.count > sourceCount {
+            var cursor = cpus[cpu].fair.head
+            while let thread = cursor {
+                cursor = thread.pointee.next
+                guard allowed(thread, on: me) else { continue }
+                if let context = thread.pointee.context, context.pointee.cpu >= 0 { continue }
+                source = cpu
+                sourceCount = cpus[cpu].fair.count
+                candidate = thread
+                break
+            }
+        }
+        guard let thread = candidate else { return nil }
+        dequeue(thread, source)
+        // Its lag, capped as at a wakeup: a thread long queued can lag its
+        // CPU's minimum (which never decreases) by far, and uncapped that
+        // credit starved everything on its new CPU (300 ms in the EDF
+        // self-test's reservation part).
+        let lag = max(Int64(bitPattern: thread.pointee.vruntime &- cpus[source].minVruntime), -Int64(targetLatency / 2))
+        thread.pointee.vruntime = lag < 0 ? cpus[me].minVruntime &- UInt64(-lag) : cpus[me].minVruntime &+ UInt64(lag)
+        Trace.event(CROI_TRACE_SCHED, UInt16(CROI_TK_MIGRATE), UInt64(thread.pointee.traceId),
+                    UInt64(source) << 32 | UInt64(me))
+        steals += 1
+        return thread
+    }
+
     private static func pop(_ cpu: Int) -> ThreadPointer? {
         let thread = cpus[cpu].deadline.pop() ?? cpus[cpu].fair.pop()
         thread?.pointee.runQueue = .none
@@ -1485,6 +1526,11 @@ enum Scheduler {
             }
         }
         refreshEligibility(me, now)
+        // About to idle: take waiting work from a busier CPU first.
+        if !cpus[me].hasRunnable, current.pointee.state != .running || current.pointee.isIdle,
+           let stolen = steal(me) {
+            enqueue(stolen, on: me, now)
+        }
         let next = pop(me) ?? (current.pointee.state == .running ? current : cpus[me].idle!)
         // Leaving the idle thread (an interrupt can switch away mid-poll):
         // this CPU no longer polls, so wakers must send IPIs again. Under
@@ -1550,8 +1596,18 @@ enum Scheduler {
         if allowed(thread, on: me), thread.pointee.context.map({ $0.pointee.cpu < 0 || $0.pointee.cpu == me }) ?? true {
             enqueue(thread, on: me, now)
         } else {
-            thread.pointee.lag = Int64(bitPattern: thread.pointee.vruntime &- cpus[me].minVruntime)
+            // It may not stay (affinity, a reservation, its context): moved
+            // with its lag rebased onto the new CPU's minimum, capped as at a
+            // wakeup. It used to keep this CPU's vruntime, and arriving from
+            // a CPU it had to itself it waited ~300 ms behind the new CPU's
+            // threads (found with K13j's stealing).
+            let lag = max(Int64(bitPattern: thread.pointee.vruntime &- cpus[me].minVruntime), -Int64(targetLatency / 2))
+            thread.pointee.lag = lag
             let cpu = place(thread)
+            if thread.pointee.effective.discipline == .fair {
+                let floor = cpus[cpu].minVruntime
+                thread.pointee.vruntime = lag < 0 ? floor &- UInt64(-lag) : floor &+ UInt64(lag)
+            }
             enqueue(thread, on: cpu, now)
             requestPreemption(on: cpu)
         }

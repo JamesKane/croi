@@ -1790,7 +1790,20 @@ sets a per-CPU request that is acted on when an interrupt returns.
 Interrupt frames don't restore the per-CPU register (rv64 `tp` is skipped),
 because a preempted thread can resume on another CPU. Queues are ordered
 by `Thread.queueKey` (`QueueHead`). Leaving `locked` with interrupts on
-is a preemption point. A wakeup aimed at the local
+is a preemption point. Load balancing (Zircon's idle-time work stealing):
+a CPU about to switch to idle, and an idle CPU each time it wakes, takes
+the first waiting fair thread it may run (affinity, reservation; not one
+admitted to a CPU) from the CPU with the most fair threads waiting
+(`Scheduler.steal`; its vruntime lag carried over as at a wakeup;
+`steals` counts them, a MIGRATE trace record each); queued threads are
+always switched out (the lock is held across a switch), so any may move.
+The sched self-test pins two spinners to one CPU, frees them, and has
+another CPU go idle: it must take one. Fixed on the way: a ready thread
+`requeue` must move (its CPU now reserved for another job, its affinity
+changed) kept the old CPU's vruntime instead of its lag rebased onto the
+new CPU's minimum; arriving from a CPU it had to itself it waited ~300 ms
+behind the new CPU's threads (the EDF self-test's reservation part, once
+stealing made it likelier). A wakeup aimed at the local
 CPU only sets a request bit, so the idle loop and `preemptIfRequested`
 recheck after every switch (`finishSwitch` can make a thread ready here).
 
