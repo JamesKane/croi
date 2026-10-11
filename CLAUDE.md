@@ -936,7 +936,7 @@ resource.h CROI_INFO_CPU_STATS, Smp.swift `CpuStats`):
   (`croi.watchdog=off` removes it; QEMU has none). The debuglog dumper,
   timeline ticks and idle polling were already event-driven.
 
-VMO children, K11a (branch m5; Vmo.swift `init(childOf:)`, VmoObject
+VMO children, K11a (Vmo.swift `init(childOf:)`, VmoObject
 `createChild`, vmo.h CROI_VMO_CHILD_*, syscall 48):
 - `vmo_create_child(vmo, options, offset, size, out)`: SNAPSHOT_AT_LEAST_
   ON_WRITE of an anonymous VMO (a child too), optionally NO_WRITE. The
