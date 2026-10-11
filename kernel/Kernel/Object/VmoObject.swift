@@ -37,17 +37,53 @@ struct VmoObject: ~Copyable {
     }
 
     /// vmo_create: anonymous memory, the size rounded up to a page
-    /// (Zircon's RoundSize: OUT_OF_RANGE if that overflows).
-    static func create(size: UInt64) throws(Status) -> ObjectPointer {
+    /// (Zircon's RoundSize: OUT_OF_RANGE if that overflows); an unaligned
+    /// size is the content size. RESIZABLE (K13h): vmo_set_size may change
+    /// it, and its handle gets RESIZE. UNBOUNDED: NOT_SUPPORTED (with
+    /// RESIZABLE INVALID_ARGS, first); DISCARDABLE NOT_SUPPORTED.
+    static func create(size: UInt64, options: UInt64 = 0) throws(Status) -> (ObjectPointer, Rights) {
+        let resizable = UInt64(CROI_VMO_CREATE_RESIZABLE), unbounded = UInt64(CROI_VMO_CREATE_UNBOUNDED)
+        let discardable: UInt64 = 1 << 2
+        if options & resizable != 0, options & unbounded != 0 { throw .invalidArgs }
+        guard options & ~(resizable | unbounded | discardable) == 0 else { throw .invalidArgs }
         let pageMask = KernelLayout.pageSize - 1
         guard size <= UInt64.max - pageMask else { throw .outOfRange }
+        if options & (unbounded | discardable) != 0 { throw .notSupported }
         let vmo: Vmo
         do throws(VmError) {
             vmo = try Vmo(anonymous: (size + pageMask) & ~pageMask)
         } catch {
             throw error == .invalidArgument ? .invalidArgs : .noMemory
         }
-        return try wrap(vmo.record)
+        vmo.record.pointee.resizable = options & resizable != 0
+        if size & pageMask != 0 { vmo.record.pointee.streamSize = size }
+        return (try wrap(vmo.record), options & resizable != 0 ? defaultRights | .resize : defaultRights)
+    }
+
+    /// vmo_set_size (K13h), Zircon's order: WRITE; RESIZE if resizable;
+    /// UNAVAILABLE for physical and contiguous VMOs; OUT_OF_RANGE if the
+    /// rounding overflows; UNAVAILABLE if not resizable; BAD_STATE for
+    /// pinned pages cut off. The content size becomes `size` exactly and
+    /// the last page's tail past it reads zero.
+    static func setSize(_ table: borrowing HandleTable, _ handle: UInt32, _ size: UInt64) throws(Status) {
+        let ref = try table.get(handle, type: .vmo, rights: .write)
+        let vmo = VmoPointer(address: UnsafeVmoObject(ref.object).vmo)
+        if vmo.pointee.resizable, !(try table.rights(of: handle)).contains(.resize) { throw .accessDenied }
+        guard case .anonymous = vmo.pointee.kind else { throw .unavailable }
+        let pageMask = KernelLayout.pageSize - 1
+        guard size <= UInt64.max - pageMask else { throw .outOfRange }
+        guard vmo.pointee.resizable else { throw .unavailable }
+        let rounded = (size + pageMask) & ~pageMask
+        do throws(VmError) {
+            try Vmo.withBorrowed(vmo) { (v: borrowing Vmo) throws(VmError) in try v.resize(rounded) }
+        } catch {
+            throw error == .pinned ? .badState : error.status
+        }
+        vmo.pointee.lock.withLock { vmo.pointee.streamSize = size }
+        if size < rounded {
+            try? Pagers.ensureWritableRange(vmo, rounded - KernelLayout.pageSize, KernelLayout.pageSize)
+            try? Vmo.withBorrowed(vmo) { (v: borrowing Vmo) throws(VmError) in try v.zero(offset: size, size: rounded - size) }
+        }
     }
 
     /// The syscall.
@@ -76,9 +112,11 @@ struct VmoObject: ~Copyable {
             | snapshotAtLeastOnWrite | noWrite | UInt32(CROI_VMO_CHILD_REFERENCE) | UInt32(CROI_VMO_CHILD_SNAPSHOT_MODIFIED)
         guard options & ~known == 0 else { throw .invalidArgs }
         if options & noWrite != 0, options & UInt32(CROI_VMO_CHILD_RESIZABLE) != 0 { throw .invalidArgs }
-        let kind = options & ~noWrite
+        let resizableChild = UInt32(CROI_VMO_CHILD_RESIZABLE)  // K13h: snapshots only
+        let kind = options & ~noWrite & ~resizableChild
         guard kind != 0 else { throw .invalidArgs }
         let slice = UInt32(CROI_VMO_CHILD_SLICE)
+        if kind == slice, options & resizableChild != 0 { throw .invalidArgs }
         if kind & slice != 0, kind != slice { throw .invalidArgs }  // nothing else goes with SLICE
         guard kind == snapshotAtLeastOnWrite || kind == slice else { throw .notSupported }
         let pageMask = KernelLayout.pageSize - 1
@@ -94,6 +132,10 @@ struct VmoObject: ~Copyable {
         } catch {
             throw error == .outOfMemory ? .noMemory : error.status
         }
+        if options & resizableChild != 0 { child.record.pointee.resizable = true }
+        if size & pageMask != 0 { child.record.pointee.streamSize = size }
+        rights.remove(.resize)
+        if options & resizableChild != 0 { rights.insert(.resize) }
         rights.insert(.getProperty)
         rights.insert(.setProperty)
         if kind == slice {

@@ -866,6 +866,7 @@ static int64_t sync_objects(const startup_t *s) {
 
 // Mode 9: exceptions and job policy (K7d), as a process.
 #define ERR_ALREADY_BOUND (-27)
+#define ERR_UNAVAILABLE (-28)
 #define ERR_ALREADY_EXISTS (-26)
 
 // Takes one exception from `channel`: checks its type and process, and
@@ -3580,6 +3581,76 @@ static int64_t stepping_checks(const startup_t *s, uint32_t *channel_out) {
   return 0;
 }
 
+// K13h: resizable VMOs.
+static int64_t resizing(const startup_t *s) {
+  uint32_t vmo = 0, plain = 0, weak = 0, child = 0, fixed = 0;
+  uint64_t size = 0, at = 0, counts[2];
+  croi_info_handle_basic_t basic;
+  croi_info_vmo_t info;
+  char byte = 1;
+  // Created resizable: RESIZE on its handle, the info flag, the content
+  // size the unaligned size; refusals.
+  CHECK(570, sys(CROI_SYS_VMO_CREATE, 2 * PAGE + 100, CROI_VMO_CREATE_RESIZABLE | CROI_VMO_CREATE_UNBOUNDED,
+                 (uint64_t)&vmo, 0, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_VMO_CREATE, 2 * PAGE + 100, CROI_VMO_CREATE_RESIZABLE, (uint64_t)&vmo, 0, 0) == 0 &&
+                 sys(CROI_SYS_OBJECT_GET_INFO, vmo, CROI_INFO_HANDLE_BASIC, (uint64_t)&basic, sizeof basic, 0) == 0 &&
+                 (basic.rights & CROI_RIGHT_RESIZE) &&
+                 sys6(CROI_SYS_OBJECT_GET_INFO, vmo, CROI_INFO_VMO, (uint64_t)&info, sizeof info, (uint64_t)&counts[0],
+                      (uint64_t)&counts[1]) == 0 && (info.flags & CROI_INFO_VMO_RESIZABLE) && info.size_bytes == 3 * PAGE &&
+                 sys(CROI_SYS_VMO_GET_STREAM_SIZE, vmo, (uint64_t)&size, 0, 0, 0) == 0 && size == 2 * PAGE + 100 &&
+                 sys(CROI_SYS_VMO_CREATE, PAGE, 0, (uint64_t)&plain, 0, 0) == 0 &&
+                 sys(CROI_SYS_VMO_SET_SIZE, plain, 2 * PAGE, 0, 0, 0) == ERR_UNAVAILABLE &&
+                 sys(CROI_SYS_HANDLE_DUPLICATE, vmo, RIGHT_READ | (1u << 3) | RIGHT_DUPLICATE, (uint64_t)&weak, 0, 0) == 0 &&
+                 sys(CROI_SYS_VMO_SET_SIZE, weak, PAGE, 0, 0, 0) == ERR_ACCESS_DENIED);
+  // Mapped past its end; shrunk to 10 bytes (the tail zeroed, reads past
+  // the end OUT_OF_RANGE), then grown and written through the mapping.
+  CHECK(571, sys6(CROI_SYS_VMAR_MAP, s->vmar | (uint64_t)(CROI_VM_PERM_READ | CROI_VM_PERM_WRITE) << 32, 0, vmo, 0,
+                  4 * PAGE, (uint64_t)&at) == 0 &&
+                 sys6(CROI_SYS_VMAR_MAP, s->vmar | (uint64_t)(CROI_VM_PERM_READ | CROI_VM_REQUIRE_NON_RESIZABLE) << 32, 0,
+                      vmo, 0, PAGE, (uint64_t)&size) == ERR_NOT_SUPPORTED);
+  ((volatile char *)at)[20] = 'x';
+  ((volatile char *)at)[PAGE] = 'y';
+  CHECK(572, sys(CROI_SYS_VMO_SET_SIZE, vmo, 10, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_VMO_GET_SIZE, vmo, (uint64_t)&size, 0, 0, 0) == 0 && size == PAGE &&
+                 sys(CROI_SYS_VMO_GET_STREAM_SIZE, vmo, (uint64_t)&size, 0, 0, 0) == 0 && size == 10 &&
+                 ((volatile char *)at)[20] == 0 &&
+                 sys(CROI_SYS_VMO_READ, vmo, (uint64_t)&byte, PAGE, 1, 0) == ERR_OUT_OF_RANGE &&
+                 sys(CROI_SYS_VMO_SET_SIZE, vmo, 3 * PAGE, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_VMO_READ, vmo, (uint64_t)&byte, PAGE, 1, 0) == 0 && byte == 0);
+  ((volatile char *)at)[2 * PAGE] = 'z';
+  CHECK(573, sys(CROI_SYS_VMO_READ, vmo, (uint64_t)&byte, 2 * PAGE, 1, 0) == 0 && byte == 'z');
+  // Children: resizable only when asked for.
+  CHECK(574, sys6(CROI_SYS_VMO_CREATE_CHILD, vmo, CROI_VMO_CHILD_SNAPSHOT_AT_LEAST_ON_WRITE | CROI_VMO_CHILD_RESIZABLE, 0,
+                  PAGE, (uint64_t)&child, 0) == 0 &&
+                 sys(CROI_SYS_VMO_SET_SIZE, child, 4 * PAGE, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_HANDLE_CLOSE, child, 0, 0, 0, 0) == 0 &&
+                 sys6(CROI_SYS_VMO_CREATE_CHILD, vmo, CROI_VMO_CHILD_SNAPSHOT_AT_LEAST_ON_WRITE, 0, PAGE, (uint64_t)&child,
+                      0) == 0 &&
+                 sys(CROI_SYS_OBJECT_GET_INFO, child, CROI_INFO_HANDLE_BASIC, (uint64_t)&basic, sizeof basic, 0) == 0 &&
+                 !(basic.rights & CROI_RIGHT_RESIZE) &&
+                 sys(CROI_SYS_VMO_SET_SIZE, child, 2 * PAGE, 0, 0, 0) == ERR_UNAVAILABLE);
+  // A resizable pager VMO grows into zeros nobody is asked for, reported
+  // as a dirty zero range until written back.
+  uint32_t pg = 0, port = 0, paged = 0;
+  croi_vmo_dirty_range_t ranges[4];
+  CHECK(575, sys(CROI_SYS_PAGER_CREATE, 0, (uint64_t)&pg, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_PORT_CREATE, 0, (uint64_t)&port, 0, 0, 0) == 0 &&
+                 sys6(CROI_SYS_PAGER_CREATE_VMO, pg, CROI_VMO_CREATE_RESIZABLE, port, 1, PAGE, (uint64_t)&paged) == 0 &&
+                 sys(CROI_SYS_VMO_SET_SIZE, paged, 3 * PAGE, 0, 0, 0) == 0 &&
+                 sys6(CROI_SYS_PAGER_QUERY_DIRTY_RANGES, pg | (uint64_t)paged << 32, 0, 3 * PAGE, (uint64_t)ranges,
+                      sizeof ranges, (uint64_t)counts) == 0 && counts[1] == 1 && ranges[0].offset == PAGE &&
+                 ranges[0].length == 2 * PAGE && ranges[0].options == CROI_VMO_DIRTY_RANGE_IS_ZERO &&
+                 sys(CROI_SYS_VMO_READ, paged, (uint64_t)&byte, 2 * PAGE, 1, 0) == 0 && byte == 0 &&
+                 sys6(CROI_SYS_PAGER_OP_RANGE, pg, CROI_PAGER_OP_WRITEBACK_END, paged, PAGE, 2 * PAGE, 0) == 0 &&
+                 sys6(CROI_SYS_PAGER_QUERY_DIRTY_RANGES, pg | (uint64_t)paged << 32, 0, 3 * PAGE, (uint64_t)ranges,
+                      sizeof ranges, (uint64_t)counts) == 0 && counts[1] == 1 && ranges[0].offset == 2 * PAGE &&
+                 ranges[0].options == 0);  // the page read (committed, dirty) stays
+  sys(CROI_SYS_VMAR_UNMAP, s->vmar, at, 4 * PAGE, 0, 0);
+  uint32_t rest[8] = {vmo, plain, weak, child, fixed, pg, port, paged};
+  sys(CROI_SYS_HANDLE_CLOSE_MANY, (uint64_t)rest, 8, 0, 0, 0);
+  return 0;
+}
+
 // K13b: FIFOs (Zircon's: records into the peer's ring, READABLE /
 // WRITABLE / PEER_CLOSED, user signals to the peer) and
 // vmo_replace_as_executable (a VMEX resource; the handle consumed).
@@ -3911,6 +3982,8 @@ static int64_t extensions(const startup_t *s) {
   if (attached != 0) return attached;
   int64_t stepped = stepping(s);
   if (stepped != 0) return stepped;
+  int64_t resized = resizing(s);
+  if (resized != 0) return resized;
   int64_t random = cprng_checks();
   if (random != 0) return random;
 

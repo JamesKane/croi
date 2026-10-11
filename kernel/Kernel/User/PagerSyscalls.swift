@@ -36,13 +36,14 @@ extension Syscalls {
             guard options & ~(resizable | unbounded | discardable) == 0 else { throw .invalidArgs }
             guard a[4] <= UInt64.max - (page - 1) else { throw .outOfRange }
             if options & discardable != 0 { throw .invalidArgs }
-            // croi has no resizable VMOs (and so none without bounds).
-            if options & (resizable | unbounded) != 0 { throw .notSupported }
+            // K13h: resizable ones now; still none without bounds.
+            if options & unbounded != 0 { throw .notSupported }
             try check(a[5], MemoryLayout<UInt32>.size)
-            let vmo = try Pagers.createVmo(pager.object, port: port.object, key: a[3], size: a[4], trapDirty: trapDirty)
+            let vmo = try Pagers.createVmo(pager.object, port: port.object, key: a[3], size: a[4], trapDirty: trapDirty,
+                                           resizable: options & resizable != 0)
             let out: UInt32
             do throws(Status) {
-                out = try table.add(vmo, rights: VmoObject.defaultRights)
+                out = try table.add(vmo, rights: options & resizable != 0 ? VmoObject.defaultRights | .resize : VmoObject.defaultRights)
             } catch {
                 vmo.release()
                 throw error
@@ -133,6 +134,7 @@ extension Syscalls {
                 var item = croi_vmo_dirty_range_t()
                 item.offset = ranges[i].offset
                 item.length = ranges[i].end - ranges[i].offset
+                item.options = ranges[i].zero ? UInt64(CROI_VMO_DIRTY_RANGE_IS_ZERO) : 0
                 let failed = withUnsafeBytes(of: &item) { unsafe UserCopy.to(a[3] + UInt64(i) * entry, $0.baseAddress!, entry) }
                 guard failed == 0 else { throw .invalidArgs }
                 written += 1

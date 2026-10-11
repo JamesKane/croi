@@ -64,7 +64,7 @@ enum ResourceSelfTest {
             Trace.release()
 
             // vmo_create and mapping rights.
-            let made = try table.add(try VmoObject.create(size: 4 * KernelLayout.pageSize), rights: VmoObject.defaultRights)
+            let made = try table.add(try VmoObject.create(size: 4 * KernelLayout.pageSize).0, rights: VmoObject.defaultRights)
             VmoObject.forMappingReleasing(table, made, (.read | .write))
             let readOnly = try table.replace(made, rights: .basic | .read | .map)
             guard status({ () throws(Status) in _ = try VmoObject.forMapping(table, readOnly, (.read | .write)) }) == .accessDenied,

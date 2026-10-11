@@ -317,6 +317,7 @@ extension Syscalls {
             switch vmo.pointee.kind {
             case .anonymous:
                 flags |= UInt32(CROI_INFO_VMO_TYPE_PAGED)
+                if vmo.pointee.resizable { flags |= UInt32(CROI_INFO_VMO_RESIZABLE) }
                 if vmo.pointee.pager != nil { flags |= UInt32(CROI_INFO_VMO_PAGER_BACKED) }
                 if vmo.pointee.parent != nil { flags |= UInt32(CROI_INFO_VMO_IS_COW_CLONE) }
             case .contiguous:

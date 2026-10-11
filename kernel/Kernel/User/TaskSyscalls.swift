@@ -144,7 +144,8 @@ extension Syscalls {
     private static func vmarMap(_ table: borrowing HandleTable, _ a: InlineArray<6, UInt64>) throws(Status) {
         let options = UInt32(truncatingIfNeeded: a[0] >> 32)
         let perms = UInt32(CROI_VM_PERM_READ | CROI_VM_PERM_WRITE | CROI_VM_PERM_EXECUTE)
-        guard options & ~(perms | UInt32(CROI_VM_SPECIFIC)) == 0 else { throw .invalidArgs }
+        let accepted = UInt32(CROI_VM_SPECIFIC) | UInt32(CROI_VM_REQUIRE_NON_RESIZABLE) | UInt32(CROI_VM_ALLOW_FAULTS)
+        guard options & ~(perms | accepted) == 0 else { throw .invalidArgs }
         let rights = try vmRights(options & perms)
         try check(a[5], 8)
         let vmar = try table.get(UInt32(truncatingIfNeeded: a[0]), type: .vmar, rights: handleRights(rights))
@@ -158,6 +159,7 @@ extension Syscalls {
         }
         let vmo = try VmoObject.forMapping(table, UInt32(truncatingIfNeeded: a[2]), rights)
         defer { vmo.release() }
+        if options & UInt32(CROI_VM_REQUIRE_NON_RESIZABLE) != 0, vmo.pointee.resizable { throw .notSupported }  // K13h
         let mapped = try vm { () throws(VmError) -> UInt64 in
             try Vmo.withBorrowed(vmo) { (borrowed: borrowing Vmo) throws(VmError) -> UInt64 in
                 try UserAspace.withView(v.aspace) { (aspace: borrowing UserAspace) throws(VmError) -> UInt64 in

@@ -27,8 +27,14 @@ struct VmoRecord: ~Copyable {
     }
 
     let kind: Kind
-    /// Bytes, a whole number of pages.
-    let size: UInt64
+    /// Bytes, a whole number of pages. Changes only for a resizable VMO
+    /// (K13h: `Vmo.resize`), under the lock.
+    var size: UInt64
+    var resizable = false
+    /// K13h: a pager VMO's pages from here on (where it grew) are zeros it
+    /// owes nobody: committed zeroed and dirty, not requested (Zircon's
+    /// dirty zero interval); .max: none.
+    var pagerZeroFrom = UInt64.max
     /// Changed only while unmapped (`setCachePolicy`).
     var cache: CachePolicy
     /// Names the VMO in trace records (no kernel addresses there).
@@ -178,9 +184,13 @@ struct VmoRecord: ~Copyable {
                 return nil
             }
             return pointee.lock.withLock { () -> UInt64? in
+                guard offset < pointee.size else { return nil }  // past the end (a resizable VMO, K13h)
                 let present = pointee.pages.lookup(index)
                 if present != 0 { return present }
-                if pointee.pager != nil { return nil }
+                // A pager's page is the pager's to supply, except where the
+                // VMO grew: zeros, dirty (K13h).
+                let grown = pointee.pager != nil && offset >= pointee.pagerZeroFrom
+                if pointee.pager != nil, !grown { return nil }
                 if let account = pointee.account, !account.charge(KernelLayout.pageSize) { return nil }
                 // A child's first touch: what it reads now, copied in.
                 let source = pointee.parent.flatMap { $0.content(at: pointee.parentOffset + offset) }
@@ -201,6 +211,10 @@ struct VmoRecord: ~Copyable {
                     unsafe page.initializeMemory(as: UInt8.self, repeating: 0, count: Int(KernelLayout.pageSize))
                 }
                 pointee.committedPages += 1
+                if grown {
+                    setDirtLocked(offset & ~(KernelLayout.pageSize - 1), PageDirt.dirty)
+                    pointee.modified = true
+                }
                 Trace.event(CROI_TRACE_VM, UInt16(CROI_TK_COMMIT), pointee.traceId, UInt64(index))
                 return phys
             }
@@ -245,6 +259,7 @@ struct VmoRecord: ~Copyable {
             return base + UInt64(index) * KernelLayout.pageSize
         case .anonymous:
             return pointee.lock.withLock { () -> UInt64? in
+                guard offset < pointee.size else { return nil }  // shrunk (K13h)
                 let phys = pointee.pages.lookup(index)
                 return phys == 0 ? nil : phys
             }
@@ -522,6 +537,46 @@ struct Vmo: ~Copyable {
             count += 1
         }
         record.pointee.account?.uncharge(count * KernelLayout.pageSize)
+    }
+
+    /// vmo_set_size (K13h; `newSize` page aligned): a resizable anonymous
+    /// VMO shrinks (the pages past the end unmapped everywhere and freed;
+    /// pinned ones refuse it, .pinned) or grows (the page lists deepened;
+    /// a pager VMO's new range zeros it owes nobody). Pager waiters past
+    /// the new end are woken to find it gone.
+    func resize(_ newSize: UInt64) throws(VmError) {
+        guard case .anonymous = record.pointee.kind, record.pointee.resizable else { throw .notSupported }
+        let page = KernelLayout.pageSize
+        var freed = UniqueArray<UInt64>()
+        let old = try record.pointee.lock.withLock { () throws(VmError) -> UInt64 in
+            let old = record.pointee.size
+            if newSize < old {
+                guard !record.pinnedLocked(newSize, old - newSize) else { throw .pinned }
+                record.pointee.size = newSize  // from here faults and copies past it fail
+                for i in Int(newSize / page)..<Int(old / page) {
+                    let phys = record.pointee.pages.clear(i)
+                    if phys != 0 {
+                        freed.append(phys)
+                        record.pointee.committedPages -= 1
+                    }
+                    if record.pointee.pager != nil { _ = record.pointee.states.clear(i) }
+                }
+                if record.pointee.pagerZeroFrom >= newSize { record.pointee.pagerZeroFrom = .max }
+            } else if newSize > old {
+                let pages = Int(newSize / page)
+                guard record.pointee.pages.grow(toPages: pages),
+                      record.pointee.pager == nil || record.pointee.states.grow(toPages: pages) else { throw .outOfMemory }
+                if record.pointee.pager != nil { record.pointee.pagerZeroFrom = min(record.pointee.pagerZeroFrom, old) }
+                record.pointee.size = newSize
+            }
+            if record.pointee.pager != nil { record.pointee.modified = true }
+            return old
+        }
+        guard newSize < old else { return }
+        record.unmapEverywhere(newSize, old - newSize)
+        for i in 0..<freed.count { pmm.free(freed[i]) }
+        record.pointee.account?.uncharge(UInt64(freed.count) * page)
+        if let source = record.pointee.pager { Pagers.cut(source, at: newSize) }
     }
 
     /// Takes the pages of [offset, offset+size) out of an anonymous VMO

@@ -9,6 +9,8 @@ enum : uint32_t {  // vmar options (Zircon's ZX_VM_*)
   CROI_VM_PERM_WRITE = 1u << 1,
   CROI_VM_PERM_EXECUTE = 1u << 2,
   CROI_VM_SPECIFIC = 1u << 4,
+  CROI_VM_REQUIRE_NON_RESIZABLE = 1u << 11,  // K13h: NOT_SUPPORTED for a resizable VMO
+  CROI_VM_ALLOW_FAULTS = 1u << 12,           // accepted (Zircon doesn't require it either)
   CROI_VM_CAN_MAP_READ = 1u << 7,
   CROI_VM_CAN_MAP_WRITE = 1u << 8,
   CROI_VM_CAN_MAP_EXECUTE = 1u << 9,

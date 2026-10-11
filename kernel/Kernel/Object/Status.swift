@@ -18,6 +18,7 @@ enum Status: Int32, Error, Equatable {
     case notFound = -25
     case alreadyExists = -26
     case alreadyBound = -27
+    case unavailable = -28
     case accessDenied = -30
     case io = -40
     case ioDataIntegrity = -42
@@ -79,6 +80,7 @@ struct Rights: BitFlags {
     static var applyProfile: Rights { Rights(rawValue: 1 << 19) }
     static var manageSocket: Rights { Rights(rawValue: 1 << 20) }
     static var opChildren: Rights { Rights(rawValue: 1 << 21) }
+    static var resize: Rights { Rights(rawValue: 1 << 22) }
     static var attachVmo: Rights { Rights(rawValue: 1 << 23) }
     static var manageVmo: Rights { Rights(rawValue: 1 << 24) }
     /// duplicate/replace: keep the source handle's rights.

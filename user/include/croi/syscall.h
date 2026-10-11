@@ -171,6 +171,7 @@ enum : uint64_t {
   CROI_SYS_PROCESS_READ_MEMORY = 230,   // (process, vaddr, buffer, size, size_t *actual), K13g
   CROI_SYS_PROCESS_WRITE_MEMORY = 231,  // (process, vaddr, buffer, size, size_t *actual): croi.debug_syscalls
   CROI_SYS_TASK_SUSPEND = 232,          // (thread or process, uint32_t *token)
+  CROI_SYS_VMO_SET_SIZE = 233,          // (vmo, size): K13h, a resizable VMO
   CROI_SYS_SYSTEM_POWERCTL = 180,       // (power resource, cmd, const croi_system_powerctl_arg_t *)
 
   // The kernel's CPRNG (K11b; Zircon's): at most CROI_CPRNG_MAX_LEN bytes.

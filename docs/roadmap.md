@@ -822,6 +822,10 @@ THREAD, VMO, maps, handle table) and the NAME property.
   that can be), process_read/write_memory; debugger channels (process and
   job), PROCESS/THREAD_STARTING and THREAD_EXITING, second chance,
   exception reports; single-step and hardware breakpoints (amd64, arm64).
+- **K13h: resizable VMOs.** **Done** (2026-10-11): RESIZABLE for VMOs,
+  snapshot children and pager VMOs, vmo_set_size, mapping past the end,
+  a pager VMO's grown space as dirty zeros. Still not: UNBOUNDED,
+  DISCARDABLE, streams growing their VMO (the pinned tree doesn't either).
 
 ### K13a (agreed with Todhchai, 2026-10-11): VMO slices and ZERO_CHILDREN
 

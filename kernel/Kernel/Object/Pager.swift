@@ -48,6 +48,8 @@ struct PageRange {
     var offset: UInt64
     var end: UInt64
     var dirty: Bool
+    /// query_dirty_ranges: grown space never written (IS_ZERO, K13h).
+    var zero = false
 }
 
 struct PageWaiter: ~Copyable {
@@ -125,7 +127,10 @@ extension VmoPointer {
     func pagerGap(at offset: UInt64) -> (VmoPointer, UInt64)? {
         guard offset < pointee.size, pointee.pager != nil || pointee.readsFromPager else { return nil }
         if lookup(at: offset) != nil { return nil }
-        if pointee.pager != nil { return (self, offset) }
+        if pointee.pager != nil {
+            // Grown space is zeros nobody is asked for (K13h).
+            return offset >= pointee.lock.withLock({ pointee.pagerZeroFrom }) ? nil : (self, offset)
+        }
         guard let parent = pointee.parent else { return nil }
         return parent.pagerGap(at: pointee.parentOffset + offset)
     }
@@ -188,7 +193,7 @@ enum Pagers {
     /// pager_create_vmo's VMO: `size` (rounded to pages) bytes from `pager`,
     /// requests to `port` with `key`. The port reference is the source's.
     static func createVmo(_ pager: ObjectPointer, port: ObjectPointer, key: UInt64, size: UInt64,
-                          trapDirty: Bool) throws(Status) -> ObjectPointer {
+                          trapDirty: Bool, resizable: Bool = false) throws(Status) -> ObjectPointer {
         let pageMask = KernelLayout.pageSize - 1
         let vmo: Vmo
         do throws(VmError) {
@@ -212,6 +217,7 @@ enum Pagers {
             throw .badState
         }
         vmo.record.pointee.pager = source
+        vmo.record.pointee.resizable = resizable
         vmo.record.pointee.states = PageList(pages: vmo.record.pointee.pageCount)
         if size & pageMask != 0 { vmo.record.pointee.streamSize = size }
         return try VmoObject.wrap(vmo.record)
@@ -534,6 +540,17 @@ enum Pagers {
         wakeWaiters(source)
     }
 
+    /// A resizable pager VMO shrank to `end` (K13h): requests past it go,
+    /// and their waiters look again (finding the VMO ends first).
+    static func cut(_ source: PagerSourcePointer, at end: UInt64) {
+        source.pointee.lock.withLock {
+            trimLocked(source, end, .max, dirty: false)
+            trimLocked(source, end, .max, dirty: true)
+            resolveLocked(source) { at, _ in at >= end ? 0 : nil }
+        }
+        wakeWaiters(source)
+    }
+
     /// pager_op_range FAIL after the checks: waiters inside get `status`;
     /// others whose requests overlapped ask again.
     static func fail(_ vmo: VmoPointer, offset: UInt64, length: UInt64, status: Int32) throws(Status) {
@@ -625,6 +642,11 @@ enum Pagers {
                 if vmo.dirtLocked(at) == PageDirt.awaitingClean { vmo.setDirtLocked(at, 0) }
                 at += page
             }
+            // Grown zeros written back (K13h): from now on the pager's.
+            let zeroFrom = vmo.pointee.pagerZeroFrom
+            if offset <= zeroFrom, zeroFrom < offset + length {
+                vmo.pointee.pagerZeroFrom = offset + length >= vmo.pointee.size ? .max : offset + length
+            }
         }
     }
 
@@ -636,12 +658,14 @@ enum Pagers {
         vmo.pointee.lock.withLock {
             var at = offset
             while at < end {
-                let state = vmo.pointee.pages.lookup(Int(at / page)) != 0 ? vmo.dirtLocked(at) : 0
-                if state != 0 {
-                    if ranges.count > 0, ranges[ranges.count - 1].end == at {
+                let present = vmo.pointee.pages.lookup(Int(at / page)) != 0
+                let state = present ? vmo.dirtLocked(at) : 0
+                let zero = !present && at >= vmo.pointee.pagerZeroFrom  // grown, never written (K13h)
+                if state != 0 || zero {
+                    if ranges.count > 0, ranges[ranges.count - 1].end == at, ranges[ranges.count - 1].zero == zero {
                         ranges[ranges.count - 1].end = at + page
                     } else {
-                        ranges.append(PageRange(offset: at, end: at + page, dirty: true))
+                        ranges.append(PageRange(offset: at, end: at + page, dirty: true, zero: zero))
                     }
                 }
                 at += page

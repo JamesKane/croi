@@ -300,7 +300,8 @@ enum Syscalls {
         case 40:  // vmo_create
             try Policy.check(UInt32(CROI_POL_NEW_VMO))
             try check(a[2], MemoryLayout<UInt32>.size)
-            try put(try table.add(try VmoObject.create(size: a[0]), rights: VmoObject.defaultRights), a[2])
+            let (vmo, rights) = try VmoObject.create(size: a[0], options: a[1])
+            try put(try table.add(vmo, rights: rights), a[2])
         case 48:  // vmo_create_child(vmo, options, offset, size, uint32_t *out), K11a
             try VmoObject.createChildCall(a, table)
         case 49:  // vmo_replace_as_executable(vmo, vmex, out), K13b: the handle goes either way
@@ -385,6 +386,8 @@ enum Syscalls {
             try socketCall(number, a, table)
         case 194...201:
             try streamCall(number, a, table)
+        case 233:  // vmo_set_size(vmo, size), K13h
+            try VmoObject.setSize(table, handle, a[1])
         case 230...232:
             try debugCall(number, a, table)
         case 216...219:
@@ -521,7 +524,9 @@ enum Syscalls {
                 try Pagers.ensureWritable(vmo, at, ahead: length - done)  // dirtied (K13d, part 2)
             }
             // Reading a child's untouched page reads its parent's (no copy).
-            guard let phys = toUser ? (vmo.content(at: at) ?? vmo.commit(at: at)) : vmo.commit(at: at) else { throw .noMemory }
+            guard let phys = toUser ? (vmo.content(at: at) ?? vmo.commit(at: at)) : vmo.commit(at: at) else {
+                throw at >= vmo.pointee.size ? .outOfRange : .noMemory  // shrunk meanwhile (K13h)
+            }
             let within = at % KernelLayout.pageSize
             let chunk = min(length - done, KernelLayout.pageSize - within)
             let kernel = KernelLayout.physmap(phys) + within

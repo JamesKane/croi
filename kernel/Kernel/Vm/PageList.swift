@@ -6,7 +6,7 @@ import CKernel
 /// a handful of nodes, not a 128 MiB flat array. Guarded by the VMO lock.
 struct PageList: ~Copyable {
     private var root: UInt64 = 0
-    private let levels: Int
+    private var levels: Int
     private static var fanout: Int { 512 }
 
     init(pages: Int) {
@@ -16,6 +16,23 @@ struct PageList: ~Copyable {
             capacity *= Self.fanout
         }
         self.levels = levels
+    }
+
+    /// Deep enough for `pages` (a resizable VMO growing, K13h): a new
+    /// root over the old one keeps every index where it was. False if a
+    /// node couldn't be allocated.
+    mutating func grow(toPages pages: Int) -> Bool {
+        var capacity = Self.power(levels)
+        while capacity < pages {
+            if root != 0 {
+                guard let node = Self.makeNode() else { return false }
+                Self.slotAt(node, 0).pointee = root
+                root = node
+            }
+            levels += 1
+            capacity = Self.power(levels)
+        }
+        return true
     }
 
     /// The page at `index`, or 0 if not committed.

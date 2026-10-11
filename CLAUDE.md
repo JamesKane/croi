@@ -1522,6 +1522,37 @@ cpu.S `arch_debug_*`; task.h):
   instruction and a hardware breakpoint on a function (QEMU TCG delivers
   both on amd64 and arm64).
 
+Resizable VMOs, K13h (Vmo.swift `resize`, VmoObject `create`/`setSize`,
+PageList `grow`, syscall 233; vmo.h, task.h):
+- vmo_create's options (it ignored them): RESIZABLE (1 << 1); UNBOUNDED
+  NOT_SUPPORTED (with RESIZABLE INVALID_ARGS, first), DISCARDABLE
+  NOT_SUPPORTED, others INVALID_ARGS; an unaligned size is the content
+  size. RESIZE (1 << 22) only on a resizable VMO's handles; snapshot
+  children are resizable with CHILD_RESIZABLE (RESIZE then, never the
+  parent's); pager_create_vmo takes RESIZABLE. ZX_INFO_VMO's RESIZABLE.
+- vmo_set_size (233) in Zircon's order: WRITE; RESIZE if resizable
+  (ACCESS_DENIED); physical/contiguous UNAVAILABLE; rounding overflow
+  OUT_OF_RANGE; not resizable UNAVAILABLE; pinned pages cut off BAD_STATE.
+  `VmoRecord.size` changes under the VMO lock: a shrink frees the pages
+  past it (unmapped everywhere first) and wakes pager waiters there
+  (`Pagers.cut`); a grow deepens the page lists (`PageList.grow`: a new
+  root over the old). The content size becomes the exact size and the last
+  page's tail past it reads zero.
+- Past the end: `commit`/`lookup` refuse it under the lock, so faults fail
+  (fatal page fault), vmo_read/write are OUT_OF_RANGE (also when shrunk
+  meanwhile). An anonymous VMO may be mapped past its end (Zircon's: it
+  may grow); vmar_map takes REQUIRE_NON_RESIZABLE (NOT_SUPPORTED on a
+  resizable VMO) and ALLOW_FAULTS (accepted).
+- A pager VMO's grown space (`pagerZeroFrom`, Zircon's dirty zero
+  interval) is zeros owed to nobody: committed zeroed and dirty when
+  touched, never requested; query_dirty_ranges reports what is untouched
+  there with IS_ZERO; WRITEBACK_END over its start hands it back to the
+  pager.
+- Differences: a snapshot child of a parent that shrinks reads zeros past
+  the cut only while the parent is that small (Zircon clamps it for good);
+  streams still never grow their VMO (the pinned tree's either).
+- Mode 17's `resizing`.
+
 Randomness, K11b (Kernel/Random.swift, syscalls 181-182; handoff v5):
 - The loader reads 32 bytes from EFI_RNG_PROTOCOL if the firmware has
   one (edk2 over virtio-rng: qemu.sh adds `-device virtio-rng-pci`) into

@@ -393,10 +393,14 @@ struct UserAspace: ~Copyable {
 
     // MARK: Helpers (lock held)
 
+    /// An anonymous VMO may be mapped past its end (K13h, Zircon's: it
+    /// may grow; until then a fault there fails); others only inside.
     private func checkMapping(_ vmo: borrowing Vmo, _ offset: UInt64, _ size: UInt64, _ rights: VmRights) throws(VmError) {
         let page = KernelLayout.pageSize
-        guard size > 0, size % page == 0, offset % page == 0, offset <= vmo.size, size <= vmo.size - offset,
-              !rights.isEmpty else { throw .invalidArgument }
+        guard size > 0, size % page == 0, offset % page == 0, !rights.isEmpty,
+              !offset.addingReportingOverflow(size).overflow else { throw .invalidArgument }
+        if case .anonymous = vmo.record.pointee.kind { return }
+        guard offset <= vmo.size, size <= vmo.size - offset else { throw .invalidArgument }
     }
 
     private func region(_ id: UInt32) throws(VmError) -> Region {

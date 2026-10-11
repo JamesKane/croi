@@ -161,3 +161,12 @@ enum : uint32_t {
   CROI_VMAR_OP_PREFETCH = 14,
 };
 
+// Resizable VMOs (K13h): vmo_create's options, the RESIZE right (only a
+// resizable VMO's handles get it), and the info flag
+// (CROI_INFO_VMO_RESIZABLE above).
+enum : uint32_t {
+  CROI_VMO_CREATE_RESIZABLE = 1u << 1,  // = CROI_VMO_RESIZABLE
+  CROI_VMO_CREATE_UNBOUNDED = 1u << 4,  // NOT_SUPPORTED (with RESIZABLE: INVALID_ARGS)
+  CROI_RIGHT_RESIZE = 1u << 22,
+};
+
