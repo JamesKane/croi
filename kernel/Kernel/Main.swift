@@ -201,6 +201,9 @@ func kernel_main_continue() -> Never {
         guard Interrupts.initializeBootCpu(acpi) else { panic("no usable interrupt controller") }
         guard Clock.initialize(acpi) else { panic("no usable clock") }  // interrupts still masked
         Timers.initialize(acpi)
+        #if arch(x86_64)
+        Dmar.initialize(acpi)
+        #endif
         unsafe UnsafePointer<PerCpu>(bitPattern: UInt(Smp.records[0]))!.pointee.interruptsReady
             .store(true, ordering: .releasing)
         arch_interrupts_enable()
@@ -311,6 +314,7 @@ private func runSelfTests(_ console: Uart) {
     ProcessSelfTest.runDrivers(console)
     ProcessSelfTest.runInterrupts(console)
     ProcessSelfTest.runDma(console)
+    ProcessSelfTest.runIommu(console)
     ProcessSelfTest.runMemoryStats(console)
     ProcessSelfTest.runCounters(console)
     ProcessSelfTest.runTimelines(console)

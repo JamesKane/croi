@@ -14,14 +14,20 @@ extension Syscalls {
         case 150:  // iommu_create(resource, type, desc, desc_size, out)
             try check(a[4], MemoryLayout<UInt32>.size)
             try Resources.check(table, handle, system: UInt64(CROI_RSRC_SYSTEM_IOMMU_BASE))
-            if a[3] > 0 { try check(a[2], 1) }
-            try addAndPut(try Dma.createIommu(type: UInt32(truncatingIfNeeded: a[1]), descriptorSize: a[3]),
+            guard a[3] <= UInt64(CROI_IOMMU_MAX_DESC_LEN) else { throw .invalidArgs }
+            guard let copy = unsafe heap.allocate(size: max(Int(a[3]), 1)) else { throw .noMemory }
+            defer { unsafe heap.free(copy) }
+            if a[3] > 0 {
+                guard unsafe UserCopy.from(copy, a[2], a[3]) == 0 else { throw .invalidArgs }
+            }
+            let descriptor = unsafe RawSpan(_unsafeStart: copy, byteCount: Int(a[3]))
+            try addAndPut(try Dma.createIommu(type: UInt32(truncatingIfNeeded: a[1]), descriptor: descriptor),
                           rights: IommuObject.defaultRights, a[4], table)
         case 151:  // bti_create(iommu, options, bti_id, out)
             guard a[1] == 0 else { throw .invalidArgs }
             try check(a[3], MemoryLayout<UInt32>.size)
-            _ = try table.get(handle, type: .iommu)
-            try addAndPut(try Dma.createBti(id: a[2]), rights: BtiObject.defaultRights, a[3], table)
+            let iommu = try table.get(handle, type: .iommu)
+            try addAndPut(try Dma.createBti(iommu.object, id: a[2]), rights: BtiObject.defaultRights, a[3], table)
         case 152:
             try pin(a, table)
         case 153:  // bti_release_quarantine(bti)
@@ -97,7 +103,8 @@ extension Syscalls {
         try check(a[4], Int(count) * 8)
         try check(a[5], MemoryLayout<UInt32>.size)
 
-        let pmt = try Dma.pin(bti.object, vmo: record, offset: offset, size: size)
+        let pmt = try Dma.pin(bti.object, vmo: record, offset: offset, size: size,
+                              writable: options & UInt32(CROI_BTI_PERM_WRITE) != 0)
         do throws(Status) {
             for i in 0..<count {
                 try put(Dma.address(pmt, at: i * page), a[4] + i * 8)

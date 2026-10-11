@@ -118,7 +118,7 @@ enum Objects {
         case .exception: Exceptions.destroy(object)
         case .interrupt: InterruptObjects.destroyObject(object)
         case .msi: Msis.destroy(object)
-        case .iommu: free(object, as: IommuObject.self)
+        case .iommu: Dma.destroyIommu(object)
         case .bti: Dma.destroyBti(object)
         case .pmt: Dma.destroyPmt(object)
         case .counter: free(object, as: CounterObject.self)

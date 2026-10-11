@@ -743,6 +743,34 @@ syscalls 150-156; Todhchai item 14 without an IOMMU):
   depend on where pages land. Not covered: quarantine through process
   death, and a BTI dying with PMTs quarantined.
 
+Intel VT-d, K12a (Kernel/Iommu/IntelIommu.swift, include/dma.h; amd64):
+- `Dmar` reads ACPI's DMAR at boot (its DRHDs); iommu_create(INTEL,
+  zx_iommu_desc_intel_t) needs a register base it lists (NOT_FOUND) and
+  binds one object per unit (ALREADY_BOUND; a unit whose object went can
+  be bound again). `VtdUnit` (heap, never freed): a root table whose
+  buses all point at one shared context table of pass-through entries
+  (ECAP.PT required), translation enabled at creation, register-based
+  invalidation (global context cache, domain-selective IOTLB), a fault
+  event MSI to the boot CPU (`DeviceIrqs.setKernelMsiHandler`: kernel
+  MSIs dispatched without `tableLock`) that logs and counts faults.
+- bti_create(iommu, 0, bdf): `Vtd.attach` claims an endpoint in the
+  unit's scope (whole segment less the listed ones, or the listed ones;
+  one hop only) with a `VtdDomain` (ids from a bitmap; the bus gets a
+  private copy of the context table); RMRRs naming it are identity
+  mapped. Pins reserve IOVAs (first fit from 1 MiB, inside the BTI's
+  window and address bits, which start at the domain's input width),
+  map page by page with the pin's write permission, and the PMT keeps
+  the base; `Dma.release` unmaps (IOTLB invalidated) before unpinning.
+  A dying BTI detaches (not-present context entry: the device is
+  blocked) and then releases its quarantine. Behind an IOMMU,
+  vmo_create_contiguous(bti) doesn't constrain physical placement.
+- Lock order: unitsLock (a Mutex) -> unit -> table, domain -> unit.
+- QEMU amd64 runs `-device intel-iommu,intremap=off` (before edu). Boot
+  test mode 18 (`ProcessSelfTest.runIommu`; startup word 5 is the first
+  DRHD, a driver reads the DMAR itself): edu's DMA engine copies through
+  pinned IOVAs, a write to a read-only and to an unpinned IOVA fault
+  (QEMU prints its own lines for those), re-claim and re-bind.
+
 Counters, K10a (Kernel/Object/Counter.swift, User/CounterSyscalls.swift,
 include/counter.h, syscalls 160-165):
 - Zircon's counter (type 34; create, add, read, write; POSITIVE /

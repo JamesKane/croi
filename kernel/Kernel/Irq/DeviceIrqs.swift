@@ -1,3 +1,4 @@
+import Synchronization
 import CKernel
 
 /// Device interrupts for interrupt objects (K9c): one handler per number
@@ -198,8 +199,32 @@ enum DeviceIrqs {
         }
     }
 
+    /// A kernel-owned MSI's handler (the IOMMU's fault event): a C-convention
+    /// function and its argument.
+    typealias KernelMsiHandler = @convention(c) (UInt64) -> Void
+
+    /// Kernel handlers by (CPU, vector): written once, before the device
+    /// can send the MSI, never removed, read without `tableLock` (their
+    /// owners allocate vectors under their own locks).
+    nonisolated(unsafe) private static var kernelMsis = InlineArray<8, (cpu: Int, vector: UInt32, handler: KernelMsiHandler?, argument: UInt64)>(
+        repeating: (0, 0, nil, 0))
+    private static let kernelMsiCount = Atomic<Int>(0)
+
+    /// Installs a kernel handler for `vector` on `cpu` (from allocateMsi).
+    static func setKernelMsiHandler(cpu: Int, vector: UInt32, _ handler: KernelMsiHandler, _ argument: UInt64) {
+        let index = kernelMsiCount.load(ordering: .relaxed)
+        guard index < kernelMsis.count else { panic("irq: too many kernel MSIs") }
+        kernelMsis[index] = (cpu, vector, handler, argument)
+        kernelMsiCount.store(index + 1, ordering: .releasing)
+    }
+
     /// An MSI arrived on this CPU (interrupt context, before EOI).
     static func dispatchMsi(_ vector: UInt32) {
+        let cpu = Int(Cpu.current)
+        for i in 0..<kernelMsiCount.load(ordering: .acquiring) where kernelMsis[i].cpu == cpu && kernelMsis[i].vector == vector {
+            kernelMsis[i].handler?(kernelMsis[i].argument)
+            return
+        }
         tableLock.withLock {
             guard let handlers = unsafe msiHandlers else { return }
             let object = unsafe handlers[Int(Cpu.current) * Int(msiVectorCount) + Int(vector - msiFirstVector)]

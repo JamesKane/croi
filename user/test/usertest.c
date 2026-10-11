@@ -308,6 +308,7 @@ typedef struct {
   uint64_t code_size;
   uint32_t resource, padding;  // the root resource
   uint32_t bootdata, padding2;  // the boot data VMO (read only)
+  uint64_t drhd;                // amd64: the DMAR's first VT-d unit, or 0
 } startup_t;
 
 #define CHILD_CODE 0x1000000ull
@@ -1884,7 +1885,7 @@ static int64_t dma(const startup_t *s) {
                  sys(CROI_SYS_IOMMU_CREATE, tracing, CROI_IOMMU_TYPE_STUB, (uint64_t)&desc, 1, (uint64_t)&iommu) ==
                      ERR_OUT_OF_RANGE &&
                  sys(CROI_SYS_IOMMU_CREATE, s->resource, CROI_IOMMU_TYPE_INTEL, (uint64_t)&desc, 1, (uint64_t)&iommu) ==
-                     ERR_NOT_SUPPORTED &&
+                     ERR_INVALID_ARGS &&  // shorter than zx_iommu_desc_intel_t
                  sys(CROI_SYS_IOMMU_CREATE, s->resource, 9, (uint64_t)&desc, 1, (uint64_t)&iommu) == ERR_INVALID_ARGS &&
                  sys(CROI_SYS_IOMMU_CREATE, s->resource, CROI_IOMMU_TYPE_STUB, 0, 0, (uint64_t)&iommu) ==
                      ERR_INVALID_ARGS &&
@@ -1999,6 +2000,109 @@ static int64_t dma(const startup_t *s) {
   sys(CROI_SYS_HANDLE_CLOSE, iommu, 0, 0, 0, 0);
   return 0x600D;
 }
+
+#if defined(__x86_64__)
+// Mode 18, K12a: VT-d with QEMU's intel-iommu (its DMAR covers the whole
+// segment; the kernel passes the unit's registers in the startup block,
+// where a driver would read the DMAR) and edu's DMA engine (00:10.0, a
+// 28-bit DMA mask). Through a pinned page and back; then to a read-only
+// IOVA and to an unpinned one, which the IOMMU refuses (the kernel checks
+// it counted the faults). 0x600E: no IOMMU or no edu, skipped.
+static int edu_dma(volatile uint8_t *regs, uint64_t src, uint64_t dst, uint32_t to_ram) {
+  *(volatile uint64_t *)(regs + 0x80) = src;
+  *(volatile uint64_t *)(regs + 0x88) = dst;
+  *(volatile uint64_t *)(regs + 0x90) = 64;
+  *(volatile uint64_t *)(regs + 0x98) = 1 | to_ram << 1;  // start; direction (1: edu to RAM)
+  uint64_t give_up = now_ns() + 2000000000ull;            // edu starts it 100 ms later
+  while (*(volatile uint64_t *)(regs + 0x98) & 1) {
+    if (now_ns() > give_up) return 0;
+    sys(CROI_SYS_NANOSLEEP, now_ns() + 5000000, 0, 0, 0, 0);
+  }
+  return 1;
+}
+
+static int64_t iommu_test(const startup_t *s) {
+  if (s->drhd == 0) return 0x600E;
+  volatile uint8_t *bus = 0;
+  uint32_t bus_vmo = physical_vmo(s, ECAM, 32 * 0x8000, &bus);
+  uint32_t cap = 0;
+  uint32_t edu_at = find_device(bus, ~0u, 0x11e81234, 0x05, &cap);
+  if (edu_at == 0) {
+    sys(CROI_SYS_HANDLE_CLOSE, bus_vmo, 0, 0, 0, 0);
+    return 0x600E;
+  }
+  uint64_t bdf = edu_at >> 15 << 3;  // bus 0, function 0
+  volatile uint8_t *edu = bus + edu_at;
+
+  // The unit: its registers must be the DMAR's; one object at a time.
+  croi_iommu_desc_intel_t desc = {.register_base = s->drhd, .pci_segment = 0, .whole_segment = true};
+  croi_iommu_desc_intel_t elsewhere = desc;
+  elsewhere.register_base += 0x10000;
+  uint32_t iommu = 0, again = 0, bti = 0, bti2 = 0;
+  CHECK(400, sys(CROI_SYS_IOMMU_CREATE, s->resource, CROI_IOMMU_TYPE_INTEL, (uint64_t)&elsewhere, sizeof desc,
+                 (uint64_t)&iommu) == ERR_NOT_FOUND &&
+                 sys(CROI_SYS_IOMMU_CREATE, s->resource, CROI_IOMMU_TYPE_INTEL, (uint64_t)&desc, sizeof desc + 8,
+                     (uint64_t)&iommu) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_IOMMU_CREATE, s->resource, CROI_IOMMU_TYPE_INTEL, (uint64_t)&desc, sizeof desc,
+                     (uint64_t)&iommu) == 0 &&
+                 sys(CROI_SYS_IOMMU_CREATE, s->resource, CROI_IOMMU_TYPE_INTEL, (uint64_t)&desc, sizeof desc,
+                     (uint64_t)&again) == ERR_ALREADY_BOUND);
+  // A device per BTI; no trust-decision record (it is translated).
+  CHECK(401, sys(CROI_SYS_BTI_CREATE, iommu, 0, 0x10000, (uint64_t)&bti, 0) == ERR_OUT_OF_RANGE &&
+                 sys(CROI_SYS_BTI_CREATE, iommu, 0, bdf, (uint64_t)&bti, 0) == 0 &&
+                 sys(CROI_SYS_BTI_CREATE, iommu, 0, bdf, (uint64_t)&bti2, 0) == ERR_ALREADY_BOUND &&
+                 !log_has(s, "no-IOMMU BTI 0x80"));
+  croi_bti_properties_t p = {};
+  CHECK(402, sys(CROI_SYS_OBJECT_GET_INFO, bti, CROI_INFO_BTI_PROPERTIES, (uint64_t)&p, sizeof p, 0) == 0 &&
+                 (p.address_bits == 39 || p.address_bits == 48));
+  croi_bti_properties_t narrow = {.address_bits = 28, .memory_type = CROI_BTI_MEMORY_COHERENT};
+  CHECK(403, sys(CROI_SYS_BTI_SET_PROPERTIES, bti, (uint64_t)&narrow, 0, 0, 0) == 0 &&
+                 bti_info(bti).aspace_size == 1ull << 28);
+
+  // Three pages: a source and a destination pinned read/write, a third
+  // read only. I/O addresses come from the 28-bit window.
+  uint32_t vmo = 0, pmt = 0, pmt_ro = 0;
+  uint64_t addrs[2] = {0, 0}, ro = 0;
+  CHECK(404, sys(CROI_SYS_VMO_CREATE, 3 * PAGE, 0, (uint64_t)&vmo, 0, 0) == 0 &&
+                 bti_pin(bti, CROI_BTI_PERM_READ | CROI_BTI_PERM_WRITE, vmo, 2, 0, 2 * PAGE, addrs, &pmt) == 0 &&
+                 bti_pin(bti, CROI_BTI_PERM_READ, vmo, 1, 2 * PAGE, PAGE, &ro, &pmt_ro) == 0 &&
+                 addrs[0] % PAGE == 0 && addrs[1] == addrs[0] + PAGE && addrs[0] >= 0x100000 &&
+                 ro + PAGE <= 1ull << 28 && addrs[1] + PAGE <= 1ull << 28 && bti_info(bti).pmo_count == 2);
+  uint8_t pattern[64], back[64];
+  for (int i = 0; i < 64; i++) pattern[i] = (uint8_t)(0xA0 + i);
+  volatile uint8_t *regs = 0;
+  uint32_t regs_vmo = physical_vmo(s, bar(edu, 0), PAGE, &regs);
+  uint32_t command = cfg32(edu, 4) & 0xFFFF;
+  cfg32_write(edu, 4, command | 1u << 1 | 1u << 2);  // memory, bus master
+  CHECK(405, sys(CROI_SYS_VMO_WRITE, vmo, (uint64_t)pattern, 0, 64, 0) == 0 &&
+                 edu_dma(regs, addrs[0], 0x40000, 0) && edu_dma(regs, 0x40000, addrs[1], 1) &&
+                 sys(CROI_SYS_VMO_READ, vmo, (uint64_t)back, PAGE, 64, 0) == 0 && back[0] == 0xA0 && back[63] == 0xDF);
+  // Refused: a write to the read-only page, and to the unpinned pages.
+  CHECK(406, edu_dma(regs, 0x40000, ro, 1) && sys(CROI_SYS_VMO_READ, vmo, (uint64_t)back, 2 * PAGE, 64, 0) == 0 &&
+                 back[0] == 0 && back[63] == 0);
+  uint64_t zero[8] = {0};
+  CHECK(407, sys(CROI_SYS_PMT_UNPIN, pmt, 0, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_VMO_WRITE, vmo, (uint64_t)zero, PAGE, 64, 0) == 0 &&
+                 edu_dma(regs, 0x40000, addrs[1], 1) &&
+                 sys(CROI_SYS_VMO_READ, vmo, (uint64_t)back, PAGE, 64, 0) == 0 && back[0] == 0 && back[63] == 0);
+  cfg32_write(edu, 4, command);
+  sys(CROI_SYS_HANDLE_CLOSE, regs_vmo, 0, 0, 0, 0);
+
+  // Quarantined, then the BTI goes: the device is blocked, so the pages
+  // come back; the device can be claimed again, and the unit bound again.
+  CHECK(408, sys(CROI_SYS_HANDLE_CLOSE, pmt_ro, 0, 0, 0, 0) == 0 && bti_info(bti).quarantine_count == 1 &&
+                 sys(CROI_SYS_HANDLE_CLOSE, bti, 0, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_VMO_OP_RANGE, vmo, CROI_VMO_OP_DECOMMIT, 0, 3 * PAGE, 0) == 0 &&
+                 sys(CROI_SYS_BTI_CREATE, iommu, 0, bdf, (uint64_t)&bti, 0) == 0 &&
+                 sys(CROI_SYS_HANDLE_CLOSE, bti, 0, 0, 0, 0) == 0 && sys(CROI_SYS_HANDLE_CLOSE, iommu, 0, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_IOMMU_CREATE, s->resource, CROI_IOMMU_TYPE_INTEL, (uint64_t)&desc, sizeof desc,
+                     (uint64_t)&iommu) == 0 &&
+                 sys(CROI_SYS_HANDLE_CLOSE, iommu, 0, 0, 0, 0) == 0);
+  sys(CROI_SYS_HANDLE_CLOSE, vmo, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, bus_vmo, 0, 0, 0, 0);
+  return 0x600D;
+}
+#endif
 
 // Mode 13: memory statistics (Todhchai's M3 resident-memory budget):
 // ZX_INFO_TASK_STATS on processes, ZX_INFO_KMEM_STATS on the root
@@ -2638,6 +2742,9 @@ __attribute__((section(".text.start"))) [[noreturn]] void _start(uint64_t mode, 
             : mode == 15 ? timelines((const startup_t *)handle)
             : mode == 16 ? deadline_wakeups((const startup_t *)handle)
             : mode == 17 ? extensions((const startup_t *)handle)
+#if defined(__x86_64__)
+            : mode == 18 ? iommu_test((const startup_t *)handle)
+#endif
             : mode >= 0x400 ? child((uint32_t)mode, handle, vdso_base)
                         : objects());
 }

@@ -673,13 +673,36 @@ and futex_requeue (K7c).
   (agreed): under Venus the GPU's memory is the host's; it comes with a
   real GPU's driver.
 
-Not in K11 (after M5 unless Todhchai's order says otherwise): VMO
-children for the dynamic linker, FIFO/socket/stream, the pager and debug
-syscalls (M5 and later); GPU memory accounting syscalls (ext 6, with the
-GPU in M5); VT-d and the other IOMMUs; the GICv3 ITS and RISC-V IMSIC;
+Not in K11 (after M5 unless Todhchai's order says otherwise):
+FIFO/socket/stream, the pager and debug syscalls (M5 and later); GPU
+memory accounting syscalls (ext 6, with the GPU in M5); the IOMMUs (K12
+below); the GICv3 ITS and RISC-V IMSIC;
 the idle governor and frequency floor (ext 11, 12: hardware); rv64
 targeted shootdowns with ASIDs; timer objects cancelled on last close;
 the SMC resource.
+
+### K12: IOMMUs (requirement 14; ahead of Todhchai's hardware milestones)
+
+- **K12a: Intel VT-d.** **Done** (2026-10-11). Zircon's ABI
+  (iommu_create INTEL with zx_iommu_desc_intel_t; the pinned Fuchsia
+  has no Intel driver any more, so the driver follows the VT-d
+  specification). A unit must be one the kernel's DMAR lists; creating
+  it turns translation on with every device pass-through, so stub BTIs
+  keep working. bti_create(iommu, 0, bdf) gives the device its own
+  domain (legacy-mode second-level tables, 3 or 4 levels) with its RMRRs
+  identity mapped; bti_pin maps I/O addresses from the BTI's window with
+  the pin's permissions; unpin unmaps and invalidates the IOTLB before
+  the VMO gets the pages back. A BTI that goes blocks its device, so its
+  quarantined pages are released (with the stub they stay pinned).
+  Faults: the fault event MSI, logged and counted. Tested on QEMU's
+  intel-iommu with edu's DMA engine (boot test mode 18).
+  Not yet: queued invalidation, interrupt remapping (so APIC IDs above
+  255 stay NOT_SUPPORTED for MSI), ATS/device TLBs, scopes behind
+  bridges, large pages in domains, the boot-time decision for devices no
+  driver claims (pass-through today; Zircon blocks them).
+- **K12b and on:** AMD-Vi (this host's IOMMU, so it can be tried on
+  hardware here), SMMUv3 (QEMU's `iommu=smmuv3` is already on arm64's
+  command line; Fuchsia's reference code), the RISC-V IOMMU.
 
 ### After M3 (requirements 14–19 and the remaining extensions)
 - IOMMUs: VT-d first, then AMD-Vi, SMMUv3 (Fuchsia reference code) and

@@ -3,12 +3,25 @@
 // (user/include/croi/syscall.h includes it). Zircon's calls and values
 // (zircon/syscalls/iommu.h, types.h, object.h), plus croi's BTI properties.
 //
-// iommu_create(IOMMU system resource, type, desc, desc_size): only the
-// stub IOMMU so far (type STUB, a one-byte descriptor): its BTIs have no
-// translation, and bti_pin returns physical addresses. Creating such a
-// BTI is a trust decision, so the kernel writes a debuglog record naming
-// the process and BTI id. VT-d, AMD-Vi, SMMUv3 and the RISC-V IOMMU come
-// after M3 (NOT_SUPPORTED).
+// iommu_create(IOMMU system resource, type, desc, desc_size):
+// - STUB (a one-byte descriptor): its BTIs have no translation, and
+//   bti_pin returns physical addresses. Creating such a BTI is a trust
+//   decision, so the kernel writes a debuglog record naming the process
+//   and BTI id.
+// - INTEL (K12a, VT-d): zx_iommu_desc_intel_t for one remapping unit
+//   (DMAR DRHD), its device scopes and its reserved memory (RMRRs), as
+//   user space reads them from ACPI's DMAR; register_base must be a DRHD
+//   the kernel's own DMAR lists (NOT_FOUND), one object per unit
+//   (ALREADY_BOUND). Creating it turns translation on with every device
+//   behind the unit in pass-through, so drivers still on stub BTIs keep
+//   working; bti_create(iommu, 0, bdf) claims a device (bus << 8 | device
+//   << 3 | function, in the unit's scope, else OUT_OF_RANGE): it gets a
+//   domain of its own, bti_pin returns I/O virtual addresses from the
+//   BTI's window and only pinned pages are reachable. When the last
+//   reference to the BTI goes, the device is blocked (no DMA at all), not
+//   returned to pass-through. Faults are logged. Scopes: endpoints one hop
+//   from the host bridge; bridge and deeper scopes are NOT_SUPPORTED yet.
+// - ARM_SMMU: NOT_SUPPORTED yet (as are AMD-Vi and the RISC-V IOMMU).
 //
 // bti_pin(bti | options << 32, vmo | addrs_count << 32, offset, size,
 // addrs, pmt out) pins [offset, offset+size) (page aligned) of the VMO and
@@ -30,12 +43,13 @@
 // uncached memory; never device memory). With no IOMMU, device addresses
 // are physical addresses, so the window is a physical range check.
 #pragma once
+#include <stdbool.h>
 #include <stdint.h>
 
 enum : uint32_t {
   // iommu_create types.
   CROI_IOMMU_TYPE_STUB = 0,
-  CROI_IOMMU_TYPE_INTEL = 1,     // NOT_SUPPORTED yet
+  CROI_IOMMU_TYPE_INTEL = 1,     // VT-d (K12a)
   CROI_IOMMU_TYPE_ARM_SMMU = 2,  // NOT_SUPPORTED yet
   CROI_IOMMU_MAX_DESC_LEN = 4096,
 
@@ -73,3 +87,37 @@ typedef struct {
 
 static_assert(sizeof(croi_info_bti_t) == 32);
 static_assert(sizeof(croi_bti_properties_t) == 24);
+
+// Zircon's zx_iommu_desc_intel_t and its parts (zircon/syscalls/iommu.h).
+enum : uint8_t {
+  CROI_IOMMU_INTEL_SCOPE_ENDPOINT = 0,
+  CROI_IOMMU_INTEL_SCOPE_BRIDGE = 1,  // NOT_SUPPORTED yet
+};
+
+typedef struct {
+  uint8_t type;
+  uint8_t start_bus;    // the first bus the host bridge decodes
+  uint8_t num_hops;     // bridges plus the device (1: a device on start_bus)
+  uint8_t dev_func[5];  // device << 3 | function, per hop
+} croi_iommu_desc_intel_scope_t;
+
+typedef struct {
+  uint64_t base_addr;
+  uint64_t len;
+  uint8_t scope_bytes;  // croi_iommu_desc_intel_scope_t bytes that follow
+  uint8_t _reserved[7];
+} croi_iommu_desc_intel_reserved_memory_t;
+
+typedef struct {
+  uint64_t register_base;  // physical
+  uint16_t pci_segment;
+  bool whole_segment;      // scopes are the devices NOT behind it
+  uint8_t scope_bytes;
+  uint16_t reserved_memory_bytes;
+  uint8_t _reserved[2];
+  // croi_iommu_desc_intel_scope_t scopes[]; then the reserved memory.
+} croi_iommu_desc_intel_t;
+
+static_assert(sizeof(croi_iommu_desc_intel_scope_t) == 8);
+static_assert(sizeof(croi_iommu_desc_intel_reserved_memory_t) == 24);
+static_assert(sizeof(croi_iommu_desc_intel_t) == 16);

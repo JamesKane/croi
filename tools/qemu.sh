@@ -53,8 +53,9 @@ disk=(-drive "if=none,format=raw,file=fat:rw:$esp,id=esp" -device virtio-blk-pci
 
 case $arch in
   amd64)
-    # edu (00:10.0): a PCI device with MSI for the boot test (K9d).
-    qemu=(qemu-system-x86_64 -machine q35 -cpu max -device edu,addr=0x10
+    # edu (00:10.0): a PCI device with MSI (K9d) and DMA for the boot
+    # tests, behind QEMU's VT-d (K12a; before the other devices).
+    qemu=(qemu-system-x86_64 -machine q35 -cpu max -device intel-iommu,intremap=off -device edu,addr=0x10
           -drive "if=pflash,format=raw,readonly=on,file=$edk2/ovmf/OVMF_CODE.fd"
           -drive "if=pflash,format=raw,file=$(vars "$edk2/ovmf/OVMF_VARS.fd" amd64-vars.fd)")
     ;;
