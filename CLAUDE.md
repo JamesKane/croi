@@ -1249,6 +1249,27 @@ in IpcSyscalls, 49 in Syscalls; Todhchai's block, input and GPU rings):
   rights plus EXECUTE; the old handle is gone either way (Zircon's).
 - Mode 17's `fifos_and_exec`.
 
+Sockets, K13c (Kernel/Object/Socket.swift, User/SocketSyscalls.swift,
+syscalls 190-193; ipc.h):
+- Zircon's socket (type 14, ZX_DEFAULT_SOCKET_RIGHTS incl. MANAGE_SOCKET
+  1 << 20), STREAM or DATAGRAM, the pinned tree's error orders and signal
+  rules (its spec, quirks included, is in the K13c roadmap notes): writes
+  fill the peer's buffer (stream: short writes; datagram: all or nothing,
+  OUT_OF_RANGE above capacity); reads (PEEK; a datagram read shorter than
+  the message drops the rest; size 0 consumes nothing); empty: SHOULD_WAIT,
+  BAD_STATE once the peer disabled writing, PEER_CLOSED with no peer;
+  set_disposition (WRITE_DISABLED / WRITE_ENABLED per side, BAD_STATE
+  re-enabling before the old data is read, MANAGE_SOCKET); thresholds
+  (properties 12/13, READ_THRESHOLD / WRITE_THRESHOLD); ZX_INFO_SOCKET
+  (22); user signals to the peer; NEW_SOCKET policy (9).
+- Receive buffers are rings of up to 64 PMM pages (256 KiB; Zircon's is
+  264160), a page allocated when written and freed when drained; a
+  datagram has a 4-byte length in the ring (counted against capacity).
+  The pair shares a `SocketShared` with a blocking `Mutex`, so user copies
+  go straight into and out of the ring (they may fault and page in);
+  lock order mutex -> object.
+- Mode 17's `sockets`.
+
 Randomness, K11b (Kernel/Random.swift, syscalls 181-182; handoff v5):
 - The loader reads 32 bytes from EFI_RNG_PROTOCOL if the firmware has
   one (edk2 over virtio-rng: qemu.sh adds `-device virtio-rng-pci`) into

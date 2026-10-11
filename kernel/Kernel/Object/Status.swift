@@ -73,6 +73,7 @@ struct Rights: BitFlags {
     static var manageProcess: Rights { Rights(rawValue: 1 << 17) }
     static var manageThread: Rights { Rights(rawValue: 1 << 18) }
     static var applyProfile: Rights { Rights(rawValue: 1 << 19) }
+    static var manageSocket: Rights { Rights(rawValue: 1 << 20) }
     static var manageVmo: Rights { Rights(rawValue: 1 << 24) }
     /// duplicate/replace: keep the source handle's rights.
     static var sameRights: Rights { Rights(rawValue: 1 << 31) }
@@ -111,6 +112,7 @@ enum ObjectType: UInt32 {
     case log = 12
     case resource = 15
     case eventpair = 16
+    case socket = 14
     case fifo = 19
     case job = 17
     case vmar = 18

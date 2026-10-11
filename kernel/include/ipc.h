@@ -25,6 +25,34 @@ typedef struct {
   uint32_t handle_count;
 } croi_info_handle_count_t;
 
+// Sockets (K13c, Zircon's): create options, read options, dispositions,
+// signals beyond READABLE/WRITABLE/PEER_CLOSED, threshold properties, info.
+enum : uint32_t {
+  CROI_SOCKET_STREAM = 0,
+  CROI_SOCKET_DATAGRAM = 1u << 0,
+  CROI_SOCKET_PEEK = 1u << 3,
+  CROI_SOCKET_DISPOSITION_WRITE_DISABLED = 1u << 0,
+  CROI_SOCKET_DISPOSITION_WRITE_ENABLED = 1u << 1,
+  CROI_SOCKET_PEER_WRITE_DISABLED = 1u << 4,
+  CROI_SOCKET_WRITE_DISABLED = 1u << 5,
+  CROI_SOCKET_READ_THRESHOLD = 1u << 10,
+  CROI_SOCKET_WRITE_THRESHOLD = 1u << 11,
+  CROI_PROP_SOCKET_RX_THRESHOLD = 12,  // size_t
+  CROI_PROP_SOCKET_TX_THRESHOLD = 13,
+  CROI_INFO_SOCKET = 22,               // croi_info_socket_t (INSPECT)
+};
+
+// zx_info_socket_t.
+typedef struct {
+  uint32_t options;
+  uint8_t padding[4];
+  uint64_t rx_buf_max;
+  uint64_t rx_buf_size;
+  uint64_t rx_buf_available;
+  uint64_t tx_buf_max;
+  uint64_t tx_buf_size;
+} croi_info_socket_t;
+
 // zx_info_vmar_t.
 typedef struct {
   uint64_t base;

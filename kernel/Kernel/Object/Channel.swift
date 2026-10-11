@@ -513,6 +513,7 @@ enum Channels {
     static func signalPeer(_ object: ObjectPointer, clear: UInt32, set: UInt32) throws(Status) {
         let allowed = Signals.user | (object.header.type == .eventpair ? Signals.signaled : 0)
         guard (clear | set) & ~allowed == 0 else { throw .invalidArgs }
+        if object.header.type == .socket { return try Sockets.signalPeer(object, clear: clear, set: set) }
         let shared: PeerSharedPointer
         switch object.header.type {
         case .channel: shared = ChannelPointer(object: object).pointee.shared
@@ -539,6 +540,7 @@ enum Channels {
         case .channel: ChannelPointer(object: object).pointee.peerKoid
         case .eventpair: EventPairPointer(object: object).pointee.peerKoid
         case .fifo: FifoPointer(object: object).pointee.peerKoid
+        case .socket: Sockets.relatedKoid(object)
         default: 0
         }
     }

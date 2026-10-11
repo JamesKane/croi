@@ -2603,6 +2603,89 @@ static void spinner(uint64_t arg) {
 #ifndef ERR_ACCESS_DENIED_
 #define ERR_ACCESS_DENIED_ (-30)
 #endif
+// K13c: sockets (Zircon's): stream and datagram, peek, a full buffer,
+// dispositions, read threshold, ZX_INFO_SOCKET, user signals, peer close.
+static int64_t sockets(const startup_t *s) {
+  uint32_t a = 0, b = 0, observed = 0;
+  uint64_t actual = 0;
+  char buf[16];
+  CHECK(450, sys(CROI_SYS_SOCKET_CREATE, 2, (uint64_t)&a, (uint64_t)&b, 0, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_SOCKET_CREATE, CROI_SOCKET_STREAM, (uint64_t)&a, (uint64_t)&b, 0, 0) == 0 &&
+                 sys(CROI_SYS_OBJECT_WAIT_ONE, a, CROI_SIGNAL_WRITABLE, 0, (uint64_t)&observed, 0) == 0 &&
+                 sys(CROI_SYS_SOCKET_READ, b, 0, (uint64_t)buf, 4, (uint64_t)&actual) == ERR_SHOULD_WAIT);
+  // Stream: bytes, a peek, the rest.
+  CHECK(451, sys(CROI_SYS_SOCKET_WRITE, a, 0, (uint64_t)"abcdefghij", 10, (uint64_t)&actual) == 0 && actual == 10 &&
+                 sys(CROI_SYS_OBJECT_WAIT_ONE, b, CROI_SIGNAL_READABLE, 0, (uint64_t)&observed, 0) == 0 &&
+                 sys(CROI_SYS_SOCKET_READ, b, 0, (uint64_t)buf, 4, (uint64_t)&actual) == 0 && actual == 4 &&
+                 buf[0] == 'a' && buf[3] == 'd' &&
+                 sys(CROI_SYS_SOCKET_READ, b, CROI_SOCKET_PEEK, (uint64_t)buf, 3, (uint64_t)&actual) == 0 &&
+                 actual == 3 && buf[0] == 'e' &&
+                 sys(CROI_SYS_SOCKET_READ, b, 0, (uint64_t)buf, 16, (uint64_t)&actual) == 0 && actual == 6 &&
+                 buf[0] == 'e' && buf[5] == 'j' &&
+                 sys(CROI_SYS_OBJECT_WAIT_ONE, b, CROI_SIGNAL_READABLE, 0, (uint64_t)&observed, 0) == ERR_TIMED_OUT);
+  // Full: 4 KiB writes until SHOULD_WAIT (256 KiB), WRITABLE gone; a read
+  // brings it back.
+  uint32_t vmo = 0;
+  uint64_t chunk = 0, total = 0;
+  CHECK(452, sys(CROI_SYS_VMO_CREATE, PAGE, 0, (uint64_t)&vmo, 0, 0) == 0 &&
+                 sys6(CROI_SYS_VMAR_MAP, s->vmar | (uint64_t)(CROI_VM_PERM_READ | CROI_VM_PERM_WRITE) << 32, 0, vmo, 0,
+                      PAGE, (uint64_t)&chunk) == 0);
+  int64_t status = 0;
+  while ((status = sys(CROI_SYS_SOCKET_WRITE, a, 0, chunk, PAGE, (uint64_t)&actual)) == 0) total += actual;
+  CHECK(453, status == ERR_SHOULD_WAIT && total == 64 * PAGE &&
+                 sys(CROI_SYS_OBJECT_WAIT_ONE, a, CROI_SIGNAL_WRITABLE, 0, (uint64_t)&observed, 0) == ERR_TIMED_OUT &&
+                 sys(CROI_SYS_SOCKET_READ, b, 0, chunk, PAGE, (uint64_t)&actual) == 0 && actual == PAGE &&
+                 sys(CROI_SYS_OBJECT_WAIT_ONE, a, CROI_SIGNAL_WRITABLE, 0, (uint64_t)&observed, 0) == 0);
+  croi_info_socket_t info = {0};
+  CHECK(454, sys(CROI_SYS_OBJECT_GET_INFO, b, CROI_INFO_SOCKET, (uint64_t)&info, sizeof info, 0) == 0 &&
+                 info.rx_buf_size == 63 * PAGE && info.rx_buf_max == 64 * PAGE && info.tx_buf_size == 0);
+  while (sys(CROI_SYS_SOCKET_READ, b, 0, chunk, PAGE, (uint64_t)&actual) == 0) {}
+  // Dispositions: a's writing off (BAD_STATE writing; b's empty reads are
+  // BAD_STATE), then back on.
+  CHECK(455, sys(CROI_SYS_SOCKET_SET_DISPOSITION, a, 3, 0, 0, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_SOCKET_SET_DISPOSITION, a, CROI_SOCKET_DISPOSITION_WRITE_DISABLED, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_SOCKET_WRITE, a, 0, (uint64_t)"x", 1, 0) == ERR_BAD_STATE &&
+                 sys(CROI_SYS_OBJECT_WAIT_ONE, b, CROI_SOCKET_PEER_WRITE_DISABLED, 0, (uint64_t)&observed, 0) == 0 &&
+                 sys(CROI_SYS_SOCKET_READ, b, 0, (uint64_t)buf, 1, 0) == ERR_BAD_STATE &&
+                 sys(CROI_SYS_SOCKET_SET_DISPOSITION, b, 0, CROI_SOCKET_DISPOSITION_WRITE_ENABLED, 0, 0) == 0 &&
+                 sys(CROI_SYS_SOCKET_WRITE, a, 0, (uint64_t)"x", 1, 0) == 0);
+  // Read threshold: READ_THRESHOLD once 3 bytes wait.
+  uint64_t threshold = 3, got = 0;
+  CHECK(456, sys(CROI_SYS_OBJECT_SET_PROPERTY, b, CROI_PROP_SOCKET_RX_THRESHOLD, (uint64_t)&threshold, 8, 0) == 0 &&
+                 sys(CROI_SYS_OBJECT_WAIT_ONE, b, CROI_SOCKET_READ_THRESHOLD, 0, (uint64_t)&observed, 0) == ERR_TIMED_OUT &&
+                 sys(CROI_SYS_SOCKET_WRITE, a, 0, (uint64_t)"yz", 2, 0) == 0 &&
+                 sys(CROI_SYS_OBJECT_WAIT_ONE, b, CROI_SOCKET_READ_THRESHOLD, 0, (uint64_t)&observed, 0) == 0 &&
+                 sys(CROI_SYS_OBJECT_GET_PROPERTY, b, CROI_PROP_SOCKET_RX_THRESHOLD, (uint64_t)&got, 8, 0) == 0 &&
+                 got == 3);
+  // A user signal to the peer; then a gone: b drains, then PEER_CLOSED.
+  CHECK(457, sys(CROI_SYS_OBJECT_SIGNAL_PEER, a, 0, 1u << 24, 0, 0) == 0 &&
+                 sys(CROI_SYS_OBJECT_WAIT_ONE, b, 1u << 24, 0, (uint64_t)&observed, 0) == 0 &&
+                 sys(CROI_SYS_HANDLE_CLOSE, a, 0, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_OBJECT_WAIT_ONE, b, CROI_SIGNAL_PEER_CLOSED, 0, (uint64_t)&observed, 0) == 0 &&
+                 sys(CROI_SYS_SOCKET_WRITE, b, 0, (uint64_t)"x", 1, 0) == ERR_PEER_CLOSED &&
+                 sys(CROI_SYS_SOCKET_READ, b, 0, (uint64_t)buf, 16, (uint64_t)&actual) == 0 && actual == 3 &&
+                 sys(CROI_SYS_SOCKET_READ, b, 0, (uint64_t)buf, 16, (uint64_t)&actual) == ERR_PEER_CLOSED);
+  sys(CROI_SYS_HANDLE_CLOSE, b, 0, 0, 0, 0);
+  // Datagrams: whole messages; a short read drops the rest; a 0-byte read
+  // consumes nothing; too big is OUT_OF_RANGE.
+  CHECK(458, sys(CROI_SYS_SOCKET_CREATE, CROI_SOCKET_DATAGRAM, (uint64_t)&a, (uint64_t)&b, 0, 0) == 0 &&
+                 sys(CROI_SYS_SOCKET_WRITE, a, 0, (uint64_t)"hello", 5, (uint64_t)&actual) == 0 && actual == 5 &&
+                 sys(CROI_SYS_SOCKET_WRITE, a, 0, (uint64_t)"abc", 3, 0) == 0 &&
+                 sys(CROI_SYS_SOCKET_READ, b, 0, 0, 0, (uint64_t)&actual) == 0 && actual == 0 &&
+                 sys(CROI_SYS_OBJECT_GET_INFO, b, CROI_INFO_SOCKET, (uint64_t)&info, sizeof info, 0) == 0 &&
+                 info.rx_buf_size == 8 && info.rx_buf_available == 5 &&
+                 sys(CROI_SYS_SOCKET_READ, b, 0, (uint64_t)buf, 2, (uint64_t)&actual) == 0 && actual == 2 &&
+                 buf[0] == 'h' && buf[1] == 'e' &&
+                 sys(CROI_SYS_SOCKET_READ, b, 0, (uint64_t)buf, 16, (uint64_t)&actual) == 0 && actual == 3 &&
+                 buf[0] == 'a' &&
+                 sys(CROI_SYS_SOCKET_WRITE, a, 0, chunk, 300000, 0) == ERR_OUT_OF_RANGE);
+  sys(CROI_SYS_HANDLE_CLOSE, a, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, b, 0, 0, 0, 0);
+  sys(CROI_SYS_VMAR_UNMAP, s->vmar, chunk, PAGE, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, vmo, 0, 0, 0, 0);
+  return 0;
+}
+
 // K13b: FIFOs (Zircon's: records into the peer's ring, READABLE /
 // WRITABLE / PEER_CLOSED, user signals to the peer) and
 // vmo_replace_as_executable (a VMEX resource; the handle consumed).
@@ -2916,6 +2999,8 @@ static int64_t extensions(const startup_t *s) {
   if (slices != 0) return slices;
   int64_t fifos = fifos_and_exec(s);
   if (fifos != 0) return fifos;
+  int64_t socks = sockets(s);
+  if (socks != 0) return socks;
   int64_t random = cprng_checks();
   if (random != 0) return random;
 

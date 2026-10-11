@@ -137,6 +137,10 @@ enum : uint64_t {
   CROI_SYS_TIMELINE_GET_PAGE = 173,     // (timeline, uint32_t *vmo)
 
   // Power control (K10e; Zircon's, power.h).
+  CROI_SYS_SOCKET_CREATE = 190,         // (options, out0, out1), K13c
+  CROI_SYS_SOCKET_WRITE = 191,          // (socket, options, const void *buffer, size, size_t *actual)
+  CROI_SYS_SOCKET_READ = 192,           // (socket, options, void *buffer, size, size_t *actual)
+  CROI_SYS_SOCKET_SET_DISPOSITION = 193,  // (socket, disposition, disposition_peer)
   CROI_SYS_SYSTEM_POWERCTL = 180,       // (power resource, cmd, const croi_system_powerctl_arg_t *)
 
   // The kernel's CPRNG (K11b; Zircon's): at most CROI_CPRNG_MAX_LEN bytes.

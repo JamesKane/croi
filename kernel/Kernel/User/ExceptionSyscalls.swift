@@ -42,6 +42,14 @@ extension Syscalls {
                 return
             }
             #endif
+            if a[1] == UInt64(CROI_PROP_SOCKET_RX_THRESHOLD) || a[1] == UInt64(CROI_PROP_SOCKET_TX_THRESHOLD) {
+                guard a[3] >= 8 else { throw .bufferTooSmall }
+                guard a[2] != 0 else { throw .invalidArgs }
+                try check(a[2], 8)
+                let socket = try table.get(handle, type: .socket, rights: .getProperty)
+                try put(try Sockets.threshold(socket.object, transmit: a[1] == UInt64(CROI_PROP_SOCKET_TX_THRESHOLD)), a[2])
+                return
+            }
             guard a[1] == UInt64(CROI_PROP_EXCEPTION_STATE) else { throw .notSupported }
             guard a[3] >= 4 else { throw .bufferTooSmall }
             try check(a[2], 4)
@@ -61,6 +69,16 @@ extension Syscalls {
                 return
             }
             #endif
+            if a[1] == UInt64(CROI_PROP_SOCKET_RX_THRESHOLD) || a[1] == UInt64(CROI_PROP_SOCKET_TX_THRESHOLD) {
+                guard a[3] >= 8 else { throw .bufferTooSmall }
+                guard a[2] != 0 else { throw .invalidArgs }
+                var value: UInt64 = 0
+                let copied = withUnsafeMutableBytes(of: &value) { unsafe UserCopy.from($0.baseAddress!, a[2], 8) }
+                guard copied == 0 else { throw .invalidArgs }
+                let socket = try table.get(handle, type: .socket, rights: .setProperty)
+                try Sockets.setThreshold(socket.object, transmit: a[1] == UInt64(CROI_PROP_SOCKET_TX_THRESHOLD), value)
+                return
+            }
             guard a[1] == UInt64(CROI_PROP_EXCEPTION_STATE) else { throw .notSupported }
             guard a[3] >= 4 else { throw .bufferTooSmall }
             var state: UInt32 = 0

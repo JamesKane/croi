@@ -211,6 +211,13 @@ extension Syscalls {
                 try put(Resources.info(resource.object), a[2])
                 return
             }
+            if a[1] == UInt64(CROI_INFO_SOCKET) {  // K13c, INSPECT
+                guard a[3] >= UInt64(MemoryLayout<croi_info_socket_t>.size) else { throw .bufferTooSmall }
+                try check(a[2], MemoryLayout<croi_info_socket_t>.size)
+                let socket = try table.get(handle, type: .socket, rights: .inspect)
+                try put(Sockets.info(socket.object), a[2])
+                return
+            }
             if a[1] == UInt64(CROI_INFO_HANDLE_COUNT) {  // K13a, Zircon's: INSPECT
                 guard a[3] >= UInt64(MemoryLayout<croi_info_handle_count_t>.size) else { throw .bufferTooSmall }
                 try check(a[2], MemoryLayout<croi_info_handle_count_t>.size)
