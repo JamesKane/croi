@@ -130,6 +130,9 @@ enum : uint64_t {
   CROI_SYS_TIMELINE_ADVANCE = 171,      // (timeline, timestamp)
   CROI_SYS_TIMELINE_SET_PERIOD = 172,   // (timeline, period_ns)
   CROI_SYS_TIMELINE_GET_PAGE = 173,     // (timeline, uint32_t *vmo)
+
+  // Power control (K10e; Zircon's, power.h).
+  CROI_SYS_SYSTEM_POWERCTL = 180,       // (power resource, cmd, const croi_system_powerctl_arg_t *)
 };
 
 enum : uint32_t {  // timer_create options (Zircon's ZX_TIMER_SLACK_*)
@@ -153,6 +156,7 @@ enum : uint32_t {  // timer_create options (Zircon's ZX_TIMER_SLACK_*)
 #include "dma.h"      // IOMMU types, bti_pin options, BTI info and properties
 #include "counter.h"  // counter signals, value waits
 #include "timeline.h" // display timelines, their page
+#include "power.h"    // system_powerctl commands, croi_system_powerctl_arg_t
 
 enum : uint64_t {  // CROI_SYS_TRACE_CONFIGURE ops
   CROI_TRACE_OP_START = 0,   // a: categories, b: pages per CPU, c: mode;

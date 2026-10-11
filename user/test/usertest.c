@@ -2385,8 +2385,40 @@ static int64_t extensions(const startup_t *s) {
     if (taken != ERR_ALREADY_BOUND) break;
   }
   CHECK(399, taken == 0 && sys(CROI_SYS_JOB_SET_CPU_RESERVATION, other, s->resource, 0, 0, 0) == 0);
-  uint32_t handles[] = {port, deadline, log, other, tracing};
-  for (int i = 0; i < 5; i++) sys(CROI_SYS_HANDLE_CLOSE, handles[i], 0, 0, 0, 0);
+  // system_powerctl's refusals (K10e; the real thing ends the boot, under
+  // userboot.shutdown=): the resource, then the command, then its argument.
+  uint32_t power = 0;
+  CHECK(400, resource_create(s->resource, CROI_RSRC_KIND_SYSTEM, CROI_RSRC_SYSTEM_POWER_BASE, 1, &power) == 0 &&
+                 sys(CROI_SYS_SYSTEM_POWERCTL, tracing, CROI_SYSTEM_POWERCTL_REBOOT, 0, 0, 0) == ERR_OUT_OF_RANGE &&
+                 sys(CROI_SYS_SYSTEM_POWERCTL, power, 0, 0, 0, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_SYSTEM_POWERCTL, s->resource, 10, 0, 0, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_SYSTEM_POWERCTL, power, CROI_SYSTEM_POWERCTL_ENABLE_ALL_CPUS, 0, 0, 0) == ERR_NOT_SUPPORTED &&
+                 sys(CROI_SYS_SYSTEM_POWERCTL, power, CROI_SYSTEM_POWERCTL_REBOOT_BOOTLOADER, 0, 0, 0) ==
+                     ERR_NOT_SUPPORTED);
+  croi_system_powerctl_arg_t s_state;
+  zero_bytes(&s_state, sizeof s_state);
+  s_state.acpi_transition_s_state.target_s_state = 3;
+#if defined(__x86_64__)
+  // amd64 needs \_S5's values: SHUTDOWN alone can't, suspend isn't there.
+  CHECK(401, sys(CROI_SYS_SYSTEM_POWERCTL, power, CROI_SYSTEM_POWERCTL_SHUTDOWN, 0, 0, 0) == ERR_NOT_SUPPORTED &&
+                 sys(CROI_SYS_SYSTEM_POWERCTL, power, CROI_SYSTEM_POWERCTL_ACPI_TRANSITION_S_STATE, 0x10, 0, 0) ==
+                     ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_SYSTEM_POWERCTL, power, CROI_SYSTEM_POWERCTL_ACPI_TRANSITION_S_STATE,
+                     (uint64_t)&s_state, 0, 0) == ERR_NOT_SUPPORTED);
+  s_state.acpi_transition_s_state.target_s_state = 5;
+  s_state.acpi_transition_s_state.sleep_type_b = 8;
+  CHECK(402, sys(CROI_SYS_SYSTEM_POWERCTL, power, CROI_SYSTEM_POWERCTL_ACPI_TRANSITION_S_STATE,
+                 (uint64_t)&s_state, 0, 0) == ERR_INVALID_ARGS);
+  s_state.acpi_transition_s_state.target_s_state = 6;
+  s_state.acpi_transition_s_state.sleep_type_b = 0;
+  CHECK(403, sys(CROI_SYS_SYSTEM_POWERCTL, power, CROI_SYSTEM_POWERCTL_ACPI_TRANSITION_S_STATE,
+                 (uint64_t)&s_state, 0, 0) == ERR_INVALID_ARGS);
+#else
+  CHECK(401, sys(CROI_SYS_SYSTEM_POWERCTL, power, CROI_SYSTEM_POWERCTL_ACPI_TRANSITION_S_STATE,
+                 (uint64_t)&s_state, 0, 0) == ERR_NOT_SUPPORTED);
+#endif
+  uint32_t handles[] = {port, deadline, log, other, tracing, power};
+  for (int i = 0; i < 6; i++) sys(CROI_SYS_HANDLE_CLOSE, handles[i], 0, 0, 0, 0);
   return 0x600D;
 }
 

@@ -125,6 +125,8 @@ uint64_t arch_current_el(void);
 // Assembly (arch/amd64/start.S). Port I/O, which Swift cannot express.
 uint8_t arch_inb(uint16_t port);
 void arch_outb(uint16_t port, uint8_t value);
+uint16_t arch_inw(uint16_t port);
+void arch_outw(uint16_t port, uint16_t value);
 
 // Assembly (arch/amd64/exceptions.S). The page-fault linear address.
 uint64_t arch_read_cr2(void);

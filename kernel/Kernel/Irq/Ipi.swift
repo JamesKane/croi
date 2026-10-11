@@ -15,6 +15,8 @@ enum Ipi {
     static var call: UInt32 { 1 << 0 }
     /// Run the scheduler when the interrupt returns.
     static var reschedule: UInt32 { 1 << 1 }
+    /// Halt for good (power off and reset, K10e).
+    static var stop: UInt32 { 1 << 2 }
 
     typealias Function = @convention(c) (UInt64) -> Void
 
@@ -92,6 +94,29 @@ enum Ipi {
         return targets
     }
 
+    private static let stopped = Atomic<Int>(0)
+
+    /// Halts every other ready CPU (interrupts masked, for good) and waits
+    /// up to `patience` ns for them to stop. Returns how many did; a CPU
+    /// running masked for longer is left running. No coming back.
+    static func stopOthers(patience: UInt64) -> Int {
+        let saved = arch_interrupts_save()
+        defer { arch_interrupts_restore(saved) }
+        let me = Cpu.current
+        var targets = 0
+        for i in 0..<Smp.count where UInt32(i) != me && isReady(i) {
+            let record = unsafe UnsafePointer<PerCpu>(bitPattern: UInt(Smp.records[i]))!
+            _ = unsafe record.pointee.ipiPending.bitwiseOr(stop, ordering: .releasing)
+            unsafe Interrupts.sendIpi(record)
+            targets += 1
+        }
+        let deadline = Clock.now() + patience
+        while stopped.load(ordering: .acquiring) < targets && Clock.now() < deadline {
+            arch_spin_pause()
+        }
+        return stopped.load(ordering: .acquiring)
+    }
+
     /// The IPI interrupt handler.
     static func handle() {
         drainThisCpu()
@@ -106,6 +131,10 @@ enum Ipi {
         if pending & call != 0, let function {
             function(argument)
             remaining.subtract(1, ordering: .releasing)
+        }
+        if pending & stop != 0 {
+            stopped.add(1, ordering: .releasing)
+            arch_halt()
         }
         if pending & reschedule != 0 {
             Scheduler.requestPreemption()

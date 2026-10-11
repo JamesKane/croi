@@ -8,7 +8,8 @@ import CroiRuntime
 /// into a new process (read-only segments mapped straight from the bootfs
 /// VMO, writable ones copied, a stack from PT_GNU_STACK), hands it
 /// everything userboot was given in a processargs message, starts it and
-/// reports when it exits.
+/// reports when it exits; with `userboot.shutdown=` it then powers the
+/// machine off or resets it.
 @main
 struct Userboot {
     struct Failure: Error {
@@ -38,6 +39,16 @@ struct Userboot {
         let bootfs = croi_take_startup_handle(croi_pa_hnd(UInt32(CROI_PA_VMO_BOOTFS), 0))
         guard job != 0, resource != 0, bootfs != 0 else { throw Failure(what: "taking startup handles", status: -11) }
         let next = option("userboot.next=") ?? bytes(defaultNext)
+        // userboot.shutdown= (Power.swift) needs the root resource and the
+        // boot data after they have gone to the program.
+        let shutdown = option("userboot.shutdown=")
+        var keptResource: UInt32 = 0
+        var keptBootData: UInt32 = 0
+        let sameRights: UInt64 = 1 << 31
+        if shutdown != nil {
+            try call("keeping the root resource", sys(CROI_SYS_HANDLE_DUPLICATE, UInt64(resource), sameRights,
+                                                      address(&keptResource)))
+        }
 
         var size: UInt64 = 0
         try call("sizing bootfs", sys(CROI_SYS_VMO_GET_SIZE, UInt64(bootfs), address(&size)))
@@ -104,7 +115,6 @@ struct Userboot {
         var processCopy: UInt32 = 0
         var threadCopy: UInt32 = 0
         var log: UInt32 = 0
-        let sameRights: UInt64 = 1 << 31
         try call("duplicating handles", sys(CROI_SYS_HANDLE_DUPLICATE, UInt64(process), sameRights, address(&processCopy)))
         try call("duplicating handles", sys(CROI_SYS_HANDLE_DUPLICATE, UInt64(thread), sameRights, address(&threadCopy)))
         try call("creating its stdout", sys(CROI_SYS_DEBUGLOG_CREATE, 0, 0, address(&log)))
@@ -122,6 +132,10 @@ struct Userboot {
             let info = croi_pa_hnd(UInt32(type), 0)
             let ranged = croi_take_startup_handle(info)
             if ranged != 0 {
+                if type == CROI_PA_VMO_BOOTDATA, shutdown != nil {
+                    try call("keeping the boot data", sys(CROI_SYS_HANDLE_DUPLICATE, UInt64(ranged), sameRights,
+                                                          address(&keptBootData)))
+                }
                 handles.append(ranged)
                 infos.append(info)
             }
@@ -151,6 +165,7 @@ struct Userboot {
         say("userboot: ")
         write(next)
         print(" exited with \(info.return_code)")
+        if let shutdown { try Power.act(shutdown, resource: keptResource, bootData: keptBootData) }
     }
 
     /// Maps one PT_LOAD segment of the program at `file` in bootfs: one

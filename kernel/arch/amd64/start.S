@@ -145,3 +145,22 @@ arch_outb:
     outb    %al, %dx
     ret
 .size arch_outb, . - arch_outb
+
+// uint16_t arch_inw(uint16_t port)
+.globl arch_inw
+.type arch_inw, @function
+arch_inw:
+    mov     %edi, %edx
+    inw     %dx, %ax
+    ret
+.size arch_inw, . - arch_inw
+
+// void arch_outw(uint16_t port, uint16_t value)
+.globl arch_outw
+.type arch_outw, @function
+arch_outw:
+    mov     %edi, %edx
+    mov     %esi, %eax
+    outw    %ax, %dx
+    ret
+.size arch_outw, . - arch_outw

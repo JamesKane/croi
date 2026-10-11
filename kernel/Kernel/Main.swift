@@ -240,6 +240,7 @@ func kernel_main_continue() -> Never {
             console.write("none in the GTDT\n")
         }
         Pmu.initialize(acpi)
+        Power.initialize(acpi)
         console.write("  topo:   ")
         if CpuTopologies.placeAll(acpi) {
             console.write(decimal: UInt64(CpuTopologies.distinct { $0.package }))

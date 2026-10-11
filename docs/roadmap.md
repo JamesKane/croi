@@ -598,7 +598,14 @@ if K10 splits (nothing else in M4 depends on it).
   sched and ipc records); and debuglog flow control, or a readable
   position of the last record the dumper printed, so Todhchai's trace
   export through the debuglog stops pacing itself by a guess (its M3f).
-- **K10e: power control (M4's shutdown < 500 ms).** Zircon's
+- **K10e: power control (M4's shutdown < 500 ms).** **Done**
+  (2026-10-11): syscall 180, power.h; the kernel's part ~20-180 µs under
+  KVM (`power.shutdown_kernel`, limit 10 ms), the debuglog's drain to the
+  console reported apart (`power.log_drain`, ~25 ms of queued lines over
+  KVM serial; on a 115200-baud UART a backlog costs far more, so M4's
+  shutdown path should keep its last words short). amd64's plain SHUTDOWN
+  is NOT_SUPPORTED: \_S5 comes from user space, as agreed. Croi's boots
+  now end with `userboot.shutdown=poweroff`. Zircon's
   `system_powerctl` under the power system resource: shutdown and reboot.
   amd64 takes the S5 sleep-type values from user space's AML (Zircon's
   ACPI_TRANSITION_S_STATE) and writes PM1a/b control (FADT), with the

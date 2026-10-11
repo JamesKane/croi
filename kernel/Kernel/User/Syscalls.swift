@@ -318,6 +318,8 @@ enum Syscalls {
             try dmaCall(number, a, table)
         case 160...179:
             try counterCall(number, a, table)
+        case 180:  // system_powerctl
+            try Power.call(a, table)
         case 120...129:
             try Profiles.call(number, a, table)
         case 110...119:

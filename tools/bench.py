@@ -68,6 +68,8 @@ RULES = {
     "boot.userboot_start_selftests": (0.25, 300_000_000),
     "edf.deadline_misses": (0.0, 0.5),
     "edf.worst_wake": (0.50, 20_000),
+    "power.shutdown_kernel": (0.50, 1_000_000),
+    "power.log_drain": (0.50, 20_000_000),
 }
 DEFAULT_RULE = (0.25, 0)
 WINDOW = 5
@@ -118,7 +120,11 @@ def boot(build, profile, label, index, any_exit=False):
     os.makedirs(work, exist_ok=True)
     log = os.path.join(OUT, "logs", f"{label}-{profile}-{index}.log")
     tree = os.path.dirname(os.path.dirname(os.path.abspath(build)))
-    result = run([os.path.join(tree, "tools", "qemu.sh"), "--test", DONE, "amd64", esp, work, edk2_dir(build),
+    qemu = os.path.join(tree, "tools", "qemu.sh")
+    # Trees from K10e on power off after m2 and report the kernel's part.
+    with open(qemu) as f:
+        exits = ["--exits"] if "--exits" in f.read() and any(w.startswith("userboot.shutdown=") for w in words) else []
+    result = run([qemu, "--test", DONE, *exits, "amd64", esp, work, edk2_dir(build),
                   "-accel", "kvm", "-cpu", "host"], cwd=tree, log=log)
     if result.returncode != 0 or (not any_exit and f"{DONE} 0" not in result.stdout):
         fail(f"{label} {profile} boot {index} didn't finish; see {log}")

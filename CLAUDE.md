@@ -838,6 +838,38 @@ log.h; Todhchai ext 3 and 8, its trace export):
   back out of the port (`Ports.unqueue`); it used to wait for a reader
   that might never come, keeping the port alive.
 
+Power control, K10e (Kernel/Power.swift, include/power.h, syscall 180;
+Todhchai M4's shutdown):
+- `system_powerctl(resource, cmd, arg)`: Zircon's commands and
+  zx_system_powerctl_arg_t, under the power system resource (base 5) or
+  root. SHUTDOWN / REBOOT / ACPI_TRANSITION_S_STATE(S5) check that the
+  machine can, then give the debuglog up to 100 ms to reach the console,
+  halt the other CPUs (`Ipi.stopOthers`, a mailbox kind that halts
+  masked), print `croi kernel: powering off` / `rebooting` and budget
+  `power.shutdown_kernel` / `power.reboot_kernel` (syscall entry to the
+  hardware write, less the console wait: KVM ~20-180 µs, limit 10 ms)
+  and `power.log_drain` (the wait itself: KVM ~25 ms of m2's last lines,
+  a serial byte per VM exit), and act; failure after that halts. Everything else
+  (suspend, hotplug, PL1, bootloader/recovery) is NOT_SUPPORTED.
+- amd64: no SHUTDOWN (NOT_SUPPORTED): user space passes \_S5's sleep
+  types (ACPI_TRANSITION_S_STATE, target 5), written to PM1a/b control
+  (SLP_TYP, then SLP_EN) or the hardware-reduced sleep control register;
+  system I/O registers only. Reboot: FADT reset register, then 0xCF9,
+  then the 8042. arm64: PSCI SYSTEM_OFF / SYSTEM_RESET (FADT conduit).
+  rv64: SBI SRST, legacy shutdown as fallback.
+- `userboot.shutdown=poweroff|reboot` (user/userboot/Power.swift): after
+  its program exits, userboot powers off or resets (it keeps duplicates
+  of the root resource and boot data for it; on amd64 it finds `\_S5`
+  by scanning the DSDT bytes, no AML). The build's cmdline has
+  `CROI_USERBOOT_SHUTDOWN` (default poweroff), so boot tests pass
+  `qemu.sh --exits`: after the expected line QEMU must exit by itself
+  (boot-smoke doesn't: its screendump is taken at that line).
+  `boot-reboot` (lean) expects the reset; test runs use -no-reboot.
+  With --screendump, qemu.sh adds `-action shutdown=pause` so the screen
+  can still be read after the guest powers off.
+  bench.py passes --exits to trees that support it and records the budget.
+- Boot test mode 17 checks the refusals.
+
 Memory statistics (Todhchai's M3 resident-memory budget; task.h,
 resource.h, UserAspace.taskStats, Kernel/Object/KernelMemory.swift):
 - object_get_info(process, CROI_INFO_TASK_STATS = 12 | 1 << 28, or _V1 =

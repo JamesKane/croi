@@ -16,6 +16,7 @@ add_library(kernel-swift OBJECT
   Kernel/KernelStack.swift
   Kernel/Main.swift
   Kernel/Panic.swift
+  Kernel/Power.swift
   Kernel/Pmm.swift
   Kernel/Ref.swift
   Kernel/Smp.swift
@@ -144,6 +145,7 @@ croi_user_program(${_swift_test} SWIFT ${_user_dir}/test/swift/Main.swift)
 set(_userboot ${CMAKE_CURRENT_BINARY_DIR}/userboot.elf)
 croi_user_program(${_userboot}
   SWIFT ${_user_dir}/userboot/Main.swift ${_user_dir}/userboot/Bootfs.swift
+        ${_user_dir}/userboot/Power.swift
         ${PROJECT_SOURCE_DIR}/lib/elf/Elf/ElfImage.swift)
 set_source_files_properties(userprogram.S PROPERTIES
   OBJECT_DEPENDS "${_user_bin};${_vdso_bin};${_swift_test};${_userboot}"

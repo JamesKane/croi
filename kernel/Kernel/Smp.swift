@@ -163,6 +163,10 @@ struct PsciConduit {
     var available = false
     var useHvc = false
 
+    static var unavailable: PsciConduit { PsciConduit() }
+
+    private init() {}
+
     init(_ acpi: AcpiTables) {
         #if arch(arm64)
         guard let fadt = acpi.table("FACP") else { return }

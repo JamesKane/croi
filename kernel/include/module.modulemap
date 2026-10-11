@@ -18,6 +18,7 @@ module CroiAbi {
   header "dma.h"
   header "counter.h"
   header "timeline.h"
+  header "power.h"
   export *
 }
 

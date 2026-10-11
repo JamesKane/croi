@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # Boot a croi EFI system partition under QEMU with edk2 firmware.
 #
-#   qemu.sh [--test <text>] [--screendump <file.ppm>] [--registers-on <text>] <amd64|arm64|rv64> <esp-dir> <work-dir> <edk2-dir> [qemu args...]
+#   qemu.sh [--test <text>] [--exits] [--screendump <file.ppm>] [--registers-on <text>] <amd64|arm64|rv64> <esp-dir> <work-dir> <edk2-dir> [qemu args...]
 #
 # The ESP directory is served as a virtual FAT drive. Writable firmware
 # variable stores are copied into <work-dir> on first use. With --test the
 # run is headless and console output is copied to stdout; it succeeds as
 # soon as a line containing <text> appears and fails after a timeout. With
+# --exits (test mode only) the run goes on after that line until QEMU exits
+# by itself (a guest power-off, or a reset: test runs pass -no-reboot), and
+# fails if it doesn't within the timeout. With
 # --screendump (test mode only) the display is saved as a PPM at that point.
 # With --registers-on (test mode only), the first line containing that text
 # prints every CPU's PC and frame-pointer backtrace (qemu-monitor.py): where
@@ -15,11 +18,13 @@
 set -euo pipefail
 
 expect=
+exits=
 screendump=
 registers_on=
 while [[ ${1:-} == --* ]]; do
   case $1 in
     --test) expect=${2:?--test needs the text to wait for}; shift 2 ;;
+    --exits) exits=1; shift ;;
     --screendump) screendump=${2:?--screendump needs a file}; shift 2 ;;
     --registers-on) registers_on=${2:?--registers-on needs the text to wait for}; shift 2 ;;
     *) echo "qemu.sh: unknown option $1" >&2; exit 2 ;;
@@ -85,7 +90,11 @@ if [[ -n $expect ]]; then
     rm -f "$socket"
     monitor=(-monitor "unix:$socket,server=on,wait=off")
   fi
+  # A guest power-off pauses QEMU instead of ending it, so the screen can
+  # still be read once the line is seen.
+  [[ -n $screendump ]] && monitor+=(-action shutdown=pause)
   coproc vm { exec timeout 90 "${qemu[@]}" -display none -serial stdio "${monitor[@]}" -no-reboot "$@" 2>&1; }
+  pid=$vm_PID  # bash unsets vm_PID when the coproc ends
   status=1
   while IFS= read -r line <&"${vm[0]}"; do
     printf '%s\n' "$line"
@@ -108,9 +117,20 @@ if [[ -n $expect ]]; then
       break
     fi
   done
-  kill "$vm_PID" 2>/dev/null || true
-  wait "$vm_PID" 2>/dev/null || true
-  (( status == 0 )) || echo "qemu.sh: '$expect' not seen" >&2
+  if (( status != 0 )); then
+    echo "qemu.sh: '$expect' not seen" >&2
+  elif [[ -n $exits ]]; then
+    # The rest of the console, until QEMU exits (EOF) or the timeout kills it.
+    while IFS= read -r line <&"${vm[0]}"; do printf '%s\n' "$line"; done
+    wait "$pid" 2>/dev/null && exited=0 || exited=$?
+    if (( exited != 0 )); then
+      echo "qemu.sh: QEMU didn't exit by itself (status $exited)" >&2
+      status=1
+    fi
+    exit $status
+  fi
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
   exit $status
 else
   exec "${qemu[@]}" -nographic "$@"
