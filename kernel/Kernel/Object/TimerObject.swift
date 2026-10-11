@@ -20,8 +20,10 @@ struct TimerObject: ~Copyable {
     var armedCpu = -1
     /// The kernel timer a cancel IPI is for.
     var cancelId: UInt32 = 0
-    /// One set or cancel at a time.
-    let configuring = Atomic<Bool>(false)
+    /// One set or cancel at a time: a blocking lock (it waits for a cancel
+    /// IPI), so a deadline thread waits by lending its profile, not by
+    /// yielding (a yield ends its period: a period's wait per try).
+    let configuring = Mutex()
 
     static var defaultRights: Rights { [.basic, .write, .signal] }
 }
@@ -88,10 +90,7 @@ enum TimerObjects {
     }
 
     private static func configure<R>(_ timer: TimerObjectPointer, _ body: () -> R) -> R {
-        while timer.pointee.configuring.exchange(true, ordering: .acquiring) { Scheduler.yield() }
-        let result = body()
-        timer.pointee.configuring.store(false, ordering: .releasing)
-        return result
+        timer.pointee.configuring.withLock(body)
     }
 
     /// Disarms the current set, if any (configuring held).

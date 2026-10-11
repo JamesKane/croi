@@ -98,6 +98,10 @@ enum Scheduler {
     nonisolated(unsafe) private static var zombies = QueueHead()
     /// Threads waiting in `join` (woken whenever a joinable thread dies).
     nonisolated(unsafe) private static var exitWaiters = QueuePointer(address: 0)
+    /// Process teardowns waiting for their exited threads to leave the
+    /// address space (`waitForLeavers`); woken as each dead thread's CPU
+    /// finishes switching away from it.
+    nonisolated(unsafe) private static var leaverWaiters = QueuePointer(address: 0)
     private static let started = Atomic<Bool>(false)
     /// Thread records allocated and not yet freed (idle threads included).
     static let threadCount = Atomic<Int>(0)
@@ -117,6 +121,7 @@ enum Scheduler {
     /// Every CPU's capacity starts from its core type.
     static func initializeBootCpu(stack: StackRange) {
         exitWaiters = QueuePointer.allocate()
+        leaverWaiters = QueuePointer.allocate()
         idlePollWindow = (BootOptions.number(after: "croi.idle_poll_us=") ?? (underHypervisor ? 200 : 0)) * 1000
         var estimates = InlineArray<64, UInt64>(repeating: 1024)
         var biggest: UInt64 = 1
@@ -270,6 +275,19 @@ enum Scheduler {
             }
         }
         return result
+    }
+
+    /// Blocks until no thread is in `aspace` and no CPU has it loaded (a
+    /// process teardown, after its last thread). Exited threads leave as
+    /// their CPUs switch away (`finishSwitch` wakes the waiters). It used to
+    /// spin on `yield`, which ends a deadline thread's period each time:
+    /// a period's wait per round.
+    static func waitForLeavers(_ aspace: UserAspacePointer) {
+        locked {
+            while aspace.pointee.threads != 0 || aspace.pointee.activeCpus.load(ordering: .acquiring) != 0 {
+                _ = block(on: leaverWaiters, deadline: .max)
+            }
+        }
     }
 
     /// Context switches CPU `cpu` has made (read racily; CPU stats).
@@ -1504,6 +1522,7 @@ enum Scheduler {
         cpus[me].previous = nil
         if previous.pointee.state == .dead {
             previous.pointee.switchedOut = true
+            if !leaverWaiters.pointee.isEmpty { wakeAll(leaverWaiters) }
             if previous.pointee.detached {
                 zombies.push(previous)
             } else {

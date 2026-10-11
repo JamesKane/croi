@@ -337,10 +337,7 @@ enum Processes {
         if let record = aspace?.record {
             // Threads that exited before the last one may not have left yet
             // (one may even be waiting to run on this CPU): let them.
-            while Scheduler.locked({ record.pointee.threads }) != 0
-                || record.pointee.activeCpus.load(ordering: .acquiring) != 0 {
-                Scheduler.yield()
-            }
+            Scheduler.waitForLeavers(record)
         }
         aspace = nil
         object.updateSignals(clear: 0, set: Signals.taskTerminated)
