@@ -1,7 +1,9 @@
 import CKernel
 
-/// The user pager (K13d): syscalls 202-206, Zircon's checks in Zircon's
-/// order (the pinned tree's pager.rs).
+/// The user pager (K13d): syscalls 202-208, Zircon's checks in Zircon's
+/// order (the pinned tree's pager.rs). query_dirty_ranges has eight
+/// arguments in Zircon; croi packs pager | vmo << 32 and writes actual and
+/// avail into one two-word out-parameter (either may be 0: none).
 extension Syscalls {
     static func pagerCall(_ number: UInt64, _ a: InlineArray<6, UInt64>, _ table: borrowing HandleTable) throws(Status) {
         let handle = UInt32(truncatingIfNeeded: a[0])
@@ -36,9 +38,8 @@ extension Syscalls {
             if options & discardable != 0 { throw .invalidArgs }
             // croi has no resizable VMOs (and so none without bounds).
             if options & (resizable | unbounded) != 0 { throw .notSupported }
-            if trapDirty { throw .notSupported }  // K13d, part 2
             try check(a[5], MemoryLayout<UInt32>.size)
-            let vmo = try Pagers.createVmo(pager.object, port: port.object, key: a[3], size: a[4])
+            let vmo = try Pagers.createVmo(pager.object, port: port.object, key: a[3], size: a[4], trapDirty: trapDirty)
             let out: UInt32
             do throws(Status) {
                 out = try table.add(vmo, rights: VmoObject.defaultRights)
@@ -51,7 +52,7 @@ extension Syscalls {
             let pager = try table.get(handle, type: .pager, rights: .attachVmo | .manageVmo)
             let vmoRef = try Pagers.vmo(table, UInt32(truncatingIfNeeded: a[1]), rights: .write, of: pager.object)
             let vmo = VmoPointer(address: UnsafeVmoObject(vmoRef.object).vmo)
-            Pagers.detach(vmo.pointee.pager!, complete: true)
+            Pagers.detach(vmo.pointee.pager!, vmo: vmo, complete: true)
         case 205:  // pager_supply_pages(pager, vmo, offset, length, aux_vmo, aux_offset)
             guard a[2] % page == 0, a[3] % page == 0, a[5] % page == 0 else { throw .invalidArgs }
             let pager = try table.get(handle, type: .pager, rights: .manageVmo)
@@ -102,11 +103,55 @@ extension Syscalls {
                 guard ok else { throw .invalidArgs }
                 guard !a[3].addingReportingOverflow(a[4]).overflow, a[3] + a[4] <= vmo.pointee.size else { throw .outOfRange }
                 try Pagers.fail(vmo, offset: a[3], length: a[4], status: status)
-            case UInt64(CROI_PAGER_OP_DIRTY), UInt64(CROI_PAGER_OP_WRITEBACK_BEGIN), UInt64(CROI_PAGER_OP_WRITEBACK_END):
-                throw .notSupported  // K13d, part 2
+            case UInt64(CROI_PAGER_OP_DIRTY):
+                guard a[5] == 0 else { throw .invalidArgs }
+                guard vmo.pointee.pager!.pointee.trapDirty else { throw .notSupported }
+                guard !a[3].addingReportingOverflow(a[4]).overflow, a[3] + a[4] <= vmo.pointee.size else { throw .outOfRange }
+                try Pagers.dirty(vmo, offset: a[3], length: a[4])
+            case UInt64(CROI_PAGER_OP_WRITEBACK_BEGIN):
+                guard a[5] == 0 || a[5] == UInt64(CROI_VMO_DIRTY_RANGE_IS_ZERO) else { throw .invalidArgs }
+                guard !a[3].addingReportingOverflow(a[4]).overflow, a[3] + a[4] <= vmo.pointee.size else { throw .outOfRange }
+                Pagers.writebackBegin(vmo, offset: a[3], length: a[4], zeroRange: a[5] != 0)
+            case UInt64(CROI_PAGER_OP_WRITEBACK_END):
+                guard a[5] == 0 else { throw .invalidArgs }
+                guard !a[3].addingReportingOverflow(a[4]).overflow, a[3] + a[4] <= vmo.pointee.size else { throw .outOfRange }
+                Pagers.writebackEnd(vmo, offset: a[3], length: a[4])
             default:
                 throw .notSupported
             }
+        case 207:  // pager_query_dirty_ranges(pager | vmo << 32, offset, length, buffer, buffer_size, size_t out[2])
+            let pager = try table.get(handle, type: .pager, rights: .manageVmo)
+            let vmoRef = try Pagers.vmo(table, UInt32(truncatingIfNeeded: a[0] >> 32), rights: .read, of: pager.object)
+            let vmo = VmoPointer(address: UnsafeVmoObject(vmoRef.object).vmo)
+            guard !a[1].addingReportingOverflow(a[2]).overflow, a[1] + a[2] <= vmo.pointee.size else { throw .outOfRange }
+            let start = a[1] & ~(page - 1), end = (a[1] + a[2] + page - 1) & ~(page - 1)
+            let ranges = Pagers.dirtyRanges(vmo, offset: start, end: end)
+            let entry = UInt64(MemoryLayout<croi_vmo_dirty_range_t>.size)
+            let room = a[4] / entry
+            var written: UInt64 = 0
+            for i in 0..<ranges.count where UInt64(i) < room {
+                var item = croi_vmo_dirty_range_t()
+                item.offset = ranges[i].offset
+                item.length = ranges[i].end - ranges[i].offset
+                let failed = withUnsafeBytes(of: &item) { unsafe UserCopy.to(a[3] + UInt64(i) * entry, $0.baseAddress!, entry) }
+                guard failed == 0 else { throw .invalidArgs }
+                written += 1
+            }
+            if a[5] != 0 {
+                try check(a[5], 16)
+                try put(written, a[5])
+                try put(UInt64(ranges.count), a[5] + 8)
+            }
+        case 208:  // pager_query_vmo_stats(pager, vmo, options, buffer, buffer_size)
+            let pager = try table.get(handle, type: .pager, rights: .manageVmo)
+            let vmoRef = try Pagers.vmo(table, UInt32(truncatingIfNeeded: a[1]), rights: .read, of: pager.object)
+            let vmo = VmoPointer(address: UnsafeVmoObject(vmoRef.object).vmo)
+            guard a[4] >= UInt64(MemoryLayout<croi_pager_vmo_stats_t>.size) else { throw .bufferTooSmall }
+            guard a[2] & ~UInt64(CROI_PAGER_RESET_VMO_STATS) == 0 else { throw .invalidArgs }
+            var stats = croi_pager_vmo_stats_t()
+            stats.modified = Pagers.modified(vmo, reset: a[2] != 0) ? UInt32(CROI_PAGER_VMO_STATS_MODIFIED) : 0
+            let failed = withUnsafeBytes(of: &stats) { unsafe UserCopy.to(a[3], $0.baseAddress!, 4) }
+            guard failed == 0 else { throw .invalidArgs }  // the reset stands (Zircon's)
         default:
             throw .notSupported
         }

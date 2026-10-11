@@ -2748,21 +2748,27 @@ static int64_t streams(void) {
 
 // K13d: the user pager. A pager thread serves READ requests from a port:
 // each page filled with 'A' + its index, except page 3, which it fails
-// with IO; it records requests and the COMPLETE. slot: [0] port, [1]
-// pager, [2] vmo, [3] reads, [4] last read's length, [5] COMPLETE seen.
+// with IO; DIRTY requests it grants; it records requests and the
+// COMPLETE. slot: [0] port, [1] pager, [2] vmo, [3] reads, [4] last
+// read's length, [5] COMPLETE seen, [6] dirty requests, [7] key.
 static void pager_server(uint64_t arg) {
   volatile uint64_t *slot = (volatile uint64_t *)arg;
   croi_port_packet_t packet;
   char page[PAGE];
   while (sys(CROI_SYS_PORT_WAIT, (uint32_t)slot[0], now_ns() + 5000000000ull, (uint64_t)&packet, 0, 0) == 0) {
     uint64_t *req = (uint64_t *)&packet.payload;
-    if (packet.type != CROI_PKT_TYPE_PAGE_REQUEST || packet.key != 77) break;
+    if (packet.type != CROI_PKT_TYPE_PAGE_REQUEST || packet.key != slot[7]) break;
     uint16_t command = (uint16_t)req[0];
     if (command == CROI_PAGER_VMO_COMPLETE) {
       slot[5] = 1;
       break;
     }
     uint64_t offset = req[1], length = req[2];
+    if (command == CROI_PAGER_VMO_DIRTY) {
+      slot[6]++;
+      sys6(CROI_SYS_PAGER_OP_RANGE, (uint32_t)slot[1], CROI_PAGER_OP_DIRTY, (uint32_t)slot[2], offset, length, 0);
+      continue;
+    }
     slot[3]++;
     slot[4] = length;
     if (offset <= 3 * PAGE && 3 * PAGE < offset + length) {
@@ -2804,7 +2810,7 @@ static int64_t pager(const startup_t *s) {
                  sys6(CROI_SYS_PAGER_OP_RANGE, pg, CROI_PAGER_OP_FAIL, other, 0, PAGE, (uint64_t)(int64_t)-40) ==
                      ERR_INVALID_ARGS &&
                  sys6(CROI_SYS_PAGER_OP_RANGE, pg, 99, vmo, 0, PAGE, 0) == ERR_NOT_SUPPORTED);
-  volatile uint64_t slot[6] = {port, pg, vmo, 0, 0, 0};
+  volatile uint64_t slot[8] = {port, pg, vmo, 0, 0, 0, 0, 77};
   uint32_t server = start_thread(s, pager_server, (uint64_t)slot);
   // A fault: one request, one page.
   uint64_t at = 0;
@@ -2823,14 +2829,73 @@ static int64_t pager(const startup_t *s) {
   CHECK(475, sys6(CROI_SYS_VMO_CREATE_CHILD, vmo, CROI_VMO_CHILD_SNAPSHOT_AT_LEAST_ON_WRITE, 4 * PAGE, PAGE,
                   (uint64_t)&child, 0) == 0 &&
                  sys(CROI_SYS_VMO_READ, child, (uint64_t)buf, 0, 4, 0) == 0 && buf[0] == 'E');
-  // Detach: COMPLETE; supplied pages stay; missing ones are BAD_STATE.
+  // Dirty tracking (part 2) without TRAP_DIRTY: nothing written yet; a
+  // write through a writable mapping (the clean page is mapped read only
+  // until then) and a vmo_write dirty pages 0 and 1, one range; the stats
+  // say modified once.
+  uint64_t rw = 0, counts[2] = {0, 0};
+  croi_pager_vmo_stats_t stats = {0};
+  croi_vmo_dirty_range_t ranges[4];
+  CHECK(477, sys6(CROI_SYS_PAGER_QUERY_DIRTY_RANGES, pg | (uint64_t)vmo << 32, 0, 5 * PAGE, (uint64_t)ranges,
+                  sizeof ranges, (uint64_t)counts) == 0 && counts[0] == 0 && counts[1] == 0 &&
+                 sys(CROI_SYS_PAGER_QUERY_VMO_STATS, pg, vmo, 0, (uint64_t)&stats, sizeof stats) == 0 &&
+                 stats.modified == 0 &&
+                 sys6(CROI_SYS_VMAR_MAP, s->vmar | (uint64_t)(CROI_VM_PERM_READ | CROI_VM_PERM_WRITE) << 32, 0, vmo, 0,
+                      2 * PAGE, (uint64_t)&rw) == 0 &&
+                 *(volatile char *)rw == 'A' &&
+                 sys6(CROI_SYS_PAGER_QUERY_DIRTY_RANGES, pg | (uint64_t)vmo << 32, 0, 5 * PAGE, (uint64_t)ranges,
+                      sizeof ranges, (uint64_t)counts) == 0 && counts[1] == 0);  // a read dirties nothing
+  *(volatile char *)rw = 'a';
+  CHECK(478, sys(CROI_SYS_VMO_WRITE, vmo, (uint64_t)"b", PAGE, 1, 0) == 0 &&
+                 sys6(CROI_SYS_PAGER_QUERY_DIRTY_RANGES, pg | (uint64_t)vmo << 32, 0, 5 * PAGE, (uint64_t)ranges,
+                      sizeof ranges, (uint64_t)counts) == 0 && counts[0] == 1 && counts[1] == 1 &&
+                 ranges[0].offset == 0 && ranges[0].length == 2 * PAGE &&
+                 sys(CROI_SYS_PAGER_QUERY_VMO_STATS, pg, vmo, CROI_PAGER_RESET_VMO_STATS, (uint64_t)&stats,
+                     sizeof stats) == 0 && stats.modified == CROI_PAGER_VMO_STATS_MODIFIED &&
+                 sys(CROI_SYS_PAGER_QUERY_VMO_STATS, pg, vmo, 0, (uint64_t)&stats, sizeof stats) == 0 &&
+                 stats.modified == 0 && *(volatile char *)at == 'a');
+  // Writeback: both await clean; page 0 written meanwhile stays dirty.
+  CHECK(479, sys6(CROI_SYS_PAGER_OP_RANGE, pg, CROI_PAGER_OP_WRITEBACK_BEGIN, vmo, 0, 2 * PAGE, 0) == 0 &&
+                 sys6(CROI_SYS_PAGER_QUERY_DIRTY_RANGES, pg | (uint64_t)vmo << 32, 0, 5 * PAGE, (uint64_t)ranges,
+                      sizeof ranges, (uint64_t)counts) == 0 && counts[1] == 1 && ranges[0].length == 2 * PAGE);
+  *(volatile char *)rw = 'x';
+  CHECK(480, sys6(CROI_SYS_PAGER_OP_RANGE, pg, CROI_PAGER_OP_WRITEBACK_END, vmo, 0, 2 * PAGE, 0) == 0 &&
+                 sys6(CROI_SYS_PAGER_QUERY_DIRTY_RANGES, pg | (uint64_t)vmo << 32, 0, 5 * PAGE, (uint64_t)ranges,
+                      sizeof ranges, (uint64_t)counts) == 0 && counts[1] == 1 && ranges[0].offset == 0 &&
+                 ranges[0].length == PAGE &&
+                 sys6(CROI_SYS_PAGER_OP_RANGE, pg, CROI_PAGER_OP_DIRTY, vmo, 0, PAGE, 0) == ERR_NOT_SUPPORTED &&
+                 sys6(CROI_SYS_PAGER_OP_RANGE, pg, CROI_PAGER_OP_WRITEBACK_BEGIN, vmo, 0, PAGE, 2) == ERR_INVALID_ARGS);
+  // Detach: COMPLETE; dirty pages stay, clean ones (page 1, page 2) go;
+  // missing ones are BAD_STATE.
   CHECK(476, sys(CROI_SYS_PAGER_DETACH_VMO, pg, vmo, 0, 0, 0) == 0 &&
                  wait_for(server, CROI_SIGNAL_TASK_TERMINATED, 3000000000ull) && slot[5] == 1 &&
                  sys(CROI_SYS_VMO_READ, vmo, (uint64_t)buf, 3 * PAGE, 4, 0) == ERR_BAD_STATE &&
-                 sys(CROI_SYS_VMO_READ, vmo, (uint64_t)buf, 0, 4, 0) == 0 && buf[0] == 'A' &&
+                 sys(CROI_SYS_VMO_READ, vmo, (uint64_t)buf, 2 * PAGE, 4, 0) == ERR_BAD_STATE &&
+                 sys(CROI_SYS_VMO_READ, vmo, (uint64_t)buf, 0, 4, 0) == 0 && buf[0] == 'x' &&
                  sys6(CROI_SYS_PAGER_SUPPLY_PAGES, pg, vmo, 0, PAGE, other, 0) == ERR_BAD_STATE);
   sys(CROI_SYS_HANDLE_CLOSE, server, 0, 0, 0, 0);
   sys(CROI_SYS_VMAR_UNMAP, s->vmar, at, 5 * PAGE, 0, 0);
+  sys(CROI_SYS_VMAR_UNMAP, s->vmar, rw, 2 * PAGE, 0, 0);
+  // TRAP_DIRTY: writes wait for the pager's DIRTY (vmo_write, then a
+  // write fault); DIRTY of a page not supplied is NOT_FOUND; closing the
+  // VMO sends COMPLETE.
+  uint32_t trap = 0;
+  CHECK(481, sys6(CROI_SYS_PAGER_CREATE_VMO, pg, CROI_VMO_TRAP_DIRTY, port, 78, 2 * PAGE, (uint64_t)&trap) == 0);
+  volatile uint64_t tslot[8] = {port, pg, trap, 0, 0, 0, 0, 78};
+  server = start_thread(s, pager_server, (uint64_t)tslot);
+  CHECK(482, sys(CROI_SYS_VMO_WRITE, trap, (uint64_t)"q", 0, 1, 0) == 0 && tslot[3] == 1 && tslot[6] == 1 &&
+                 sys6(CROI_SYS_PAGER_OP_RANGE, pg, CROI_PAGER_OP_DIRTY, trap, PAGE, PAGE, 0) == ERR_NOT_FOUND &&
+                 sys6(CROI_SYS_VMAR_MAP, s->vmar | (uint64_t)(CROI_VM_PERM_READ | CROI_VM_PERM_WRITE) << 32, 0, trap, 0,
+                      2 * PAGE, (uint64_t)&rw) == 0 &&
+                 *(volatile char *)(rw + PAGE) == 'B' && tslot[3] == 2 && tslot[6] == 1);
+  *(volatile char *)(rw + PAGE) = 'r';
+  CHECK(483, tslot[6] == 2 &&
+                 sys6(CROI_SYS_PAGER_QUERY_DIRTY_RANGES, pg | (uint64_t)trap << 32, 0, 2 * PAGE, (uint64_t)ranges,
+                      sizeof ranges, (uint64_t)counts) == 0 && counts[1] == 1 && ranges[0].length == 2 * PAGE &&
+                 sys(CROI_SYS_VMAR_UNMAP, s->vmar, rw, 2 * PAGE, 0, 0) == 0 &&
+                 sys(CROI_SYS_HANDLE_CLOSE, trap, 0, 0, 0, 0) == 0 &&
+                 wait_for(server, CROI_SIGNAL_TASK_TERMINATED, 3000000000ull) && tslot[5] == 1);
+  sys(CROI_SYS_HANDLE_CLOSE, server, 0, 0, 0, 0);
   sys(CROI_SYS_HANDLE_CLOSE, child, 0, 0, 0, 0);
   sys(CROI_SYS_HANDLE_CLOSE, vmo, 0, 0, 0, 0);
   sys(CROI_SYS_HANDLE_CLOSE, other, 0, 0, 0, 0);

@@ -84,7 +84,7 @@ enum Streams {
         if vmo.pointee.pager != nil || vmo.pointee.readsFromPager {  // zeroed in place: the pages first
             var at = offset & ~(KernelLayout.pageSize - 1)
             while at < offset + length {
-                try Pagers.ensure(vmo, at, readAhead: offset + length - at)
+                try Pagers.ensureWritable(vmo, at, ahead: offset + length - at)
                 at += KernelLayout.pageSize
             }
         }
@@ -130,7 +130,11 @@ enum Streams {
                 let at = offset + moved
                 let within = at % KernelLayout.pageSize
                 let chunk = min(length - done, limit - moved, KernelLayout.pageSize - within)
-                try Pagers.ensure(vmo, at, readAhead: limit - moved)
+                if toUser {
+                    try Pagers.ensure(vmo, at, readAhead: limit - moved)
+                } else {
+                    try Pagers.ensureWritable(vmo, at, ahead: limit - moved)
+                }
                 var failed: Int32
                 if toUser {
                     if let phys = vmo.content(at: at) {

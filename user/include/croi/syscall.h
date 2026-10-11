@@ -154,6 +154,8 @@ enum : uint64_t {
   CROI_SYS_PAGER_DETACH_VMO = 204,      // (pager, vmo)
   CROI_SYS_PAGER_SUPPLY_PAGES = 205,    // (pager, vmo, offset, length, aux_vmo, aux_offset)
   CROI_SYS_PAGER_OP_RANGE = 206,        // (pager, op, vmo, offset, length, data)
+  CROI_SYS_PAGER_QUERY_DIRTY_RANGES = 207,  // (pager | vmo << 32, offset, length, buffer, buffer_size, size_t out[2]: actual, avail)
+  CROI_SYS_PAGER_QUERY_VMO_STATS = 208, // (pager, vmo, options, buffer, buffer_size)
   CROI_SYS_SYSTEM_POWERCTL = 180,       // (power resource, cmd, const croi_system_powerctl_arg_t *)
 
   // The kernel's CPRNG (K11b; Zircon's): at most CROI_CPRNG_MAX_LEN bytes.

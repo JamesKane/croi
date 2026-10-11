@@ -802,12 +802,13 @@ THREAD, VMO, maps, handle table) and the NAME property.
   (croi has no resizable VMOs; the pinned tree records the RESIZE right
   and never reads it either); one global lock serializes stream-size
   changes where Zircon has a per-VMO StreamSizeManager.
-- **K13d: the pager.** Part 1 **done** (2026-10-11): pager objects and
-  VMOs, READ requests (faults, kernel copies, streams, commit, pin,
-  snapshot children reading through), supply, FAIL, detach and
-  COMPLETE. Part 2 next: dirty tracking (TRAP_DIRTY and DIRTY requests,
-  op DIRTY, WRITEBACK_BEGIN/END, query_dirty_ranges, query_vmo_stats,
-  clean pages dropped at detach).
+- **K13d: the pager.** **Done** (2026-10-11), in two parts: pager
+  objects and VMOs, READ requests (faults, kernel copies, streams,
+  commit, pin, snapshot children reading through), supply, FAIL, detach
+  and COMPLETE; then dirty tracking (TRAP_DIRTY and DIRTY requests, op
+  DIRTY, WRITEBACK_BEGIN/END, query_dirty_ranges, query_vmo_stats, clean
+  pages dropped at detach). Not yet: eviction, zero intervals, resizable
+  or unbounded pager VMOs (croi has no resizable VMOs).
 
 ### K13a (agreed with Todhchai, 2026-10-11): VMO slices and ZERO_CHILDREN
 

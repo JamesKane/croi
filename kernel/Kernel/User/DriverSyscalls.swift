@@ -206,7 +206,8 @@ extension Syscalls {
             try need(.write)
             try inRange()
             guard record.inPhysmap else { throw .notSupported }
-            try Pagers.ensureRange(record, offset & ~(page - 1), ((offset + size + page - 1) & ~(page - 1)) - (offset & ~(page - 1)))
+            try Pagers.ensureWritableRange(record, offset & ~(page - 1),
+                                           ((offset + size + page - 1) & ~(page - 1)) - (offset & ~(page - 1)))
             try vm { () throws(VmError) in
                 try Vmo.withBorrowed(record) { (vmo: borrowing Vmo) throws(VmError) in
                     try vmo.zero(offset: offset, size: size)

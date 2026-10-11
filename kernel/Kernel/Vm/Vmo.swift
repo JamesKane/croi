@@ -70,6 +70,10 @@ struct VmoRecord: ~Copyable {
     /// and, for a snapshot child, whether an ancestor is a pager VMO.
     var pager: PagerSourcePointer? = nil
     var readsFromPager = false
+    /// A pager VMO's page states (`PageState`: absent is clean), and
+    /// whether it was written since the stats were last reset.
+    var states = PageList(pages: 0)
+    var modified = false
 
     var pageCount: Int { Int(size / KernelLayout.pageSize) }
 }
@@ -252,6 +256,42 @@ struct PinRange: Equatable {
 }
 
 extension VmoPointer {
+    /// Removes [offset, offset+size)'s entries from every address space
+    /// mapping this VMO (each held by a reference meanwhile, in case it is
+    /// being torn down); the next access faults. VMO lock not held (faults
+    /// lock aspace -> vmo).
+    func unmapEverywhere(_ offset: UInt64, _ size: UInt64) {
+        var aspaces = UniqueArray<UInt64>()
+        pointee.lock.withLock {
+            for i in 0..<pointee.mappers.count {
+                let aspace = pointee.mappers[i]
+                var seen = false
+                for j in 0..<aspaces.count where aspaces[j] == aspace { seen = true }
+                if !seen {
+                    UserAspacePointer(address: aspace).retain()
+                    aspaces.append(aspace)
+                }
+            }
+        }
+        for i in 0..<aspaces.count {
+            let aspace = UserAspacePointer(address: aspaces[i])
+            aspace.pointee.lock.withLock {
+                guard !aspace.pointee.dead else { return }
+                for j in 0..<aspace.pointee.mappings.count {
+                    let m = aspace.pointee.mappings[j]
+                    guard m.vmo == self, m.offset < offset + size, offset < m.offset + m.size else { continue }
+                    let start = max(m.offset, offset), end = min(m.offset + m.size, offset + size)
+                    do throws(VmError) {
+                        try aspace.pointee.arch.unmap(virt: m.base + (start - m.offset), size: end - start)
+                    } catch {
+                        panic("vmo: couldn't unmap")
+                    }
+                }
+            }
+            aspace.release()
+        }
+    }
+
     /// Whether any of [offset, offset+size) is pinned. VMO lock held.
     func pinnedLocked(_ offset: UInt64, _ size: UInt64) -> Bool {
         for i in 0..<pointee.pins.count {
@@ -489,7 +529,6 @@ struct Vmo: ~Copyable {
         try checkRange(offset, size)
         guard case .anonymous = record.pointee.kind, record.pointee.parent == nil else { throw .notSupported }
         var freed = UniqueArray<UInt64>()
-        var aspaces = UniqueArray<UInt64>()
         try record.pointee.lock.withLock { () throws(VmError) in
             guard !record.pinnedLocked(offset, size) else { throw .pinned }
             let first = Int(offset / KernelLayout.pageSize), count = Int(size / KernelLayout.pageSize)
@@ -498,33 +537,8 @@ struct Vmo: ~Copyable {
                 freed.append(phys)
                 if phys != 0 { record.pointee.committedPages -= 1 }
             }
-            for i in 0..<record.pointee.mappers.count {
-                let aspace = record.pointee.mappers[i]
-                var seen = false
-                for j in 0..<aspaces.count where aspaces[j] == aspace { seen = true }
-                if !seen {
-                    UserAspacePointer(address: aspace).retain()
-                    aspaces.append(aspace)
-                }
-            }
         }
-        for i in 0..<aspaces.count {
-            let aspace = UserAspacePointer(address: aspaces[i])
-            aspace.pointee.lock.withLock {
-                guard !aspace.pointee.dead else { return }
-                for j in 0..<aspace.pointee.mappings.count {
-                    let m = aspace.pointee.mappings[j]
-                    guard m.vmo == record, m.offset < offset + size, offset < m.offset + m.size else { continue }
-                    let start = max(m.offset, offset), end = min(m.offset + m.size, offset + size)
-                    do throws(VmError) {
-                        try aspace.pointee.arch.unmap(virt: m.base + (start - m.offset), size: end - start)
-                    } catch {
-                        panic("vmo: decommit couldn't unmap")
-                    }
-                }
-            }
-            aspace.release()
-        }
+        record.unmapEverywhere(offset, size)
         return freed
     }
 

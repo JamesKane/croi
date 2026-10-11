@@ -9,18 +9,31 @@ import Synchronization
 /// (pager_supply_pages, which moves pages in from an anonymous VMO) or
 /// fails it (pager_op_range FAIL with an I/O-class status, which the
 /// waiter gets). Detaching (pager_detach_vmo, or the VMO's last reference)
-/// wakes every waiter to BAD_STATE and queues COMPLETE; the pager's last
-/// handle detaches every VMO without one.
+/// wakes every waiter to BAD_STATE, drops the clean pages and queues
+/// COMPLETE; the pager's last handle detaches every VMO without one.
 ///
-/// Requests: each waiter needs one page (`PageWaiter`); a new one starts
-/// an outstanding range (`PageRange`) from its page up to its read-ahead,
-/// cut before the first present page and before the next outstanding
-/// range, and queues one packet for it; a waiter whose page is already in
-/// an outstanding range joins it with no packet (Zircon's overlap). A
-/// supply trims the ranges and wakes the waiters whose pages arrived; a
-/// FAIL drops the overlapping ranges, failing the waiters inside its range
-/// and waking the others to ask again. A range no waiter needs any more
-/// (killed, timed out after 300 s, Zircon's overtime limit) goes.
+/// Dirty tracking (part 2): each present page is clean, dirty or awaiting
+/// clean (`VmoRecord.states`). A clean page is mapped read only even
+/// where the mapping may write, so the first write faults; the write (and
+/// every kernel write: vmo_write, streams, ZERO) goes through
+/// `prepareWrite`, which makes the page dirty, first asking the pager with
+/// a DIRTY request if the VMO was created with TRAP_DIRTY (the pager's
+/// op DIRTY answers it). WRITEBACK_BEGIN turns dirty pages awaiting clean
+/// and unmaps them, so a write during the writeback dirties them again;
+/// WRITEBACK_END cleans what is still awaiting clean. query_dirty_ranges
+/// reports every page not clean; query_vmo_stats whether anything was
+/// written. croi has no zero intervals: IS_ZERO writeback has nothing to do.
+///
+/// Requests: each waiter needs one page, read or made dirty
+/// (`PageWaiter`); a new one starts an outstanding range (`PageRange`) of
+/// its kind from its page up to its read-ahead, cut before a page that
+/// doesn't need it and before the next outstanding range, and queues one
+/// packet for it; a waiter whose page is already in an outstanding range
+/// joins it with no packet (Zircon's overlap). A supply or op DIRTY trims
+/// the ranges and wakes the waiters it satisfied; a FAIL drops the
+/// overlapping ranges, failing the waiters inside its range and waking the
+/// others to ask again. A range no waiter needs any more (killed, or timed
+/// out after 300 s, Zircon's overtime limit) goes.
 ///
 /// Differences from Zircon: a packet per request, allocated at the
 /// request and freed when read (Zircon keeps one per VMO in flight and
@@ -30,16 +43,24 @@ import Synchronization
 ///
 /// Lock order: pager -> source -> vmo, and source -> port packets ->
 /// scheduler (packets are queued under the source lock, so a COMPLETE
-/// never overtakes a READ).
+/// never overtakes a request).
 struct PageRange {
     var offset: UInt64
     var end: UInt64
+    var dirty: Bool
 }
 
 struct PageWaiter: ~Copyable {
     let offset: UInt64
+    let dirty: Bool
     /// 1 while waiting; then 0 (look again) or a status.
     let status = Atomic<Int32>(1)
+}
+
+/// A pager VMO page's state in `VmoRecord.states` (absent: clean).
+enum PageDirt {
+    static var dirty: UInt64 { 1 }
+    static var awaitingClean: UInt64 { 2 }
 }
 
 struct PagerSource: ~Copyable {
@@ -49,8 +70,11 @@ struct PagerSource: ~Copyable {
     /// The pager object (no reference), 0 once it has gone.
     var pager: UInt64
     let pagerKoid: UInt64
+    /// The VMO (no reference), 0 once its last reference went.
+    var vmo: UInt64 = 0
     let port: ObjectPointer
     let key: UInt64
+    let trapDirty: Bool
     var detached = false
     var completeSent = false
     var ranges = UniqueArray<PageRange>()
@@ -105,6 +129,32 @@ extension VmoPointer {
         guard let parent = pointee.parent else { return nil }
         return parent.pagerGap(at: pointee.parentOffset + offset)
     }
+
+    /// A pager VMO page's state (PageDirt; 0 clean). VMO lock held.
+    func dirtLocked(_ offset: UInt64) -> UInt64 {
+        pointee.states.lookup(Int(offset / KernelLayout.pageSize))
+    }
+
+    func setDirtLocked(_ offset: UInt64, _ state: UInt64) {
+        let index = Int(offset / KernelLayout.pageSize)
+        if state == 0 {
+            _ = pointee.states.clear(index)
+        } else if !pointee.states.set(index, state) {
+            panic("pager: no memory for page states")  // a node per 512 pages
+        }
+    }
+
+    /// Another reference, unless the last one already went.
+    func tryRetain() -> Bool {
+        var current = pointee.references.load(ordering: .relaxed)
+        while current > 0 {
+            let (exchanged, original) = pointee.references.compareExchange(
+                expected: current, desired: current + 1, ordering: .acquiringAndReleasing)
+            if exchanged { return true }
+            current = original
+        }
+        return false
+    }
 }
 
 enum Pagers {
@@ -123,8 +173,13 @@ enum Pagers {
         pager.pointee.lock.withLock { swap(&sources, &pager.pointee.sources) }
         while let address = sources.popLast() {
             let source = PagerSourcePointer(address: address)
-            source.pointee.lock.withLock { source.pointee.pager = 0 }
-            detach(source, complete: false)
+            let vmo = source.pointee.lock.withLock { () -> VmoPointer? in
+                source.pointee.pager = 0
+                let vmo = VmoPointer(address: source.pointee.vmo)
+                return source.pointee.vmo != 0 && vmo.tryRetain() ? vmo : nil
+            }
+            detach(source, vmo: vmo, complete: false)
+            vmo?.release()
             source.release()
         }
         Objects.free(object, as: PagerObject.self)
@@ -132,8 +187,8 @@ enum Pagers {
 
     /// pager_create_vmo's VMO: `size` (rounded to pages) bytes from `pager`,
     /// requests to `port` with `key`. The port reference is the source's.
-    static func createVmo(_ pager: ObjectPointer, port: ObjectPointer, key: UInt64,
-                          size: UInt64) throws(Status) -> ObjectPointer {
+    static func createVmo(_ pager: ObjectPointer, port: ObjectPointer, key: UInt64, size: UInt64,
+                          trapDirty: Bool) throws(Status) -> ObjectPointer {
         let pageMask = KernelLayout.pageSize - 1
         let vmo: Vmo
         do throws(VmError) {
@@ -144,7 +199,8 @@ enum Pagers {
         guard let raw = unsafe heap.allocate(size: MemoryLayout<PagerSource>.size, alignment: 16) else { throw .noMemory }
         port.retain()
         unsafe raw.bindMemory(to: PagerSource.self, capacity: 1).initialize(
-            to: PagerSource(pager: pager.address, pagerKoid: pager.header.koid, port: port, key: key))
+            to: PagerSource(pager: pager.address, pagerKoid: pager.header.koid, vmo: vmo.record.address, port: port,
+                            key: key, trapDirty: trapDirty))
         let source = PagerSourcePointer(address: UInt64(UInt(bitPattern: raw)))
         let attached = PagerPointer(object: pager).pointee.lock.withLock { () -> Bool in
             guard pager.header.handleCount.load(ordering: .relaxed) > 0 else { return false }
@@ -156,6 +212,7 @@ enum Pagers {
             throw .badState
         }
         vmo.record.pointee.pager = source
+        vmo.record.pointee.states = PageList(pages: vmo.record.pointee.pageCount)
         if size & pageMask != 0 { vmo.record.pointee.streamSize = size }
         return try VmoObject.wrap(vmo.record)
     }
@@ -182,7 +239,7 @@ enum Pagers {
         let (last, overflow) = offset.addingReportingOverflow(max(readAhead, 1) - 1)
         var ahead = overflow ? maxRequest : (last & ~(page - 1)) + page - at
         while let (root, rootOffset) = vmo.pagerGap(at: at) {
-            try wait(root, rootOffset, length: min(ahead, maxRequest))
+            try wait(root, rootOffset, length: min(ahead, maxRequest), dirty: false)
             ahead = page
         }
     }
@@ -197,11 +254,60 @@ enum Pagers {
         }
     }
 
-    private static func wait(_ root: VmoPointer, _ offset: UInt64, length: UInt64) throws(Status) {
+    /// Before writing byte `offset` of `vmo` (present: `ensure` first): a
+    /// pager VMO's page becomes dirty, with the pager's leave first under
+    /// TRAP_DIRTY (asking for the next `ahead` bytes' pages too).
+    static func prepareWrite(_ vmo: VmoPointer, _ offset: UInt64, ahead: UInt64 = KernelLayout.pageSize) throws(Status) {
+        guard let source = vmo.pointee.pager else { return }
+        let page = KernelLayout.pageSize
+        let at = offset & ~(page - 1)
+        while true {
+            let done = vmo.pointee.lock.withLock { () -> Bool? in
+                guard vmo.pointee.pages.lookup(Int(at / page)) != 0 else { return nil }
+                vmo.pointee.modified = true
+                if vmo.dirtLocked(at) == PageDirt.dirty { return true }
+                guard !source.pointee.trapDirty else { return false }
+                vmo.setDirtLocked(at, PageDirt.dirty)
+                return true
+            }
+            switch done {
+            case true: return
+            case false: try wait(vmo, at, length: min(max(ahead, page), maxRequest), dirty: true)
+            case nil: try ensure(vmo, at)  // gone (detach dropped it): BAD_STATE
+            }
+        }
+    }
+
+    /// `ensureWritable` for every page of [offset, offset+size) (page aligned).
+    static func ensureWritableRange(_ vmo: VmoPointer, _ offset: UInt64, _ size: UInt64) throws(Status) {
+        guard vmo.pointee.pager != nil || vmo.pointee.readsFromPager else { return }
+        var at = offset
+        while at < offset + size {
+            try ensureWritable(vmo, at, ahead: offset + size - at)
+            at += KernelLayout.pageSize
+        }
+    }
+
+    /// `ensure`, then `prepareWrite` (kernel writers of [offset, +length)).
+    static func ensureWritable(_ vmo: VmoPointer, _ offset: UInt64, ahead: UInt64) throws(Status) {
+        try ensure(vmo, offset, readAhead: ahead)
+        try prepareWrite(vmo, offset, ahead: ahead)
+    }
+
+    /// Whether `root`'s page at `offset` is what a waiter of this kind
+    /// waits for (read: present; dirty: dirty). Source locked.
+    private static func satisfied(_ root: VmoPointer, _ offset: UInt64, dirty: Bool) -> Bool {
+        root.pointee.lock.withLock { () -> Bool in
+            let present = root.pointee.pages.lookup(Int(offset / KernelLayout.pageSize)) != 0
+            return dirty ? !present || root.dirtLocked(offset) == PageDirt.dirty : present
+        }
+    }
+
+    private static func wait(_ root: VmoPointer, _ offset: UInt64, length: UInt64, dirty: Bool) throws(Status) {
         guard let source = root.pointee.pager else { return }
         let page = KernelLayout.pageSize
         guard let raw = unsafe heap.allocate(size: MemoryLayout<PageWaiter>.size) else { throw .noMemory }
-        unsafe raw.bindMemory(to: PageWaiter.self, capacity: 1).initialize(to: PageWaiter(offset: offset))
+        unsafe raw.bindMemory(to: PageWaiter.self, capacity: 1).initialize(to: PageWaiter(offset: offset, dirty: dirty))
         let waiter = UInt64(UInt(bitPattern: raw))
         let me = unsafe UnsafeMutablePointer<PageWaiter>(bitPattern: UInt(waiter))!
         defer {
@@ -210,13 +316,13 @@ enum Pagers {
         }
         let packet = try? QueuedPacketPointer.allocate(PortPacket(key: source.pointee.key, type: PortPacket.pageRequest))
         var used = false
-        // nil: registered; 0: present after all; else a status.
+        // nil: registered; 0: satisfied after all; else a status.
         let early = source.pointee.lock.withLock { () -> Int32? in
-            if root.lookup(at: offset) != nil { return 0 }
+            if satisfied(root, offset, dirty: dirty) { return 0 }
             if source.pointee.detached { return Status.badState.rawValue }
             var covered = false
             var end = min(offset + length, root.pointee.size)
-            for i in 0..<source.pointee.ranges.count {
+            for i in 0..<source.pointee.ranges.count where source.pointee.ranges[i].dirty == dirty {
                 let range = source.pointee.ranges[i]
                 if range.offset <= offset, offset < range.end { covered = true }
                 if range.offset > offset { end = min(end, range.offset) }
@@ -224,9 +330,12 @@ enum Pagers {
             if !covered {
                 guard let packet else { return Status.noMemory.rawValue }
                 var cut = offset + page
-                while cut < end, root.lookup(at: cut) == nil { cut += page }
-                source.pointee.ranges.append(PageRange(offset: offset, end: cut))
-                packet.pointee.packet.payload[0] = UInt64(CROI_PAGER_VMO_READ)
+                while cut < end, !satisfied(root, cut, dirty: dirty),
+                      !dirty || root.lookup(at: cut) != nil {  // DIRTY: a run of present pages
+                    cut += page
+                }
+                source.pointee.ranges.append(PageRange(offset: offset, end: cut, dirty: dirty))
+                packet.pointee.packet.payload[0] = UInt64(dirty ? CROI_PAGER_VMO_DIRTY : CROI_PAGER_VMO_READ)
                 packet.pointee.packet.payload[1] = offset
                 packet.pointee.packet.payload[2] = cut - offset
                 Ports.enqueue(PortPointer(object: source.pointee.port), packet)
@@ -267,6 +376,10 @@ enum Pagers {
         guard status == 0 else { throw Status(rawValue: status) ?? .internalError }
     }
 
+    private static func waiter(_ address: UInt64) -> UnsafePointer<PageWaiter> {
+        unsafe UnsafePointer<PageWaiter>(bitPattern: UInt(address))!
+    }
+
     /// Outstanding ranges no waiter's page is in any more. Source locked.
     private static func dropUnneededLocked(_ source: PagerSourcePointer) {
         var i = 0
@@ -274,19 +387,23 @@ enum Pagers {
             let range = source.pointee.ranges[i]
             var needed = false
             for j in 0..<source.pointee.waiters.count {
-                let offset = unsafe UnsafePointer<PageWaiter>(bitPattern: UInt(source.pointee.waiters[j]))!.pointee.offset
-                if range.offset <= offset, offset < range.end { needed = true }
+                let w = unsafe waiter(source.pointee.waiters[j])
+                let (offset, dirty) = unsafe (w.pointee.offset, w.pointee.dirty)
+                if dirty == range.dirty, range.offset <= offset, offset < range.end {
+                    needed = true
+                }
             }
             if needed { i += 1 } else { _ = source.pointee.ranges.remove(at: i) }
         }
     }
 
-    /// Takes out the waiters `decide` gives a status for, setting it. Source locked.
-    private static func resolveLocked(_ source: PagerSourcePointer, _ decide: (UInt64) -> Int32?) {
+    /// Takes out the waiters `decide` gives a status for (by offset and
+    /// kind), setting it. Source locked.
+    private static func resolveLocked(_ source: PagerSourcePointer, _ decide: (UInt64, Bool) -> Int32?) {
         var i = 0
         while i < source.pointee.waiters.count {
-            let pointer = unsafe UnsafePointer<PageWaiter>(bitPattern: UInt(source.pointee.waiters[i]))!
-            if let status = decide(unsafe pointer.pointee.offset) {
+            let pointer = unsafe waiter(source.pointee.waiters[i])
+            if let status = unsafe decide(pointer.pointee.offset, pointer.pointee.dirty) {
                 _ = source.pointee.waiters.remove(at: i)
                 unsafe pointer.pointee.status.store(status, ordering: .releasing)
             } else {
@@ -295,21 +412,39 @@ enum Pagers {
         }
     }
 
+    /// Cuts [offset, end) out of the outstanding ranges of one kind. Source locked.
+    private static func trimLocked(_ source: PagerSourcePointer, _ offset: UInt64, _ end: UInt64, dirty: Bool) {
+        var trimmed = UniqueArray<PageRange>()
+        for i in 0..<source.pointee.ranges.count {
+            let range = source.pointee.ranges[i]
+            if range.dirty != dirty || range.end <= offset || end <= range.offset {
+                trimmed.append(range)
+                continue
+            }
+            if range.offset < offset { trimmed.append(PageRange(offset: range.offset, end: offset, dirty: dirty)) }
+            if end < range.end { trimmed.append(PageRange(offset: end, end: range.end, dirty: dirty)) }
+        }
+        swap(&trimmed, &source.pointee.ranges)
+    }
+
     private static func wakeWaiters(_ source: PagerSourcePointer) {
         Scheduler.locked { _ = Scheduler.wakeAll(source.pointee.queue) }
     }
 
     // MARK: The pager's operations
 
-    /// Detaches: waiters retry (and find BAD_STATE); COMPLETE queued once
-    /// if `complete`. Pages stay.
-    static func detach(_ source: PagerSourcePointer, complete: Bool) {
+    /// Detaches: waiters retry (and find BAD_STATE); the clean pages go
+    /// (unmapped first; dirty, awaiting-clean and pinned ones stay, for
+    /// the pager to write back) if `vmo` is given; COMPLETE queued once if
+    /// `complete`.
+    static func detach(_ source: PagerSourcePointer, vmo: VmoPointer?, complete: Bool) {
         let packet = complete ? try? QueuedPacketPointer.allocate(PortPacket(key: source.pointee.key, type: PortPacket.pageRequest)) : nil
         var used = false
-        source.pointee.lock.withLock {
+        let first = source.pointee.lock.withLock { () -> Bool in
+            let first = !source.pointee.detached
             source.pointee.detached = true
             source.pointee.ranges.removeAll()
-            resolveLocked(source) { _ in 0 }
+            resolveLocked(source) { _, _ in 0 }
             if !source.pointee.completeSent {
                 source.pointee.completeSent = true
                 if let packet {
@@ -318,14 +453,30 @@ enum Pagers {
                     used = true
                 }
             }
+            return first
         }
         if !used { packet?.free() }
         wakeWaiters(source)
+        guard first, let vmo, vmo.pointee.size > 0 else { return }
+        var dropped = UniqueArray<UInt64>()
+        vmo.pointee.lock.withLock {
+            let page = KernelLayout.pageSize
+            for i in 0..<vmo.pointee.pageCount {
+                let at = UInt64(i) * page
+                guard vmo.pointee.pages.lookup(i) != 0, vmo.dirtLocked(at) == 0, !vmo.pinnedLocked(at, page) else { continue }
+                dropped.append(vmo.pointee.pages.clear(i))
+                vmo.pointee.committedPages -= 1
+            }
+        }
+        vmo.unmapEverywhere(0, vmo.pointee.size)
+        for i in 0..<dropped.count { pmm.free(dropped[i]) }
+        vmo.pointee.account?.uncharge(UInt64(dropped.count) * KernelLayout.pageSize)
     }
 
-    /// A pager VMO's last reference went.
+    /// A pager VMO's last reference went (its pages go with it).
     static func vmoGone(_ source: PagerSourcePointer) {
-        detach(source, complete: true)
+        source.pointee.lock.withLock { source.pointee.vmo = 0 }
+        detach(source, vmo: nil, complete: true)
         let pagerAddress = source.pointee.lock.withLock { source.pointee.pager }
         if pagerAddress != 0 {
             let pager = ObjectPointer(address: pagerAddress)
@@ -347,7 +498,7 @@ enum Pagers {
 
     /// pager_supply_pages after the checks: `pages` (one per page of the
     /// range, from the aux VMO; 0 for a gap there, supplied as zeros) go
-    /// in where the VMO has none; the rest are freed.
+    /// in, clean, where the VMO has none; the rest are freed.
     static func supply(_ vmo: VmoPointer, offset: UInt64, pages: consuming UniqueArray<UInt64>) throws(Status) {
         let page = KernelLayout.pageSize
         guard let source = vmo.pointee.pager else { throw .badState }
@@ -377,18 +528,8 @@ enum Pagers {
         for i in 0..<pages.count where pages[i] != 0 { pmm.free(pages[i]) }
         let end = offset + UInt64(pages.count) * page
         source.pointee.lock.withLock {
-            var trimmed = UniqueArray<PageRange>()
-            for i in 0..<source.pointee.ranges.count {
-                let range = source.pointee.ranges[i]
-                if range.end <= offset || end <= range.offset {
-                    trimmed.append(range)
-                    continue
-                }
-                if range.offset < offset { trimmed.append(PageRange(offset: range.offset, end: offset)) }
-                if end < range.end { trimmed.append(PageRange(offset: end, end: range.end)) }
-            }
-            swap(&trimmed, &source.pointee.ranges)
-            resolveLocked(source) { at in vmo.lookup(at: at) != nil ? 0 : nil }
+            trimLocked(source, offset, end, dirty: false)
+            resolveLocked(source) { at, dirty in !dirty && vmo.lookup(at: at) != nil ? 0 : nil }
         }
         wakeWaiters(source)
     }
@@ -410,12 +551,111 @@ enum Pagers {
                     i += 1
                 }
             }
-            resolveLocked(source) { at in
+            resolveLocked(source) { at, dirty in
                 if offset <= at, at < end { return status }
-                for j in 0..<dropped.count where dropped[j].offset <= at && at < dropped[j].end { return 0 }
+                for j in 0..<dropped.count
+                where dropped[j].dirty == dirty && dropped[j].offset <= at && at < dropped[j].end {
+                    return 0
+                }
                 return nil
             }
         }
         wakeWaiters(source)
+    }
+
+    /// pager_op_range DIRTY (range checked): every page present, else
+    /// NOT_FOUND (the DIRTY requests there are still resolved: their
+    /// waiters ask again); then all dirty, and their waiters go on.
+    static func dirty(_ vmo: VmoPointer, offset: UInt64, length: UInt64) throws(Status) {
+        guard let source = vmo.pointee.pager else { throw .badState }
+        guard source.pointee.trapDirty else { throw .notSupported }
+        let page = KernelLayout.pageSize
+        let end = offset + length
+        var result: Status? = nil
+        source.pointee.lock.withLock {
+            if source.pointee.detached {
+                result = .badState
+            } else {
+                let complete = vmo.pointee.lock.withLock { () -> Bool in
+                    var at = offset
+                    while at < end {
+                        guard vmo.pointee.pages.lookup(Int(at / page)) != 0 else { return false }
+                        at += page
+                    }
+                    at = offset
+                    while at < end {
+                        vmo.setDirtLocked(at, PageDirt.dirty)
+                        at += page
+                    }
+                    return true
+                }
+                if !complete { result = .notFound }
+            }
+            trimLocked(source, offset, end, dirty: true)
+            resolveLocked(source) { at, dirty in dirty && offset <= at && at < end ? 0 : nil }
+        }
+        wakeWaiters(source)
+        if let result { throw result }
+    }
+
+    /// WRITEBACK_BEGIN: dirty pages (not pinned) await clean, and are
+    /// unmapped so the next write faults and dirties them again. With
+    /// IS_ZERO only zero intervals would change (croi has none).
+    static func writebackBegin(_ vmo: VmoPointer, offset: UInt64, length: UInt64, zeroRange: Bool) {
+        guard !zeroRange, length > 0 else { return }
+        let page = KernelLayout.pageSize
+        vmo.pointee.lock.withLock {
+            var at = offset
+            while at < offset + length {
+                if vmo.dirtLocked(at) == PageDirt.dirty, !vmo.pinnedLocked(at, page) {
+                    vmo.setDirtLocked(at, PageDirt.awaitingClean)
+                }
+                at += page
+            }
+        }
+        vmo.unmapEverywhere(offset, length)
+    }
+
+    /// WRITEBACK_END: pages still awaiting clean are clean.
+    static func writebackEnd(_ vmo: VmoPointer, offset: UInt64, length: UInt64) {
+        let page = KernelLayout.pageSize
+        vmo.pointee.lock.withLock {
+            var at = offset
+            while at < offset + length {
+                if vmo.dirtLocked(at) == PageDirt.awaitingClean { vmo.setDirtLocked(at, 0) }
+                at += page
+            }
+        }
+    }
+
+    /// query_dirty_ranges: the runs of pages not clean in [offset, end)
+    /// (page aligned), as (offset, length).
+    static func dirtyRanges(_ vmo: VmoPointer, offset: UInt64, end: UInt64) -> UniqueArray<PageRange> {
+        let page = KernelLayout.pageSize
+        var ranges = UniqueArray<PageRange>()
+        vmo.pointee.lock.withLock {
+            var at = offset
+            while at < end {
+                let state = vmo.pointee.pages.lookup(Int(at / page)) != 0 ? vmo.dirtLocked(at) : 0
+                if state != 0 {
+                    if ranges.count > 0, ranges[ranges.count - 1].end == at {
+                        ranges[ranges.count - 1].end = at + page
+                    } else {
+                        ranges.append(PageRange(offset: at, end: at + page, dirty: true))
+                    }
+                }
+                at += page
+            }
+        }
+        return ranges
+    }
+
+    /// query_vmo_stats: whether written since the last reset (reset if asked).
+    static func modified(_ vmo: VmoPointer, reset: Bool) -> Bool {
+        vmo.pointee.lock.withLock { () -> Bool in
+            let modified = vmo.pointee.modified
+            if reset { vmo.pointee.modified = false }
+            return modified
+        }
     }
 }

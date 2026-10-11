@@ -379,12 +379,15 @@ struct UserAspace: ~Copyable {
             }
             try split(at: base)
             try split(at: base + size)
-            var cache = CachePolicy.cached
             for i in 0..<record.pointee.mappings.count where record.pointee.mappings[i].overlaps(base, size) {
                 record.pointee.mappings[i].rights = rights
-                cache = record.pointee.mappings[i].vmo.pointee.cache
+                let m = record.pointee.mappings[i]
+                // A pager VMO's pages stay read only until written (K13d:
+                // its clean pages must fault on a write, and dirty ones
+                // are made writable again by that fault).
+                let effective = m.vmo.pointee.pager != nil ? rights.subtracting(.write) : rights
+                try record.pointee.arch.protect(virt: m.base, size: m.size, attributes(effective, m.vmo.pointee.cache, key: key))
             }
-            try record.pointee.arch.protect(virt: base, size: size, attributes(rights, cache, key: key))
         }
     }
 
@@ -553,7 +556,8 @@ enum UserAspaces {
         let flags = (write ? CROI_VM_FAULT_WRITE : 0) | (execute ? CROI_VM_FAULT_EXECUTE : 0)
         var resolved = false
         while true {
-            var paged: (VmoPointer, UInt64)? = nil
+            // A pager's page to wait for (K13d), or one to make dirty.
+            var paged: (vmo: VmoPointer, offset: UInt64, write: Bool)? = nil
             resolved = aspace.pointee.lock.withLock { () -> Bool in
                 var found: Mapping? = nil
                 for i in 0..<aspace.pointee.mappings.count where aspace.pointee.mappings[i].contains(page) {
@@ -563,32 +567,55 @@ enum UserAspaces {
                       !write || mapping.rights.contains(.write), !execute || mapping.rights.contains(.execute) else {
                     return false
                 }
+                let offset = mapping.offset + (page - mapping.base)
+                // A pager VMO's clean page is mapped read only (part 2): a
+                // write faults here and dirties it first.
+                let tracked = mapping.vmo.pointee.pager != nil
+                let dirty = tracked && mapping.vmo.pointee.lock.withLock { mapping.vmo.dirtLocked(offset) == PageDirt.dirty }
                 if let present = aspace.pointee.arch.query(page) {
                     // Another CPU paged it in first, or a permission fault the
                     // rights would allow: nothing to do but retry.
-                    return !write || present.attributes.writable
+                    if !write || present.attributes.writable { return true }
+                    guard tracked else { return false }
+                    guard dirty else {
+                        mapping.vmo.retain()  // the mapping may go while we wait
+                        paged = (mapping.vmo, offset, true)
+                        return false
+                    }
+                    do throws(VmError) {
+                        try aspace.pointee.arch.protect(virt: page, size: KernelLayout.pageSize,
+                                                        attributes(mapping.rights, mapping.vmo.pointee.cache, key: mapping.key))
+                    } catch {
+                        return false
+                    }
+                    return true
                 }
-                let offset = mapping.offset + (page - mapping.base)
                 if mapping.vmo.pointee.pager != nil || mapping.vmo.pointee.readsFromPager,
                    mapping.vmo.pagerGap(at: offset) != nil {
-                    mapping.vmo.retain()  // the mapping may go while we wait
-                    paged = (mapping.vmo, offset)
+                    mapping.vmo.retain()
+                    paged = (mapping.vmo, offset, false)
                     return false
                 }
-                guard let phys = mapping.vmo.commit(at: mapping.offset + (page - mapping.base)) else { return false }
+                if tracked, write, !dirty {
+                    mapping.vmo.retain()
+                    paged = (mapping.vmo, offset, true)
+                    return false
+                }
+                guard let phys = mapping.vmo.commit(at: offset) else { return false }
+                let rights = tracked && !dirty ? mapping.rights.subtracting(.write) : mapping.rights
                 do throws(VmError) {
                     try aspace.pointee.arch.map(virt: page, phys: phys, size: KernelLayout.pageSize,
-                                                attributes(mapping.rights, mapping.vmo.pointee.cache, key: mapping.key))
+                                                attributes(rights, mapping.vmo.pointee.cache, key: mapping.key))
                 } catch {
                     return false
                 }
                 return true
             }
-            guard let (vmo, offset) = paged else { break }
+            guard let (vmo, offset, dirtying) = paged else { break }
             defer { vmo.release() }
             guard mayBlock else { break }
             do throws(Status) {
-                try Pagers.ensure(vmo, offset)
+                if dirtying { try Pagers.prepareWrite(vmo, offset) } else { try Pagers.ensure(vmo, offset) }
             } catch {
                 break
             }

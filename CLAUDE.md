@@ -1292,7 +1292,7 @@ syscalls 194-201; vmo.h):
 - Mode 17's `streams`.
 
 The user pager, K13d (Kernel/Object/Pager.swift, User/PagerSyscalls.swift,
-syscalls 202-206; vmo.h; Todhchai's page cache and mmap for Taisce):
+syscalls 202-208; vmo.h; Todhchai's page cache and mmap for Taisce):
 - Zircon's pager (type 28; INSPECT, TRANSFER, ATTACH_VMO 1 << 23,
   MANAGE_VMO; NEW_PAGER policy 14, pager_create_vmo checks NEW_VMO):
   pager_create, pager_create_vmo(pager, options, port, key, size), with
@@ -1320,13 +1320,36 @@ syscalls 202-206; vmo.h; Todhchai's page cache and mmap for Taisce):
 - FAIL: waiters whose page is in the range get the status (vmo_read
   returns it; a fault is refused: exception); others on an overlapping
   request ask again. Detach (pager_detach_vmo, or the VMO's last
-  reference): waiters wake to BAD_STATE, one COMPLETE packet; supplied
-  pages stay. The pager's last handle detaches its VMOs without COMPLETE.
+  reference): waiters wake to BAD_STATE, clean pages are dropped (dirty,
+  awaiting-clean and pinned ones stay for writeback), one COMPLETE
+  packet. The pager's last handle detaches its VMOs without COMPLETE.
+- Dirty tracking (part 2): `VmoRecord.states` (a PageList: PageDirt
+  dirty 1, awaiting clean 2, absent clean) and `modified`. A pager VMO's
+  clean pages are mapped read only even through writable mappings (the
+  fault path, and `UserAspace.protect`, which never grants write to a
+  pager VMO's present pages), so the first write faults into
+  `Pagers.prepareWrite`: the page becomes dirty, after a DIRTY request
+  (type 9, command 2) the pager answers with op DIRTY if the VMO has
+  TRAP_DIRTY; the fault then makes the entry writable. Kernel writes
+  (vmo_write, streams, ZERO) go through `ensureWritable`. op DIRTY
+  (TRAP_DIRTY only, else NOT_SUPPORTED; a page not supplied NOT_FOUND),
+  WRITEBACK_BEGIN (dirty -> awaiting clean, unmapped everywhere:
+  `VmoPointer.unmapEverywhere`, so a write meanwhile dirties again; IS_ZERO
+  is a no-op, croi has no zero intervals), WRITEBACK_END (awaiting ->
+  clean). pager_query_dirty_ranges (207: pager | vmo << 32, offset,
+  length, buffer, buffer_size, size_t out[2] = actual, avail; ranges of
+  pages not clean, options 0) and pager_query_vmo_stats (208; MODIFIED,
+  RESET_VMO_STATS).
 - Differences from Zircon: a packet per request (Zircon: one in flight
   per VMO), none withdrawn when a request resolves before it is read; the
   source holds its port.
+- Not yet: eviction of clean pages (ALWAYS_NEED/DONT_NEED hints), zero
+  intervals, resizable and unbounded pager VMOs.
 - Mode 17's `pager`: a pager thread serving a fault, a two-page vmo_read
-  (one request), a FAIL, a snapshot child reading through, detach.
+  (one request), a FAIL, a snapshot child reading through; writes through
+  a mapping and vmo_write, dirty ranges, stats, a writeback with a write
+  during it, detach dropping clean pages; a TRAP_DIRTY VMO's DIRTY
+  requests from vmo_write and a write fault.
 
 Randomness, K11b (Kernel/Random.swift, syscalls 181-182; handoff v5):
 - The loader reads 32 bytes from EFI_RNG_PROTOCOL if the firmware has
