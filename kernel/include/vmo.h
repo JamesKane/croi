@@ -50,3 +50,32 @@ enum : uint32_t {
   CROI_CACHE_FLUSH_DATA = 1u << 1,
   CROI_CACHE_FLUSH_INVALIDATE = 1u << 2,
 };
+
+// Streams (K13c, Zircon's): stream_create modes, writev's option, seek
+// origins, properties, info; zx_iovec_t.
+enum : uint32_t {
+  CROI_STREAM_MODE_READ = 1u << 0,
+  CROI_STREAM_MODE_WRITE = 1u << 1,
+  CROI_STREAM_MODE_APPEND = 1u << 2,
+  CROI_STREAM_APPEND = 1u << 0,
+  CROI_STREAM_SEEK_ORIGIN_START = 0,
+  CROI_STREAM_SEEK_ORIGIN_CURRENT = 1,
+  CROI_STREAM_SEEK_ORIGIN_END = 2,
+  CROI_PROP_VMO_CONTENT_SIZE = 17,   // uint64_t: the stream size
+  CROI_PROP_STREAM_MODE_APPEND = 19, // uint8_t
+  CROI_INFO_STREAM = 26,             // croi_info_stream_t (INSPECT)
+};
+
+typedef struct {
+  void *buffer;
+  uint64_t capacity;  // size_t
+} croi_iovec_t;
+
+// zx_info_stream_t.
+typedef struct {
+  uint32_t options;
+  uint8_t padding[4];
+  uint64_t seek;
+  uint64_t content_size;
+} croi_info_stream_t;
+

@@ -141,6 +141,14 @@ enum : uint64_t {
   CROI_SYS_SOCKET_WRITE = 191,          // (socket, options, const void *buffer, size, size_t *actual)
   CROI_SYS_SOCKET_READ = 192,           // (socket, options, void *buffer, size, size_t *actual)
   CROI_SYS_SOCKET_SET_DISPOSITION = 193,  // (socket, disposition, disposition_peer)
+  CROI_SYS_STREAM_CREATE = 194,         // (options, vmo, seek, out), K13c
+  CROI_SYS_STREAM_WRITEV = 195,         // (stream, options, const croi_iovec_t *vector, count, size_t *actual)
+  CROI_SYS_STREAM_WRITEV_AT = 196,      // (stream, options, offset, vector, count, size_t *actual)
+  CROI_SYS_STREAM_READV = 197,          // (stream, options, croi_iovec_t *vector, count, size_t *actual)
+  CROI_SYS_STREAM_READV_AT = 198,       // (stream, options, offset, vector, count, size_t *actual)
+  CROI_SYS_STREAM_SEEK = 199,           // (stream, whence, int64_t offset, uint64_t *out)
+  CROI_SYS_VMO_GET_STREAM_SIZE = 200,   // (vmo, uint64_t *out)
+  CROI_SYS_VMO_SET_STREAM_SIZE = 201,   // (vmo, size)
   CROI_SYS_SYSTEM_POWERCTL = 180,       // (power resource, cmd, const croi_system_powerctl_arg_t *)
 
   // The kernel's CPRNG (K11b; Zircon's): at most CROI_CPRNG_MAX_LEN bytes.

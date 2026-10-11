@@ -19,6 +19,7 @@ enum Status: Int32, Error, Equatable {
     case alreadyExists = -26
     case alreadyBound = -27
     case accessDenied = -30
+    case fileBig = -53
 }
 
 /// Option-set bit flags for the kernel, without OptionSet's array-literal
@@ -113,6 +114,7 @@ enum ObjectType: UInt32 {
     case resource = 15
     case eventpair = 16
     case socket = 14
+    case stream = 31
     case fifo = 19
     case job = 17
     case vmar = 18

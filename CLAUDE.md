@@ -1270,6 +1270,27 @@ syscalls 190-193; ipc.h):
   lock order mutex -> object.
 - Mode 17's `sockets`.
 
+Streams, K13c (Kernel/Object/Stream.swift, User/StreamSyscalls.swift,
+syscalls 194-201; vmo.h):
+- Zircon's stream (type 31; ZX_DEFAULT_STREAM_RIGHTS, READ / WRITE by
+  mode, APPEND adds none; no policy) over an anonymous VMO (else
+  WRONG_TYPE): create, writev/readv (at the seek, which moves under the
+  stream's Mutex), writev_at/readv_at, seek (START/CURRENT/END, checked
+  arithmetic), ZX_INFO_STREAM (26), ZX_PROP_STREAM_MODE_APPEND (19).
+  `croi_iovec_t` (capacity uint64_t: the ABI headers have no size_t).
+- The stream size (`VmoRecord.streamSize`, nil = the VMO's size):
+  vmo_get_stream_size (200, no rights; 0 for non-anonymous),
+  vmo_set_stream_size (201, WRITE; OUT_OF_RANGE past the VMO; zeroes from
+  min(old, new) to the VMO's end), ZX_PROP_VMO_CONTENT_SIZE (17). Reads
+  stop at it; writes zero-fill a gap past it and grow it by what lands;
+  a write at or past the VMO's end is OUT_OF_RANGE, one reaching it cut
+  short (VMOs never grow: croi has no resizable VMOs); append writes at
+  the stream size. Size changes are serialized by one global Mutex
+  (Zircon: a per-VMO StreamSizeManager). A user buffer that faults ends
+  a transfer short, NOT_FOUND if nothing moved. vmo_write doesn't move
+  the stream size (as Zircon).
+- Mode 17's `streams`.
+
 Randomness, K11b (Kernel/Random.swift, syscalls 181-182; handoff v5):
 - The loader reads 32 bytes from EFI_RNG_PROTOCOL if the firmware has
   one (edk2 over virtio-rng: qemu.sh adds `-device virtio-rng-pci`) into

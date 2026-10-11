@@ -343,6 +343,8 @@ enum Syscalls {
             try counterCall(number, a, table)
         case 190...193:
             try socketCall(number, a, table)
+        case 194...201:
+            try streamCall(number, a, table)
         case 180:  // system_powerctl
             try Power.call(a, table)
         case 120...129:

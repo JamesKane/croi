@@ -795,8 +795,14 @@ thread_start_regs, the channel *_etc calls; most info topics (PROCESS,
 THREAD, VMO, maps, handle table) and the NAME property.
 
 - **K13b: FIFOs and vmo_replace_as_executable.** **Done** (2026-10-11).
-- **K13c: sockets and streams.** Next.
-- **K13d: the pager.**
+- **K13c: sockets and streams.** **Done** (2026-10-11): Zircon's
+  semantics from the pinned tree (its Rust dispatchers), quirks included.
+  Socket buffers are 256 KiB page rings (Zircon: 264160 bytes of mbufs);
+  datagram lengths are counted in the ring. Streams never grow their VMO
+  (croi has no resizable VMOs; the pinned tree records the RESIZE right
+  and never reads it either); one global lock serializes stream-size
+  changes where Zircon has a per-VMO StreamSizeManager.
+- **K13d: the pager.** Next.
 
 ### K13a (agreed with Todhchai, 2026-10-11): VMO slices and ZERO_CHILDREN
 

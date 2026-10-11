@@ -2686,6 +2686,66 @@ static int64_t sockets(const startup_t *s) {
   return 0;
 }
 
+// K13c: streams (Zircon's) over a two-page VMO with stream size 0: writes
+// at the seek extend the stream size, reads stop there, seeks, append,
+// a gap zero-filled, a write cut at the VMO's end, info and properties.
+static int64_t streams(void) {
+  uint32_t vmo = 0, st = 0, ro = 0;
+  uint64_t actual = 0, at = 0, size = 0;
+  char buf[32];
+  croi_iovec_t two[2] = {{(void *)"hello ", 6}, {(void *)"world", 5}};
+  croi_iovec_t in = {buf, sizeof buf};
+  CHECK(460, sys(CROI_SYS_VMO_CREATE, 2 * PAGE, 0, (uint64_t)&vmo, 0, 0) == 0 &&
+                 sys(CROI_SYS_VMO_GET_STREAM_SIZE, vmo, (uint64_t)&size, 0, 0, 0) == 0 && size == 2 * PAGE &&
+                 sys(CROI_SYS_VMO_SET_STREAM_SIZE, vmo, 0, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_STREAM_CREATE, 8, vmo, 0, (uint64_t)&st, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_STREAM_CREATE, CROI_STREAM_MODE_READ | CROI_STREAM_MODE_WRITE, vmo, 0, (uint64_t)&st, 0) == 0 &&
+                 sys(CROI_SYS_STREAM_CREATE, CROI_STREAM_MODE_READ, vmo, 0, (uint64_t)&ro, 0) == 0);
+  // Write at the seek; the read stops at the stream size.
+  CHECK(461, sys(CROI_SYS_STREAM_WRITEV, st, 0, (uint64_t)two, 2, (uint64_t)&actual) == 0 && actual == 11 &&
+                 sys(CROI_SYS_VMO_GET_STREAM_SIZE, vmo, (uint64_t)&size, 0, 0, 0) == 0 && size == 11 &&
+                 sys(CROI_SYS_STREAM_READV, ro, 0, (uint64_t)&in, 1, (uint64_t)&actual) == 0 && actual == 11 &&
+                 buf[0] == 'h' && buf[6] == 'w' && buf[10] == 'd' &&
+                 sys(CROI_SYS_STREAM_READV, ro, 0, (uint64_t)&in, 1, (uint64_t)&actual) == 0 && actual == 0 &&
+                 sys(CROI_SYS_STREAM_WRITEV, ro, 0, (uint64_t)two, 1, 0) == ERR_ACCESS_DENIED);
+  // Seeks: END - 5 reads "world"; START negative is INVALID_ARGS.
+  CHECK(462, sys(CROI_SYS_STREAM_SEEK, ro, CROI_STREAM_SEEK_ORIGIN_END, (uint64_t)-5, (uint64_t)&at, 0) == 0 && at == 6 &&
+                 sys(CROI_SYS_STREAM_READV, ro, 0, (uint64_t)&in, 1, (uint64_t)&actual) == 0 && actual == 5 &&
+                 buf[0] == 'w' &&
+                 sys(CROI_SYS_STREAM_SEEK, ro, CROI_STREAM_SEEK_ORIGIN_START, (uint64_t)-1, 0, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_STREAM_SEEK, ro, CROI_STREAM_SEEK_ORIGIN_CURRENT, (uint64_t)-100, 0, 0) == ERR_INVALID_ARGS);
+  // Append ignores the seek; a write past the end zero-fills the gap.
+  CHECK(463, sys(CROI_SYS_STREAM_SEEK, st, CROI_STREAM_SEEK_ORIGIN_START, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_STREAM_WRITEV, st, CROI_STREAM_APPEND, (uint64_t)&two[1], 1, (uint64_t)&actual) == 0 &&
+                 actual == 5 &&
+                 sys(CROI_SYS_STREAM_SEEK, st, CROI_STREAM_SEEK_ORIGIN_CURRENT, 0, (uint64_t)&at, 0) == 0 && at == 16 &&
+                 sys6(CROI_SYS_STREAM_WRITEV_AT, st, 0, 20, (uint64_t)&two[1], 1, (uint64_t)&actual) == 0 && actual == 5 &&
+                 sys6(CROI_SYS_STREAM_READV_AT, ro, 0, 11, (uint64_t)&in, 1, (uint64_t)&actual) == 0 && actual == 14 &&
+                 buf[0] == 'w' && buf[5] == 0 && buf[8] == 0 && buf[9] == 'w');
+  // At the VMO's end: cut short; at or past it OUT_OF_RANGE.
+  CHECK(464, sys6(CROI_SYS_STREAM_WRITEV_AT, st, 0, 2 * PAGE - 3, (uint64_t)two, 1, (uint64_t)&actual) == 0 && actual == 3 &&
+                 sys6(CROI_SYS_STREAM_WRITEV_AT, st, 0, 2 * PAGE, (uint64_t)two, 1, 0) == ERR_OUT_OF_RANGE &&
+                 sys(CROI_SYS_VMO_GET_STREAM_SIZE, vmo, (uint64_t)&size, 0, 0, 0) == 0 && size == 2 * PAGE);
+  // Info, append mode as a property, content size as a property (shrinking
+  // zeroes what was past it).
+  croi_info_stream_t info = {0};
+  uint8_t append = 1;
+  uint64_t content = 4;
+  CHECK(465, sys(CROI_SYS_OBJECT_SET_PROPERTY, st, CROI_PROP_STREAM_MODE_APPEND, (uint64_t)&append, 1, 0) == 0 &&
+                 sys(CROI_SYS_OBJECT_GET_INFO, st, CROI_INFO_STREAM, (uint64_t)&info, sizeof info, 0) == 0 &&
+                 info.options == (CROI_STREAM_MODE_READ | CROI_STREAM_MODE_WRITE | CROI_STREAM_MODE_APPEND) &&
+                 info.seek == 16 && info.content_size == 2 * PAGE &&
+                 sys(CROI_SYS_OBJECT_SET_PROPERTY, vmo, CROI_PROP_VMO_CONTENT_SIZE, (uint64_t)&content, 8, 0) == 0 &&
+                 sys(CROI_SYS_STREAM_WRITEV, st, 0, (uint64_t)&two[1], 1, (uint64_t)&actual) == 0 && actual == 5 &&
+                 sys6(CROI_SYS_STREAM_READV_AT, ro, 0, 0, (uint64_t)&in, 1, (uint64_t)&actual) == 0 && actual == 9 &&
+                 buf[3] == 'l' && buf[4] == 'w' &&
+                 sys(CROI_SYS_VMO_READ, vmo, (uint64_t)buf, 20, 1, 0) == 0 && buf[0] == 0);
+  sys(CROI_SYS_HANDLE_CLOSE, st, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, ro, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, vmo, 0, 0, 0, 0);
+  return 0;
+}
+
 // K13b: FIFOs (Zircon's: records into the peer's ring, READABLE /
 // WRITABLE / PEER_CLOSED, user signals to the peer) and
 // vmo_replace_as_executable (a VMEX resource; the handle consumed).
@@ -3001,6 +3061,8 @@ static int64_t extensions(const startup_t *s) {
   if (fifos != 0) return fifos;
   int64_t socks = sockets(s);
   if (socks != 0) return socks;
+  int64_t strs = streams();
+  if (strs != 0) return strs;
   int64_t random = cprng_checks();
   if (random != 0) return random;
 

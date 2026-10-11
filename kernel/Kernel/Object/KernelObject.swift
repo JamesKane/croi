@@ -119,6 +119,7 @@ enum Objects {
         case .eventpair: Channels.destroyEventPair(object)
         case .fifo: Fifos.destroy(object)
         case .socket: Sockets.destroy(object)
+        case .stream: Streams.destroy(object)
         case .timer: free(object, as: TimerObject.self)
         case .log: DebugLogs.destroy(object)
         case .profile: free(object, as: ProfileObject.self)

@@ -63,6 +63,9 @@ struct VmoRecord: ~Copyable {
     /// (0 once it is gone; cleared under this lock by its destroy).
     var children = 0
     var object: UInt64 = 0
+    /// K13c: the stream ("content") size, byte-granular, shared by every
+    /// stream over this VMO; nil until set, reading as the VMO's size.
+    var streamSize: UInt64? = nil
 
     var pageCount: Int { Int(size / KernelLayout.pageSize) }
 }
