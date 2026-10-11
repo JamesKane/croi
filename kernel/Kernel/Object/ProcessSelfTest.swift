@@ -220,12 +220,13 @@ enum ProcessSelfTest {
     /// K12a: VT-d from user mode (mode 18): a device's DMA through its own
     /// domain, and refused (read only, unpinned): the unit counts faults.
     static func runIommu(_ console: Uart) {
-        #if arch(x86_64) || arch(arm64)
+        #if arch(x86_64) || arch(arm64) || arch(riscv64)
         let before = Counts()
         let faults = Iommus.faultsCounted()
         let exitCode = runInProcess(mode: 18)
         if exitCode == 0x600E {
-            console.write("  iommu:  skipped (no IOMMU or no edu device)\n")
+            console.write(Iommus.firstUnit() == nil ? "  iommu:  skipped (no IOMMU in the firmware's tables)\n"
+                          : Mcfg.count == 0 ? "  iommu:  skipped (no MCFG)\n" : "  iommu:  skipped (no edu device)\n")
             return
         }
         guard exitCode == 0x600D else {

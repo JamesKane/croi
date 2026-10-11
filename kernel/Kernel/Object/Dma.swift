@@ -106,6 +106,13 @@ enum Dma {
             #else
             throw .notSupported
             #endif
+        case UInt32(CROI_IOMMU_TYPE_RISCV):
+            #if arch(riscv64)
+            unit = try RiscvIommus.create(descriptor)
+            kind = IommuKind.riscv.rawValue
+            #else
+            throw .notSupported
+            #endif
         case UInt32(CROI_IOMMU_TYPE_ARM_SMMU):
             #if arch(arm64)
             if descriptor.byteCount == 8, Iort.smmuV2(unsafe descriptor.unsafeLoadUnaligned(as: UInt64.self)) != nil {
@@ -122,7 +129,7 @@ enum Dma {
             throw .invalidArgs
         }
         guard let object = Objects.allocate(IommuObject(unit: unit, kind: kind)) else {
-            #if arch(x86_64) || arch(arm64)
+            #if arch(x86_64) || arch(arm64) || arch(riscv64)
             if unit != 0 { Iommus.unbind(IommuKind(rawValue: kind)!, unit: unit) }
             #endif
             throw .noMemory
@@ -131,7 +138,7 @@ enum Dma {
     }
 
     static func destroyIommu(_ object: ObjectPointer) {
-        #if arch(x86_64) || arch(arm64)
+        #if arch(x86_64) || arch(arm64) || arch(riscv64)
         let iommu = unsafe UnsafePointer<IommuObject>(bitPattern: UInt(object.address))!
         if unsafe iommu.pointee.unit != 0 {
             unsafe Iommus.unbind(IommuKind(rawValue: iommu.pointee.kind)!, unit: iommu.pointee.unit)
@@ -146,7 +153,7 @@ enum Dma {
     static func createBti(_ iommu: ObjectPointer, id: UInt64) throws(Status) -> ObjectPointer {
         let record = unsafe UnsafePointer<IommuObject>(bitPattern: UInt(iommu.address))!
         let unit = unsafe record.pointee.unit
-        #if arch(x86_64) || arch(arm64)
+        #if arch(x86_64) || arch(arm64) || arch(riscv64)
         if unit != 0 {
             let kind = unsafe IommuKind(rawValue: record.pointee.kind)!
             let domain = try Iommus.attach(kind, unit: unit, id: id)
@@ -176,7 +183,7 @@ enum Dma {
 
     static func destroyBti(_ object: ObjectPointer) {
         let bti = BtiPointer(object: object)
-        #if arch(x86_64) || arch(arm64)
+        #if arch(x86_64) || arch(arm64) || arch(riscv64)
         if bti.pointee.domain != 0 {
             // The device is blocked first, so quarantined pages are safe
             // to give back: nothing can reach them any more.
@@ -285,7 +292,7 @@ enum Dma {
         }
         let (base, end) = window(properties(object))
         var iova: UInt64 = 0
-        #if arch(x86_64) || arch(arm64)
+        #if arch(x86_64) || arch(arm64) || arch(riscv64)
         if bti.pointee.domain != 0 {
             // I/O addresses from the window, each page mapped for the device.
             let domain = IoDomainPointer(address: bti.pointee.domain)
@@ -328,7 +335,7 @@ enum Dma {
         guard let pmt = Objects.allocate(record) else {
             object.release()
             vmo.release()
-            #if arch(x86_64) || arch(arm64)
+            #if arch(x86_64) || arch(arm64) || arch(riscv64)
             if iova != 0 {
                 let domain = IoDomainPointer(address: bti.pointee.domain)
                 IoDomains.unmap(domain, iova: iova, size: size)
@@ -405,7 +412,7 @@ enum Dma {
     /// an IOMMU the device loses the pages first (unmapped, IOTLB invalidated);
     /// `domain` 0 when there is none or it is gone (the device blocked).
     private static func release(_ p: PmtPointer, domain: UInt64) {
-        #if arch(x86_64) || arch(arm64)
+        #if arch(x86_64) || arch(arm64) || arch(riscv64)
         if domain != 0, p.pointee.iova != 0 {
             IoDomains.unmap(IoDomainPointer(address: domain), iova: p.pointee.iova, size: p.pointee.size)
             IoDomains.release(IoDomainPointer(address: domain), iova: p.pointee.iova)

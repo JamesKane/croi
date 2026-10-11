@@ -42,7 +42,11 @@
 //     (on the Q8B, Linux's devicetree's: the hypervisor resets the SoC on
 //     others). Pairs overlapping a valid entry: ALREADY_BOUND; none free:
 //     NO_RESOURCES. A unit firmware left disabled: NOT_SUPPORTED.
-// - The RISC-V IOMMU: NOT_SUPPORTED yet.
+// - RISCV (K12e, rv64, croi's type): { uint64_t register_base }, an ACPI
+//   RIMT IOMMU node's base (a PCIe-based IOMMU's: its BAR 0); NOT_FOUND
+//   otherwise, BAD_STATE if firmware left it translating. bti_create's id
+//   is the PCI requester id, which the RIMT maps to a device id. Faults
+//   are read from its fault queue and logged.
 //
 // bti_pin(bti | options << 32, vmo | addrs_count << 32, offset, size,
 // addrs, pmt out) pins [offset, offset+size) (page aligned) of the VMO and
@@ -73,6 +77,7 @@ enum : uint32_t {
   CROI_IOMMU_TYPE_INTEL = 1,     // VT-d (K12a)
   CROI_IOMMU_TYPE_ARM_SMMU = 2,  // NOT_SUPPORTED yet
   CROI_IOMMU_TYPE_AMD = 0x10000, // AMD-Vi (K12b), croi's
+  CROI_IOMMU_TYPE_RISCV = 0x10001,  // the RISC-V IOMMU (K12e), croi's
   CROI_IOMMU_MAX_DESC_LEN = 4096,
 
   // bti_pin options.

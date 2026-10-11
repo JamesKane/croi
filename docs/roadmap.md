@@ -727,8 +727,16 @@ the SMC resource.
   units firmware left disabled, extended stream ids, global faults, the
   Sky1's firmware-enabled SMMUv3s with RMRs (a board rule to hand them
   over).
-- **K12e and on:** the RISC-V IOMMU (QEMU's riscv-iommu-pci), and
-  interrupt remapping for all of them.
+- **K12e: the RISC-V IOMMU.** **Done** (2026-10-11). croi's type with a
+  register base from the RIMT (platform or PCIe-based); device directory
+  of pass-through contexts (base or extended format), command queue with
+  IOFENCE.C, fault queue (polled); first-stage Sv48/Sv39 domains on the
+  shared layer. Tested on QEMU's riscv-iommu-pci with edu, both context
+  formats. Not yet: interrupts (IMSIC MSIs, wired lines), MSI page
+  tables (interrupt remapping), ATS/PRI, process directories, second
+  stage. QEMU 10.2 builds no RIMT for its platform IOMMU (`iommu-sys`).
+- **K12f and on:** interrupt remapping for all of them (amd64's MSIs to
+  APIC ids above 255 wait on it).
 
 ### After M3 (requirements 14–19 and the remaining extensions)
 - IOMMUs: VT-d first, then AMD-Vi, SMMUv3 (Fuchsia reference code) and

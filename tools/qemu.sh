@@ -14,7 +14,8 @@
 # With --registers-on (test mode only), the first line containing that text
 # prints every CPU's PC and frame-pointer backtrace (qemu-monitor.py): where
 # each CPU is when a lockup is reported. Alternatives are separated by '|'.
-# --iommu picks amd64's IOMMU (default intel; QEMU takes one at a time).
+# --iommu picks amd64's IOMMU (default intel; QEMU takes one at a time),
+# or on rv64 `base` for an IOMMU without MSI_FLAT.
 
 set -euo pipefail
 
@@ -83,7 +84,20 @@ case $arch in
       truncate -s 32M "$work/rv64-code.fd"
     fi
     # -cpu max has Svpbmt (memory types in page tables); the default CPU doesn't.
+    # A RISC-V IOMMU and edu behind it (K12e). The PCI one: QEMU 10.2 puts
+    # only it in the RIMT (iommu-sys=on makes the device, no RIMT). At slot
+    # 8, so the others keep their slots, and below edu: the RIMT routes the
+    # requester ids above the IOMMU's own.
+    # --iommu base: without interrupt remapping (no MSI_FLAT), so 32-byte
+    # device contexts in a 2-level directory instead of 64-byte in 3.
+    iommu_options=
+    case $iommu in
+      intel) ;;
+      base) iommu_options=,intremap=off ;;
+      *) echo "qemu.sh: --iommu on rv64 takes base" >&2; exit 2 ;;
+    esac
     qemu=(qemu-system-riscv64 -machine virt,acpi=on -cpu max -device ramfb
+          -device "riscv-iommu-pci,addr=0x8$iommu_options" -device edu,addr=0x10
           -drive "if=pflash,format=raw,unit=0,readonly=on,file=$work/rv64-code.fd"
           -drive "if=pflash,format=raw,unit=1,file=$(vars "$edk2/riscv/RISCV_VIRT_VARS.fd" rv64-vars.fd 32M)")
     ;;

@@ -2007,11 +2007,12 @@ static int64_t dma(const startup_t *s) {
   return 0x600D;
 }
 
-#if defined(__x86_64__) || defined(__aarch64__)
+#if defined(__x86_64__) || defined(__aarch64__) || defined(__riscv)
 // Mode 18, K12: VT-d with QEMU's intel-iommu (its DMAR covers the whole
 // segment), AMD-Vi with its amd-iommu (the unit covers its segment) or
 // arm64's SMMUv3 (Zircon's ARM_SMMU descriptor, requester ids through the
-// IORT), whichever the kernel found (it passes the unit's registers and
+// IORT) or rv64's RISC-V IOMMU (its base, requester ids through the
+// RIMT), whichever the kernel found (it passes the unit's registers and
 // type in the startup block, where a driver would read the DMAR or IVRS),
 // and edu's DMA engine (00:10.0, a 28-bit DMA mask). Through a pinned page and back; then to a read-only
 // IOVA and to an unpinned one, which the IOMMU refuses (the kernel checks
@@ -2051,7 +2052,7 @@ static int64_t iommu_test(const startup_t *s) {
   uint32_t type = s->iommu_type;
   uint64_t desc[2];
   __builtin_memcpy(desc, desc_bytes, sizeof desc);
-  uint64_t desc_size = type == CROI_IOMMU_TYPE_ARM_SMMU ? 8 : sizeof desc;
+  uint64_t desc_size = type == CROI_IOMMU_TYPE_ARM_SMMU || type == CROI_IOMMU_TYPE_RISCV ? 8 : sizeof desc;
   uint64_t elsewhere[2] = {desc[0] + 0x100000, desc[1]};
   uint32_t iommu = 0, again = 0, bti = 0, bti2 = 0;
   CHECK(400, sys(CROI_SYS_IOMMU_CREATE, s->resource, type, (uint64_t)&elsewhere, desc_size,
@@ -2757,7 +2758,7 @@ __attribute__((section(".text.start"))) [[noreturn]] void _start(uint64_t mode, 
             : mode == 15 ? timelines((const startup_t *)handle)
             : mode == 16 ? deadline_wakeups((const startup_t *)handle)
             : mode == 17 ? extensions((const startup_t *)handle)
-#if defined(__x86_64__) || defined(__aarch64__)
+#if defined(__x86_64__) || defined(__aarch64__) || defined(__riscv)
             : mode == 18 ? iommu_test((const startup_t *)handle)
 #endif
             : mode >= 0x400 ? child((uint32_t)mode, handle, vdso_base)

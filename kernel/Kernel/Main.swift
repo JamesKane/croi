@@ -207,6 +207,8 @@ func kernel_main_continue() -> Never {
         Ivrs.initialize(acpi)
         #elseif arch(arm64)
         Iort.initialize(acpi)
+        #elseif arch(riscv64)
+        Rimt.initialize(acpi)
         #endif
         unsafe UnsafePointer<PerCpu>(bitPattern: UInt(Smp.records[0]))!.pointee.interruptsReady
             .store(true, ordering: .releasing)

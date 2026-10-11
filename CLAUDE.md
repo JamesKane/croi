@@ -743,7 +743,7 @@ syscalls 150-156; Todhchai item 14 without an IOMMU):
   depend on where pages land. Not covered: quarantine through process
   death, and a BTI dying with PMTs quarantined.
 
-IOMMUs, K12 (Kernel/Iommu/, include/dma.h; amd64 and arm64). `IoDomain.swift`
+IOMMUs, K12 (Kernel/Iommu/, include/dma.h; every arch). `IoDomain.swift`
 is shared: a claimed device's `IoDomain` (unit, kind, domain id, device id,
 root, levels, `extra`), its IOVA allocator and page-table walks (VT-d,
 AMD-Vi and SMMUv3 stage-1 entries differ only in bits; table writes and
@@ -846,6 +846,31 @@ lists what resets that SoC):
   written, CBAR 0x1f300 only, bank then S2CR then SMR (verified to fail
   with the order swapped), overlaps refused, leaf bits, release, reuse,
   firmware's banks never taken. Unverified on hardware.
+
+The RISC-V IOMMU, K12e (Kernel/Iommu/RiscvIommu.swift; croi's type
+CROI_IOMMU_TYPE_RISCV = 0x10001, descriptor { register_base }):
+- `Rimt` reads ACPI's RIMT (IOMMU nodes: base, or PCIe-based with segment
+  and B/D/F, whose BAR 0 is the base; root-complex id mappings, "number of
+  IDs" a count). A PCIe-based IOMMU gets memory space and bus mastering
+  before its registers are read (all-ones otherwise).
+- `RiscvIommuUnit`: refused if firmware left it translating (ddtp mode >
+  Bare: BAD_STATE). A device directory with a pass-through context (V,
+  both stages Bare) for every device id the RIMT routes there: 2 levels of
+  32-byte contexts, or 3 of 64-byte ones when capabilities.MSI_FLAT makes
+  contexts extended; command queue ending batches with IOFENCE.C (AV) to
+  a semaphore word; fault queue, drained when faults are counted and
+  after each unmap's invalidation (no interrupts: they are IMSIC MSIs or
+  wired lines). Claimed: context invalid, IODIR.INVAL_DDT, then iohgatp
+  Bare, ta PSCID (= domain id), fsc Sv48/Sv39 + root, valid; released:
+  invalid. Leaves V|R|U|A (+W|D), Svpbmt NC for uncached BTIs where every
+  unit has Svpbmt (`IoDomains.riscvPageBasedMemoryTypes`).
+- QEMU rv64: `-device riscv-iommu-pci,addr=0x8` (QEMU 10.2 puts only the
+  PCI IOMMU in the RIMT; `iommu-sys=on` makes the device but no RIMT), at
+  slot 8 so the other devices keep their slots (moved, edk2's saved boot
+  entries go stale and it drops to its shell) and below edu (the RIMT
+  routes the ids above the IOMMU's own). `qemu.sh --iommu base`
+  (intremap=off: no MSI_FLAT) covers base contexts; test
+  `boot-riscv-iommu-base`.
 
 Counters, K10a (Kernel/Object/Counter.swift, User/CounterSyscalls.swift,
 include/counter.h, syscalls 160-165):

@@ -152,6 +152,15 @@ add_test(NAME boot-reboot
           ${CROI_ARCH} ${_esp_reboot} ${CMAKE_BINARY_DIR}/qemu-reboot ${CROI_EDK2_DIR})
 set_tests_properties(boot-reboot PROPERTIES TIMEOUT 120)
 
+if(CROI_ARCH STREQUAL rv64)
+  # The RISC-V IOMMU without MSI_FLAT: base device contexts in a 2-level
+  # directory (the default boot has extended ones in 3 levels; K12e).
+  add_test(NAME boot-riscv-iommu-base
+    COMMAND ${CROI_QEMU} --iommu base --test "iommu:  RISC-V IOMMU:"
+            ${CROI_ARCH} ${CROI_ESP_DIR} ${CMAKE_BINARY_DIR}/qemu-riscv-iommu ${CROI_EDK2_DIR})
+  set_tests_properties(boot-riscv-iommu-base PROPERTIES TIMEOUT 180)
+endif()
+
 if(CROI_ARCH STREQUAL arm64)
   # The DBG2 console path (QEMU's SPCR can't be turned off): an ESP whose
   # command line makes the loader try DBG2 first.
