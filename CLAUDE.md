@@ -699,7 +699,8 @@ include/interrupt.h; syscalls 147 msi_allocate, 148 msi_create):
   at msi_create and retarget and cleared by `releaseMsi`. set_affinity moves an
   MSI-X vector: a vector on the new CPU, the entry rewritten under its
   mask, the old vector dropped; plain MSI is NOT_SUPPORTED (the driver
-  owns the capability). arm64 (ITS) and rv64 (IMSIC): NOT_SUPPORTED.
+  owns the capability). arm64: through the GICv3 ITS (K12h, below); rv64
+  (IMSIC): NOT_SUPPORTED.
 - The kernel's mappings of MSI-X tables and capabilities are `shared`
   (`mapPhysical(shared:)`): they don't enter the root filter's list of
   kernel MMIO, so the driver keeps its resource over them.
@@ -786,6 +787,32 @@ Intel VT-d, K12a (Kernel/Iommu/IntelIommu.swift):
   pinned IOVAs, a write to a read-only and to an unpinned IOVA fault
   (QEMU prints its own lines for those), re-claim and re-bind.
 
+The GICv3 ITS: MSIs on arm64, K12h (Kernel/Irq/Its.swift, DeviceIrqs'
+arm64 MSI part, MsiObject):
+- `Its.initialize` (from `GicV3.initializeBootCpu`; bounded spins, the
+  clock isn't up): device and collection tables (64 KiB pages, a flat
+  device table of up to 2^16 DeviceIDs), a 4 KiB command queue, one
+  LPI configuration table (14 INTID bits: LPIs 8192-16383). Each CPU
+  (`enableThisCpu`, from `GicV3.initializeThisCpu`): PROPBASER, its own
+  pending table (64 KiB aligned, PTZ), EnableLPIs, MAPC (ICID = CPU,
+  RDbase per GITS_TYPER.PTA) + SYNC.
+- EventIDs are global (msi_allocate precedes knowing the device): 2048,
+  allocations consecutive and aligned, LPI = 8192 + EventID, each
+  device's ITT covering all 2048. The message is GITS_TRANSLATER and the
+  EventID. msi_create finds the device (plain MSI: `Mcfg.requesterId` of
+  the capability; MSI-X: `Pci.msixOwner`, the function whose MSI-X
+  capability names that table address, walking buses from the MCFG
+  window through bridges, a bus mapped when first read), its DeviceID
+  (`Iort.itsDeviceId`: a root complex's mapping to an ITS group, or via
+  an SMMUv3's stream id and that SMMU's mappings), then MAPD (once per
+  device), the LPI enabled, MAPTI, INV, SYNC; set_affinity is MOVI (the
+  message stays); destroy DISCARDs. LPIs dispatch through `DeviceIrqs`'
+  table lock (`dispatchMsi`).
+- SMMUv3 domains identity-map the doorbell page, so a claimed device's
+  MSIs still reach the ITS (Linux's MSI window).
+- Mode 11's msi_test runs on arm64 (edu's MSI, an event not mapped for
+  edu refused, virtio MSI-X entries, MOVI to CPU 1).
+
 VT-d interrupt remapping and queued invalidation, K12f (Kernel/Iommu/
 InterruptRemapping.swift, IntelIommu.swift):
 - `Vtd.boot` (right after `Dmar.initialize`) brings up every DMAR unit:
@@ -811,10 +838,14 @@ InterruptRemapping.swift, IntelIommu.swift):
 - QEMU: TCG boots run `intel-iommu,intremap=on,eim=on` (eim=auto leaves
   EIM off under TCG); KVM boots (the bench) keep intremap=off, since KVM
   needs a split irqchip for it, which would move the IOAPIC into QEMU and
-  change every interrupt timing on record. QEMU never sets GSTS.CFIS
-  (CFI can't be turned on to contrast) and blocks compatibility-format
-  MSIs when EIM is on. Mode 11's checks read either format; check 297
-  (remapped only): an old-style MSI from edu is not delivered. Test
+  change every interrupt timing on record. QEMU's VT-d passes
+  compatibility-format MSIs through whatever CFI says (and never sets
+  GSTS.CFIS), so croi's blocking of them (CFIS clear) is per the
+  specification, unverified under QEMU. Mode 11's checks read either
+  format; check 297 (an old-style or unmapped MSI from edu is not
+  delivered) runs for AMD-Vi and the ITS only, after acknowledging the
+  interrupt (an MSI stays masked after interrupt_wait until then: the
+  first version of 297 passed whatever happened). Test
   `boot-intremap-off` keeps the compatibility path covered.
 
 AMD-Vi, K12b (Kernel/Iommu/AmdIommu.swift; croi's type CROI_IOMMU_TYPE_AMD

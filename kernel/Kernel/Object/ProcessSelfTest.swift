@@ -197,8 +197,16 @@ enum ProcessSelfTest {
         #if arch(x86_64)
         console.write("  msi:    allocations and info; where present, edu's MSI by port and by wait and a virtio ")
         console.write("MSI-X table's entries programmed, masked, moved to CPU 1, cleared\n")
+        #elseif arch(arm64)
+        if Its.ready {
+            console.write("  msi:    through the GICv3 ITS: allocations and info; where present, edu's MSI by port and by ")
+            console.write("wait, an event not mapped for it refused, a virtio MSI-X table's entries programmed, moved to ")
+            console.write("CPU 1 (MOVI), cleared\n")
+        } else {
+            console.write("  msi:    not supported (no ITS)\n")
+        }
         #else
-        console.write("  msi:    not supported yet (ITS / IMSIC)\n")
+        console.write("  msi:    not supported yet (IMSIC)\n")
         #endif
     }
 

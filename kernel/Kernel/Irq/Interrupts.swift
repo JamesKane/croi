@@ -90,7 +90,7 @@ enum Interrupts {
         LocalApic.endOfInterrupt()
         #elseif arch(arm64)
         let intid = arch_gicv3_ack() & 0xFF_FFFF
-        guard intid < 1020 else { return }  // spurious
+        guard intid < 1020 || intid >= UInt64(Its.firstLpi) else { return }  // spurious
         Trace.event(CROI_TRACE_IRQ, UInt16(CROI_TK_IRQ_ENTER), intid)
         defer { Trace.event(CROI_TRACE_IRQ, UInt16(CROI_TK_IRQ_EXIT), intid) }
         if intid == GicV3.ipiSgi {
@@ -99,6 +99,8 @@ enum Interrupts {
             Timers.handleInterrupt()
         } else if intid == Pmu.intid, intid != 0 {
             unsafe Pmu.handleOverflow(frame)
+        } else if intid >= UInt64(Its.firstLpi) {
+            DeviceIrqs.dispatchMsi(UInt32(intid))  // an LPI: an MSI through the ITS
         } else if intid >= 32 {
             DeviceIrqs.dispatch(UInt32(intid))
         } else {
@@ -387,6 +389,7 @@ enum GicV3 {
 
     nonisolated(unsafe) private static var distributor: UInt64 = 0
     nonisolated(unsafe) private static var redistributors: UInt64 = 0
+    nonisolated(unsafe) private static var redistributorsPhysical: UInt64 = 0
     nonisolated(unsafe) private static var redistributorsSize: UInt64 = 0
     nonisolated(unsafe) private(set) static var itsBase: UInt64 = 0
     /// Interrupt lines the distributor has (SPIs end below this).
@@ -420,6 +423,7 @@ enum GicV3 {
             return false
         }
         redistributorsSize = gicrLength
+        redistributorsPhysical = gicr
         if version == 0 {  // "not specified": ask GICD_PIDR2
             version = UInt8((read32(distributor + 0xFFE8) >> 4) & 0xF)
         }
@@ -435,6 +439,7 @@ enum GicV3 {
         }
         write32(distributor + 0x0, (1 << 4) | (1 << 1))  // ARE, EnableGrp1
         waitForDistributor()
+        if itsBase != 0, !Its.initialize(itsBase) { itsBase = 0 }  // K12h: MSIs
         initializeThisCpu()
         return true
     }
@@ -457,6 +462,7 @@ enum GicV3 {
         while read32(frame) & (1 << 3) != 0 {      // GICR_CTLR.RWP
             arch_spin_pause()
         }
+        Its.enableThisCpu(frame: frame, physicalFrame: redistributorsPhysical + (frame - redistributors))
         arch_gicv3_cpu_init()
     }
 

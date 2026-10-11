@@ -1620,7 +1620,7 @@ static uint32_t find_device(volatile uint8_t *bus, uint32_t vendor_mask, uint32_
   return 0;
 }
 
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
 // K12f: with interrupt remapping (VT-d) a message is in the remappable
 // format (bit 4, SHV bit 3, data 0) and names an entry (the handle, in
 // address bits 19:5 and 2) the kernel wrote; old-style messages are
@@ -1631,9 +1631,18 @@ static int remapped(uint64_t address) { return (address & 0x10) != 0; }
 static int amd_remapped(uint32_t data) { return data >= 0x100; }
 static uint32_t handle_of(uint32_t address) { return ((address >> 5) & 0x7FFF) | ((address >> 2) & 1) << 15; }
 
+// K12h: on arm64 the message is the GICv3 ITS's doorbell and an EventID
+// (the LPI less 8192); a move keeps it (MOVI); an event not mapped for a
+// device goes nowhere.
+#if defined(__aarch64__)
+static const int its = 1;
+#else
+static const int its = 0;
+#endif
+
 static int64_t msi_test(const startup_t *s, uint32_t port) {
   volatile uint8_t *bus = 0;
-  uint32_t bus_vmo = physical_vmo(s, ECAM, 32 * 0x8000, &bus);  // bus 0, devices 0-31, function 0
+  uint32_t bus_vmo = physical_vmo(s, s->ecam ? s->ecam : ECAM, 32 * 0x8000, &bus);  // bus 0, devices 0-31, function 0
 
   // Allocations: the MSI resource; a power of two up to 32.
   uint32_t msi = 0, tracing = 0, intr = 0, other = 0, anon = 0;
@@ -1645,12 +1654,13 @@ static int64_t msi_test(const startup_t *s, uint32_t port) {
   sys(CROI_SYS_HANDLE_CLOSE, tracing, 0, 0, 0, 0);
   croi_info_msi_t info = {};
   CHECK(284, sys(CROI_SYS_OBJECT_GET_INFO, msi, CROI_INFO_MSI, (uint64_t)&info, sizeof info, 0) == 0 &&
-                 (remapped(info.target_addr)
+                 (its ? info.target_addr != 0 && info.base_irq_id >= 8192 && info.target_data == info.base_irq_id - 8192
+                  : remapped(info.target_addr)
                       ? (info.target_addr & ~0xFFFFFull) == 0xFEE00000 && (info.target_addr & 8) && info.target_data == 0
                   : amd_remapped(info.target_data)
                       ? info.target_addr == 0xFEE00000 && info.target_data < 0x800
                       : (info.target_addr & ~0xFF000ull) == 0xFEE00000 && info.target_data == info.base_irq_id) &&
-                 info.base_irq_id >= 0xB0 && info.base_irq_id < 0xF0 && info.num_irq == 1 &&
+                 (its || (info.base_irq_id >= 0xB0 && info.base_irq_id < 0xF0)) && info.num_irq == 1 &&
                  info.interrupt_count == 0);
   uint32_t cap = 0;
   uint32_t edu_at = find_device(bus, ~0u, 0x11e81234, 0x05, &cap);
@@ -1705,12 +1715,20 @@ static int64_t msi_test(const startup_t *s, uint32_t port) {
   edu_regs[0x60 / 4] = 2;
   CHECK(290, sys(CROI_SYS_INTERRUPT_WAIT, intr, (uint64_t)&time, 0, 0, 0) == 0 && time >= before);
   edu_regs[0x64 / 4] = 2;
-  if (remapped(info.target_addr) || amd_remapped(info.target_data)) {
+  // VT-d isn't checked: QEMU's model passes compatibility-format MSIs
+  // through whatever CFI says (hardware with CFIS clear, as croi leaves
+  // it, blocks them).
+  if (its || amd_remapped(info.target_data)) {
     // An old-style message for the same vector is blocked: nothing arrives
-    // (AMD-Vi: index 0xB0 up to 0xFF is no entry).
-    cfg32_write(edu, cap + 4, 0xFEE00000);
-    *(volatile uint16_t *)(edu + cap + ((control & (1u << 7)) ? 0xC : 8)) = (uint16_t)info.base_irq_id;
-    CHECK(297, sys(CROI_SYS_INTERRUPT_BIND, intr, port, 78, CROI_INTERRUPT_BIND, 0) == 0);
+    // (AMD-Vi: index 0xB0 up to 0xFF is no entry). arm64: an event not
+    // mapped for edu, at the ITS's doorbell.
+    cfg32_write(edu, cap + 4, its ? (uint32_t)info.target_addr : 0xFEE00000);
+    *(volatile uint16_t *)(edu + cap + ((control & (1u << 7)) ? 0xC : 8)) =
+        (uint16_t)(its ? info.target_data + 64 : info.base_irq_id);
+    // Bound and acknowledged (an MSI stays masked until then, after the
+    // wait above), so a delivery would arrive.
+    CHECK(297, sys(CROI_SYS_INTERRUPT_BIND, intr, port, 78, CROI_INTERRUPT_BIND, 0) == 0 &&
+                   sys(CROI_SYS_INTERRUPT_ACK, intr, 0, 0, 0, 0) == 0);
     edu_regs[0x60 / 4] = 4;
     CHECK(297, port_next(port, 20000000, &p) == ERR_TIMED_OUT);
     edu_regs[0x64 / 4] = 4;
@@ -1757,12 +1775,13 @@ static int64_t msi_test(const startup_t *s, uint32_t port) {
                       (uint64_t)&x1) == 0);
   // Remapped: one entry per vector (consecutive handles, data 0), the
   // move to CPU 1 a handle in its range (entries 128 + cpu * 64 + vector).
-  int r = remapped(info.target_addr), amd = amd_remapped(info.target_data);
+  int r = !its && remapped(info.target_addr), amd = !its && amd_remapped(info.target_data);
   CHECK(294, e[0] == (uint32_t)info.target_addr && e[1] == 0 && e[2] == info.target_data && (e[3] & 1) == 0 &&
                  (r ? handle_of(e[4]) == handle_of(e[0]) + 1 && e[6] == 0
                     : e[4] == (uint32_t)info.target_addr && e[6] == info.target_data + 1) && (e[7] & 1) == 0);
   CHECK(295, sys(CROI_SYS_INTERRUPT_SET_AFFINITY, x1, 1u << 1, 0, 0, 0) == 0 &&
-                 (r     ? (handle_of(e[4]) - 128) / 64 == 1 && e[6] == 0
+                 (its   ? e[4] == (uint32_t)info.target_addr && e[6] == info.target_data + 1
+                  : r     ? (handle_of(e[4]) - 128) / 64 == 1 && e[6] == 0
                   : amd ? e[4] == 0xFEE00000 && e[6] >= 0x100 && e[6] < 0x800 && e[6] != info.target_data + 1
                         : ((e[4] >> 12) & 0xFF) == 1 && e[6] >= 0xB0 && e[6] < 0xF0) &&
                  (e[7] & 1) == 0 && e[0] == (uint32_t)info.target_addr);

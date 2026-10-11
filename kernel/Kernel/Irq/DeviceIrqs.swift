@@ -304,6 +304,38 @@ enum DeviceIrqs {
     }
     #endif
 
+    #if arch(arm64)
+    // MSIs through the GICv3 ITS (K12h): a "vector" is an LPI (8192 +
+    // EventID), global; `cpu` is the collection it is delivered to.
+
+    static func allocateMsi(cpu: Int, count: UInt32) -> UInt32? { Its.allocate(count: count) }
+
+    static func freeMsi(cpu: Int, vector: UInt32, count: UInt32) { Its.free(lpi: vector, count: count) }
+
+    /// The ITS's doorbell and the EventID; nil without an ITS.
+    static func msiMessage(cpu: Int, vector: UInt32) -> (address: UInt64, data: UInt32)? {
+        guard Its.ready else { return nil }
+        return (Its.translater, vector - Its.firstLpi)
+    }
+
+    /// Installs `object` for the LPI (0 removes it); once it returns, no
+    /// run of the previous handler is still going on.
+    static func setMsiHandler(cpu: Int, vector: UInt32, _ object: UInt64) {
+        tableLock.withLock { Its.setHandler(lpi: vector, object) }
+    }
+
+    /// An LPI arrived (interrupt context, before EOI).
+    static func dispatchMsi(_ lpi: UInt32) {
+        tableLock.withLock {
+            let object = Its.handler(lpi)
+            if object != 0 { InterruptObjects.fire(ObjectPointer(address: object)) }
+        }
+    }
+
+    static func prepareMsi(cpu: Int, vector: UInt32, source: UInt16?) {}
+    static func releaseMsi(cpu: Int, vector: UInt32) {}
+    #endif
+
     /// The CPU that last took `number` (boot test).
     static func lastCpu(_ number: UInt32) -> Int {
         tableLock.withLock {

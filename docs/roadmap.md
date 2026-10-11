@@ -753,9 +753,20 @@ the SMC resource.
   enabled only where the IVRS describes every IOAPIC. Tested on QEMU's
   amd-iommu with and without xtsup. Not yet: per-device tables with
   source verification, guest/posted mode.
-- The arm64 side of interrupt remapping is the GICv3 ITS and the rv64
-  side the IMSIC (with the RISC-V IOMMU's MSI page tables): both are
-  their own steps.
+- **K12h: the GICv3 ITS (arm64 MSIs).** **Done** (2026-10-11). LPIs and
+  their tables, collections per CPU, global EventIDs (allocations
+  precede devices), DeviceIDs from the IORT (directly or through an
+  SMMUv3's stream ids), the MSI-X table's owner found by walking PCI,
+  MAPD/MAPTI/MOVI/DISCARD; SMMUv3 domains map the doorbell. Tested on
+  QEMU virt (edu MSI, an unmapped event refused, virtio MSI-X, MOVI).
+  On the way: mode 11's check 297 (a blocked message) never could fail
+  (the interrupt was still masked from the wait before it); fixed, it
+  runs for AMD-Vi and the ITS, and QEMU's VT-d turned out to pass
+  compatibility-format MSIs whatever CFI says, so VT-d's blocking of
+  them is per the specification, unverified. Not yet: GICv4, two-level
+  device tables, several ITSs.
+- **K12i: the RISC-V IMSIC** (rv64 MSIs, and the RISC-V IOMMU's MSI page
+  tables for remapping).
 
 ### K13a (agreed with Todhchai, 2026-10-11): VMO slices and ZERO_CHILDREN
 

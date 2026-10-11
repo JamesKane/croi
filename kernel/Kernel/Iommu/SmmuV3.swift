@@ -123,6 +123,18 @@ enum SmmuV3 {
             throw .noMemory
         }
         domain.pointee.extra = context
+        // Its MSIs are writes to the ITS doorbell: that page stays reachable
+        // at its own address (Linux's MSI window), as K12h needs.
+        if Its.ready {
+            do throws(Status) {
+                try IoDomains.identityMap(domain, Its.translater & ~(KernelLayout.pageSize - 1), KernelLayout.pageSize)
+            } catch {
+                IoDomains.free(domain)
+                pmm.free(context)
+                freeAsid(unit, id)
+                throw error
+            }
+        }
         unit.writeContext(context, root: domain.pointee.root, asid: id)
         do throws(Status) {
             try unit.pointee.lock.withLock { () throws(Status) in
@@ -187,6 +199,10 @@ enum Iort {
     nonisolated(unsafe) static var smmuCount = 0
     nonisolated(unsafe) static var mappings = InlineArray<16, Mapping>(repeating: Mapping())
     nonisolated(unsafe) static var mappingCount = 0
+    /// Routes to the ITS (K12h): from a root complex (`smmu` -1) or from an
+    /// SMMUv3's stream ids (`smmu` its index), to ITS DeviceIDs.
+    nonisolated(unsafe) static var itsMappings = InlineArray<16, Mapping>(repeating: Mapping())
+    nonisolated(unsafe) static var itsMappingCount = 0
     /// SMMUv1/v2 nodes (SmmuV2.swift).
     struct SmmuV2Node {
         var registerBase: UInt64 = 0
@@ -246,11 +262,49 @@ enum Iort {
                 }
                 at += length
             }
-            // Root complexes (type 2): their id mappings into an SMMUv3.
+            // ITS groups (type 0): their offsets, so mappings can name them.
+            var itsGroups = InlineArray<4, UInt32>(repeating: 0)
+            var itsGroupCount = 0
             at = first
             for _ in 0..<nodes {
                 let type = table.load(fromByteOffset: at, as: UInt8.self)
                 let length = Int(unsafe table.unsafeLoadUnaligned(fromByteOffset: at + 1, as: UInt16.self))
+                if type == 0, itsGroupCount < itsGroups.count {
+                    itsGroups[itsGroupCount] = UInt32(at)
+                    itsGroupCount += 1
+                }
+                at += length
+            }
+            func isIts(_ offset: UInt32) -> Bool {
+                for i in 0..<itsGroupCount where itsGroups[i] == offset { return true }
+                return false
+            }
+            // Root complexes (type 2) and SMMUv3s (type 4): id mappings into
+            // an SMMUv3 (root complexes) or an ITS group (both; an SMMUv3's
+            // single mappings are its own interrupts, skipped).
+            at = first
+            for _ in 0..<nodes {
+                let type = table.load(fromByteOffset: at, as: UInt8.self)
+                let length = Int(unsafe table.unsafeLoadUnaligned(fromByteOffset: at + 1, as: UInt16.self))
+                if type == 2 || type == 4 {
+                    var source = -1
+                    for s in 0..<smmuCount where smmus[s].offset == UInt32(at) { source = s }
+                    let count = Int(unsafe table.unsafeLoadUnaligned(fromByteOffset: at + 8, as: UInt32.self))
+                    let array = Int(unsafe table.unsafeLoadUnaligned(fromByteOffset: at + 12, as: UInt32.self))
+                    for m in 0..<count {
+                        let entry = at + array + 20 * m
+                        guard entry + 20 <= table.byteCount, itsMappingCount < itsMappings.count else { break }
+                        let target = unsafe table.unsafeLoadUnaligned(fromByteOffset: entry + 12, as: UInt32.self)
+                        let flags = unsafe table.unsafeLoadUnaligned(fromByteOffset: entry + 16, as: UInt32.self)
+                        guard isIts(target), flags & 1 == 0 else { continue }
+                        itsMappings[itsMappingCount] = Mapping(
+                            inputBase: unsafe table.unsafeLoadUnaligned(fromByteOffset: entry, as: UInt32.self),
+                            count: unsafe table.unsafeLoadUnaligned(fromByteOffset: entry + 4, as: UInt32.self) &+ 1,
+                            outputBase: unsafe table.unsafeLoadUnaligned(fromByteOffset: entry + 8, as: UInt32.self),
+                            smmu: type == 2 ? -1 : source)
+                        itsMappingCount += 1
+                    }
+                }
                 if type == 2 {
                     let count = Int(unsafe table.unsafeLoadUnaligned(fromByteOffset: at + 8, as: UInt32.self))
                     let array = Int(unsafe table.unsafeLoadUnaligned(fromByteOffset: at + 12, as: UInt32.self))
@@ -288,6 +342,23 @@ enum Iort {
         for i in 0..<mappingCount where mappings[i].smmu == smmu {
             let m = mappings[i]
             if UInt32(rid) >= m.inputBase, UInt32(rid) - m.inputBase < m.count { return m.outputBase + (UInt32(rid) - m.inputBase) }
+        }
+        return nil
+    }
+
+    /// The ITS DeviceID requester id `rid` reaches the ITS with: straight
+    /// from the root complex, or through an SMMUv3's stream id.
+    static func itsDeviceId(_ rid: UInt16) -> UInt32? {
+        func through(_ source: Int, _ id: UInt32) -> UInt32? {
+            for i in 0..<itsMappingCount where itsMappings[i].smmu == source {
+                let m = itsMappings[i]
+                if id >= m.inputBase, id - m.inputBase < m.count { return m.outputBase + (id - m.inputBase) }
+            }
+            return nil
+        }
+        if let direct = through(-1, UInt32(rid)) { return direct }
+        for s in 0..<smmuCount {
+            if let sid = streamId(rid, smmu: s), let device = through(s, sid) { return device }
         }
         return nil
     }
