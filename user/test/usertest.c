@@ -2170,6 +2170,38 @@ static int64_t iommu_test(const startup_t *s) {
                  sys(CROI_SYS_VMO_WRITE, vmo, (uint64_t)zero, PAGE, 64, 0) == 0 &&
                  edu_dma(regs, 0x40000, addrs[1], 1) &&
                  sys(CROI_SYS_VMO_READ, vmo, (uint64_t)back, PAGE, 64, 0) == 0 && back[0] == 0 && back[63] == 0);
+  // K12j: the claimed device's MSIs still arrive. VT-d and AMD-Vi don't
+  // translate interrupt requests; an SMMUv3 domain maps the ITS doorbell;
+  // a RISC-V IOMMU context routes MSIs through its MSI page table (or maps
+  // the IMSIC files). Where there are no MSIs (rv64's PLIC), skipped.
+  uint32_t msi = 0;
+  if (sys(CROI_SYS_MSI_ALLOCATE, s->resource, 1, (uint64_t)&msi, 0, 0) == 0) {
+    croi_info_msi_t info = {0};
+    croi_port_packet_t p;
+    uint32_t intr = 0, mport = 0;
+    uint16_t control = *(volatile uint16_t *)(edu + cap + 2);
+    CHECK(409, sys(CROI_SYS_OBJECT_GET_INFO, msi, CROI_INFO_MSI, (uint64_t)&info, sizeof info, 0) == 0 &&
+                   sys6(CROI_SYS_MSI_CREATE, msi, 0, 0, bus_vmo, edu_at + cap, (uint64_t)&intr) == 0 &&
+                   sys(CROI_SYS_PORT_CREATE, CROI_PORT_BIND_TO_INTERRUPT, (uint64_t)&mport, 0, 0, 0) == 0 &&
+                   sys(CROI_SYS_INTERRUPT_BIND, intr, mport, 79, CROI_INTERRUPT_BIND, 0) == 0);
+    cfg32_write(edu, cap + 4, (uint32_t)info.target_addr);
+    if (control & (1u << 7)) {
+      cfg32_write(edu, cap + 8, (uint32_t)(info.target_addr >> 32));
+      *(volatile uint16_t *)(edu + cap + 0xC) = (uint16_t)info.target_data;
+    } else {
+      *(volatile uint16_t *)(edu + cap + 8) = (uint16_t)info.target_data;
+    }
+    *(volatile uint16_t *)(edu + cap + 2) = (uint16_t)((control & ~(7u << 4)) | 1);  // one message, enabled
+    cfg32_write(edu, 4, command | 1u << 1 | 1u << 2 | 1u << 10);                   // no INTx
+    *(volatile uint32_t *)(regs + 0x60) = 8;
+    CHECK(410, port_next(mport, 1000000000, &p) == 0 && p.type == CROI_PKT_TYPE_INTERRUPT && p.key == 79);
+    *(volatile uint32_t *)(regs + 0x64) = 8;
+    *(volatile uint16_t *)(edu + cap + 2) = control;
+    sys(CROI_SYS_INTERRUPT_DESTROY, intr, 0, 0, 0, 0);
+    sys(CROI_SYS_HANDLE_CLOSE, intr, 0, 0, 0, 0);
+    sys(CROI_SYS_HANDLE_CLOSE, mport, 0, 0, 0, 0);
+    sys(CROI_SYS_HANDLE_CLOSE, msi, 0, 0, 0, 0);
+  }
   cfg32_write(edu, 4, command);
   sys(CROI_SYS_HANDLE_CLOSE, regs_vmo, 0, 0, 0, 0);
 

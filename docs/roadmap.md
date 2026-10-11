@@ -773,6 +773,13 @@ the SMC resource.
   with aia=aplic-imsic (`boot-aia`). Not yet: the RISC-V IOMMU's MSI page
   tables (remapping on rv64), IPIs through the IMSIC, guest files, APLIC
   direct mode, several sockets.
+- **K12j: claimed devices' MSIs, and the RISC-V IOMMU's MSI page tables.**
+  **Done** (2026-10-11). A test that a BTI-claimed device's MSI arrives,
+  on every arch (it failed on rv64 first). RISC-V contexts: the
+  supervisor files identity mapped (first stage), and with MSI_FLAT a
+  flat MSI page table confining MSIs to them. Not yet: identity-level
+  isolation on rv64 (MRIF mode or per-device guest files), the second
+  stage the MSI tables are mainly for (guests).
 
 ### K13a (agreed with Todhchai, 2026-10-11): VMO slices and ZERO_CHILDREN
 

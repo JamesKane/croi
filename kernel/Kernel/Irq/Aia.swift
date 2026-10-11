@@ -92,6 +92,7 @@ enum Aia {
         var lowest = UInt64.max
         for i in 0..<hartCount { lowest = min(lowest, harts[i].file) }
         for i in 0..<hartCount { harts[i].index = UInt32((harts[i].file - lowest) / fileSize) }
+        fileStride = fileSize
         // Every source inactive and disabled; then MSI delivery on.
         write(domaincfg, 0)
         for s in 1...sources {
@@ -116,6 +117,13 @@ enum Aia {
         }
         arch_rv_sie_set(1 << 9)  // SEIE
     }
+
+    /// The supervisor interrupt files (K12j: the RISC-V IOMMU's MSI page
+    /// tables): how many, each one's address and hart index, and their
+    /// spacing (a hart's guest files follow its supervisor file).
+    static var fileCount: Int { hartCount }
+    static func file(_ i: Int) -> (address: UInt64, index: UInt32) { (harts[i].file, harts[i].index) }
+    nonisolated(unsafe) private(set) static var fileStride: UInt64 = 0
 
     private static func hart(_ id: UInt64) -> (file: UInt64, index: UInt32)? {
         for i in 0..<hartCount where harts[i].hart == id { return (harts[i].file, harts[i].index) }

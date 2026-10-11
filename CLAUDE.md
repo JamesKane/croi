@@ -807,8 +807,23 @@ RISC-V AIA: the APLIC and IMSICs, K12i (Kernel/Irq/Aia.swift; cpu.S
 - The RISC-V IOMMU now comes up at boot (`RiscvIommus.boot`, devices
   passed through): QEMU resets it Off, which blocked edu's MSIs.
 - QEMU: `qemu.sh --aia` (`aia=aplic-imsic`); test `boot-aia` runs the
-  whole boot test there. No remapping yet (the IOMMU's MSI page tables),
-  so check 297 skips rv64.
+  whole boot test there.
+
+A claimed device's MSIs, K12j (RiscvIommus.mapInterruptFiles; mode 18's
+checks 409-410 on every arch: edu's MSI through its BTI's domain):
+- VT-d and AMD-Vi don't translate interrupt requests; SMMUv3 domains map
+  the ITS doorbell (K12h, first exercised here).
+- RISC-V: MSI page tables apply to a context's guest-physical addresses,
+  the first stage's output, so every hart's supervisor file is identity
+  mapped in the domain; with MSI_FLAT (extended contexts) the context's
+  msiptp is Flat over one per-unit table (one write-through entry per
+  hart index, built at the first claim; mask = the hart-index bits above
+  the files' stride, pattern = the lowest file), confining MSIs to those
+  files. Verified in QEMU (invalid entries stop delivery). The identity
+  written isn't restricted (that needs MRIF mode or a device's own guest
+  files), so rv64 still has no identity-level remapping and check 297
+  skips it. `boot-riscv-iommu-base` (no MSI_FLAT, with AIA) covers the
+  identity-mapped files alone.
 
 The GICv3 ITS: MSIs on arm64, K12h (Kernel/Irq/Its.swift, DeviceIrqs'
 arm64 MSI part, MsiObject):

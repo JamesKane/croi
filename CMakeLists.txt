@@ -176,9 +176,11 @@ endif()
 
 if(CROI_ARCH STREQUAL rv64)
   # The RISC-V IOMMU without MSI_FLAT: base device contexts in a 2-level
-  # directory (the default boot has extended ones in 3 levels; K12e).
+  # directory (the default boot has extended ones in 3 levels; K12e), and
+  # with AIA, a claimed device's MSIs through identity-mapped interrupt
+  # files alone (no MSI page table; K12j).
   add_test(NAME boot-riscv-iommu-base
-    COMMAND ${CROI_QEMU} --iommu base --test "iommu:  RISC-V IOMMU:"
+    COMMAND ${CROI_QEMU} --iommu base --aia --test "iommu:  RISC-V IOMMU:"
             ${CROI_ARCH} ${CROI_ESP_DIR} ${CMAKE_BINARY_DIR}/qemu-riscv-iommu ${CROI_EDK2_DIR})
   set_tests_properties(boot-riscv-iommu-base PROPERTIES TIMEOUT 180)
   # AIA (K12i): the APLIC and IMSICs instead of the PLIC; the whole boot

@@ -122,6 +122,7 @@ enum RiscvIommus {
         }
         domain.pointee.extra = UInt64(did)
         do throws(Status) {
+            try mapInterruptFiles(domain, unit)
             try unit.pointee.lock.withLock { () throws(Status) in
                 let context = unsafe unit.context(did)
                 // Invalid while it changes, then first stage on.
@@ -130,6 +131,12 @@ enum RiscvIommus {
                 unsafe context[1] = 0                                                   // second stage Bare
                 unsafe context[2] = UInt64(id) << 12                                    // PSCID
                 unsafe context[3] = (unit.pointee.sv48 ? 9 : 8) << 60 | domain.pointee.root >> 12  // Sv48/Sv39, PPN
+                if unit.pointee.extendedContexts, unit.pointee.msiTable != 0 {
+                    // MSIs: writes to the supervisor files, through the MSI page table.
+                    unsafe context[4] = 1 << 60 | unit.pointee.msiTable >> 12  // msiptp: Flat
+                    unsafe context[5] = unit.pointee.msiMask
+                    unsafe context[6] = unit.pointee.msiPattern
+                }
                 arch_device_write_barrier()
                 unsafe context[0] = 1                                                   // valid
                 try unit.invalidateDeviceLocked(did, domain: id)
@@ -150,10 +157,52 @@ enum RiscvIommus {
             let context = unsafe unit.context(did)
             unsafe context[0] = 0
             unsafe context[3] = 0
+            if unit.pointee.extendedContexts { unsafe context[4] = 0 }
             try? unit.invalidateDeviceLocked(did, domain: id)
             unit.pointee.domains[Int(id) / 64] &= ~(1 << UInt64(id % 64))
         }
         IoDomains.free(domain)
+    }
+}
+
+extension RiscvIommus {
+    /// K12j: a claimed device's MSIs. Its writes to the harts' supervisor
+    /// interrupt files pass the first stage at their own addresses (they
+    /// are identity mapped, as SMMUv3 domains map the ITS doorbell), and
+    /// with MSI_FLAT the context's MSI page table (one per unit, built
+    /// here once) then routes them, write-through, to those files only:
+    /// the address pattern covers the files, one entry per hart index.
+    /// The data (the identity) isn't restricted: that would take MRIF mode
+    /// or guest files of its own.
+    static func mapInterruptFiles(_ domain: IoDomainPointer, _ unit: RiscvIommuUnitPointer) throws(Status) {
+        guard Aia.active, Aia.fileCount > 0 else { return }
+        for i in 0..<Aia.fileCount {
+            try IoDomains.identityMap(domain, Aia.file(i).address, KernelLayout.pageSize)
+        }
+        guard unit.pointee.extendedContexts else { return }
+        try unit.pointee.lock.withLock { () throws(Status) in
+            guard unit.pointee.msiTable == 0 else { return }
+            var lowest = UInt64.max, highest: UInt32 = 0
+            for i in 0..<Aia.fileCount {
+                lowest = min(lowest, Aia.file(i).address)
+                highest = max(highest, Aia.file(i).index)
+            }
+            var bits: UInt64 = 0
+            while 1 << bits <= UInt64(highest) { bits += 1 }
+            var strideShift: UInt64 = 0
+            while (KernelLayout.pageSize << strideShift) < Aia.fileStride { strideShift += 1 }
+            guard bits <= 8, let table = IoDomains.zeroedPage() else { throw .noMemory }
+            for i in 0..<Aia.fileCount {
+                let (address, index) = Aia.file(i)
+                let entry = unsafe UnsafeMutablePointer<UInt64>(bitPattern: UInt(KernelLayout.physmap(table)) + UInt(index) * 16)!
+                unsafe entry[1] = 0
+                unsafe entry[0] = (address >> 12) << 10 | 3 << 1 | 1  // PPN, M basic (write-through), V
+            }
+            arch_device_write_barrier()
+            unit.pointee.msiMask = ((1 << bits) - 1) << strideShift
+            unit.pointee.msiPattern = (lowest >> 12) & ~unit.pointee.msiMask
+            unit.pointee.msiTable = table
+        }
     }
 }
 
@@ -277,6 +326,11 @@ struct RiscvIommuUnit: ~Copyable {
     var semaphore: UInt64 = 0
     var sequence: UInt32 = 0
     var domains = InlineArray<16, UInt64>(repeating: 1)  // PSCID 0 reserved
+    /// K12j: the MSI page table claimed devices' contexts share (physical,
+    /// 0 until needed), and the context's msi_addr_mask and pattern.
+    var msiTable: UInt64 = 0
+    var msiMask: UInt64 = 0
+    var msiPattern: UInt64 = 0
     var bound = false
     var faults: UInt64 = 0
 }
