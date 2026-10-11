@@ -56,6 +56,7 @@ struct SpinLock: ~Copyable {
             // on can be preempted and moved to another CPU.
             let me = Cpu.current + 1
             if holder.compareExchange(expected: 0, desired: me, ordering: .acquiring).exchanged {
+                Self.counted(+1)
                 return saved
             }
             if holder.load(ordering: .relaxed) == me {
@@ -77,8 +78,15 @@ struct SpinLock: ~Copyable {
         guard holder.load(ordering: .relaxed) == Cpu.current + 1 else {
             panic("spinlock: released by a CPU that doesn't hold it")
         }
+        Self.counted(-1)
         holder.store(0, ordering: .releasing)
         arch_interrupts_restore(saved.raw)
+    }
+
+    /// This CPU's count of held SpinLocks (before PerCpu exists: none).
+    private static func counted(_ delta: Int32) {
+        guard let percpu = unsafe UnsafeMutablePointer<PerCpu>(bitPattern: UInt(arch_percpu())) else { return }
+        unsafe percpu.pointee.spinLocksHeld = UInt32(bitPattern: Int32(bitPattern: percpu.pointee.spinLocksHeld) + delta)
     }
 
     /// Locks without touching interrupts: the caller has masked them and

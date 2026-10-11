@@ -17,6 +17,10 @@
 // Assembly (arch/<arch>/start.S). Masks interrupts and idles the CPU forever.
 [[noreturn]] void arch_halt(void);
 
+// The current frame pointer (C: Swift can't read it), for backtraces in
+// lockup checks.
+static inline uint64_t croi_frame_address(void) { return (uint64_t)__builtin_frame_address(0); }
+
 // Assembly (arch/<arch>/start.S). Switches to the stack whose top is `top`
 // and calls kernel_main_continue; the old stack is abandoned.
 [[noreturn]] void arch_continue_on_stack(uint64_t top);

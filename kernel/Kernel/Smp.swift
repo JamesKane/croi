@@ -43,6 +43,10 @@ struct PerCpu: ~Copyable {
     var pmuOverflows: UInt64 = 0
     /// Interrupts this CPU has handled (Scheduler.dump shows it).
     var interruptCount: UInt64 = 0
+    /// SpinLocks taken with `acquire` and not yet released here: a thread
+    /// switch with any held is a bug (the lock stays taken in this CPU's
+    /// name while its holder sleeps), caught in `switchAway`.
+    var spinLocksHeld: UInt32 = 0
     /// Counters for ZX_INFO_CPU_STATS (K10f), each written only by this
     /// CPU, read racily.
     var stats = CpuStats()

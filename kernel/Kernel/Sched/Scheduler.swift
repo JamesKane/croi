@@ -290,6 +290,30 @@ enum Scheduler {
         }
     }
 
+    /// A thread about to switch away with a SpinLock held: the lock would
+    /// stay taken in this CPU's name while its holder sleeps, and the next
+    /// thread here to want it spins with no recursion check to catch it
+    /// (Todhchai's kill that waited a second on heapLock). Says where.
+    private static func switchingHoldingSpinLocks(_ held: UInt32) -> Never {
+        if let console = panicConsole {
+            console.write("\ncroi kernel: switching threads with ")
+            console.write(decimal: UInt64(held))
+            console.write(" spin lock(s) held; heap lock cpu ")
+            console.write(decimal: UInt64(bitPattern: Int64(heapLock.holderCpu)))
+            console.write(", kernel frames:")
+            var frames = InlineArray<16, UInt64>(repeating: 0)
+            var count = 0
+            let fp = croi_frame_address()
+            Sampler.walkKernel(fp, stack: fp, &frames, &count, encode: false)
+            for i in 0..<count {
+                console.write(" ")
+                console.write(hex: frames[i])
+            }
+            console.write("\n")
+        }
+        panic("sched: switching threads with a spin lock held")
+    }
+
     /// Context switches CPU `cpu` has made (read racily; CPU stats).
     static func switchCount(_ cpu: Int) -> UInt64 { cpus[cpu].switches }
 
@@ -1404,6 +1428,8 @@ enum Scheduler {
     /// next runs, with the lock held.
     private static func switchAway() {
         let me = Int(Cpu.current)
+        let held = unsafe UnsafePointer<PerCpu>(bitPattern: UInt(arch_percpu()))!.pointee.spinLocksHeld
+        if held != 0 { switchingHoldingSpinLocks(held) }
         _ = preemptPending.bitwiseAnd(~(1 << UInt64(me)), ordering: .relaxed)
         let now = Clock.now()
         let current = cpus[me].current!
