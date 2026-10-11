@@ -52,6 +52,43 @@ typedef struct {
 
 static_assert(sizeof(croi_info_resource_t) == 56);
 
+// object_get_info(resource, CROI_INFO_CPU_STATS) (K10f): Zircon's
+// zx_info_cpu_stats_t per CPU, on a handle to the INFO system resource (or
+// root); the buffer holds as many as fit and the call returns how many it
+// wrote (croi's object_get_info has no actual/avail pointers). croi fills
+// cpu_number, flags (ONLINE), idle_time, context_switches, yields, ints
+// (device and other interrupts), timer_ints, timers (callbacks run),
+// syscalls, reschedule_ipis and generic_ipis; the rest are 0. On an idle
+// machine every interrupt a CPU takes is a wakeup.
+enum : uint32_t {
+  CROI_INFO_CPU_STATS = 16u,
+  CROI_INFO_CPU_STATS_FLAG_ONLINE = 1u << 0,
+};
+
+typedef struct {
+  uint32_t cpu_number;
+  uint32_t flags;
+  int64_t idle_time;
+  int64_t normalized_busy_time;
+  uint64_t reschedules;
+  uint64_t context_switches;
+  uint64_t irq_preempts;
+  uint64_t preempts;
+  uint64_t yields;
+  uint64_t ints;
+  uint64_t timer_ints;
+  uint64_t timers;
+  uint64_t page_faults;
+  uint64_t exceptions;
+  uint64_t syscalls;
+  uint64_t reschedule_ipis;
+  uint64_t generic_ipis;
+  uint64_t active_energy_consumption_nj;
+  uint64_t idle_energy_consumption_nj;
+} croi_info_cpu_stats_t;
+
+static_assert(sizeof(croi_info_cpu_stats_t) == 144);
+
 // object_get_info(resource, CROI_INFO_KMEM_STATS): Zircon's
 // zx_info_kmem_stats_t, on a handle to the INFO system resource (or root).
 // croi fills: total (RAM the PMM manages), free, wired (kernel image,

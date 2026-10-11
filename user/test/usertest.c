@@ -378,6 +378,32 @@ static void blocker(uint64_t event) {
   sys(CROI_SYS_THREAD_EXIT, 1, 0, 0, 0, 0);
 }
 
+// Submode 10's threads: each waits in its own way until killed.
+static void port_blocker(uint64_t port) {
+  croi_port_packet_t packet;
+  sys(CROI_SYS_PORT_WAIT, port, ~0ull, (uint64_t)&packet, 0, 0);
+  sys(CROI_SYS_THREAD_EXIT, 1, 0, 0, 0, 0);
+}
+static void counter_blocker(uint64_t counter) {
+  sys(CROI_SYS_COUNTER_WAIT, counter, 1000, ~0ull, 0, 0);
+  sys(CROI_SYS_THREAD_EXIT, 1, 0, 0, 0, 0);
+}
+static void user_spinner(uint64_t arg) {
+  (void)arg;
+  for (;;) {
+  }
+}
+
+static int64_t child_thread(uint32_t self, void (*entry)(uint64_t), uint64_t arg) {
+  uint32_t thread = 0, stack = 0;
+  uint64_t at = 0;
+  if (sys(CROI_SYS_VMO_CREATE, STACK_SIZE, 0, (uint64_t)&stack, 0, 0) != 0) return 91;
+  if (sys(CROI_SYS_VMO_MAP, stack, 0, STACK_SIZE, 3, (uint64_t)&at) != 0) return 92;
+  if (sys6(CROI_SYS_THREAD_CREATE, self, (uint64_t)"w", 1, 0, (uint64_t)&thread, 0) != 0) return 93;
+  if (sys(CROI_SYS_THREAD_START, thread, (uint64_t)entry, ENTRY_SP(at + STACK_SIZE), arg, 0) != 0) return 94;
+  return 0;
+}
+
 // A child: `self` is its own process handle, `submode` what to do.
 static int64_t child(uint32_t self, uint64_t submode, uint64_t vdso) {
   switch (submode) {
@@ -423,6 +449,21 @@ static int64_t child(uint32_t self, uint64_t submode, uint64_t vdso) {
     uint32_t event = 0;
     return sys(CROI_SYS_PROCESS_EXIT, sys(CROI_SYS_EVENT_CREATE, 0, (uint64_t)&event, 0, 0, 0) == ERR_ACCESS_DENIED ? 60 : 61,
                0, 0, 0, 0);
+  }
+  case 10: {  // Todhchai's compositor, roughly: threads waiting on a port,
+              // a counter and a channel, one spinning; then killed
+    uint32_t port = 0, counter = 0, a = 0, b = 0, event = 0;
+    if (sys(CROI_SYS_PORT_CREATE, 0, (uint64_t)&port, 0, 0, 0) != 0 ||
+        sys(CROI_SYS_COUNTER_CREATE, 0, (uint64_t)&counter, 0, 0, 0) != 0 ||
+        sys(CROI_SYS_CHANNEL_CREATE, 0, (uint64_t)&a, (uint64_t)&b, 0, 0) != 0 ||
+        sys(CROI_SYS_EVENT_CREATE, 0, (uint64_t)&event, 0, 0, 0) != 0)
+      return 90;
+    int64_t failed = child_thread(self, port_blocker, port) | child_thread(self, counter_blocker, counter) |
+                     child_thread(self, blocker, event) | child_thread(self, user_spinner, 0);
+    if (failed) return failed;
+    uint32_t observed = 0;
+    sys(CROI_SYS_OBJECT_WAIT_ONE, a, CROI_SIGNAL_READABLE, ~0ull, (uint64_t)&observed, 0);  // until killed
+    return 89;
   }
   case 9: {  // in a job with reserved CPUs: exit with the CPUs it ran on
     uint64_t seen = 0;
@@ -693,6 +734,7 @@ static int64_t ipc(const startup_t *s) {
 // result, [2] done.
 static void futex_waiter(uint64_t arg) {
   volatile uint64_t *slot = (volatile uint64_t *)arg;
+  slot[3] = 1;  // about to wait
   slot[1] = (uint64_t)sys(CROI_SYS_FUTEX_WAIT, slot[0], 0, 0, now_ns() + 3000000000ull, 0);
   slot[2] = 1;
   sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
@@ -750,9 +792,13 @@ static int64_t sync_objects(const startup_t *s) {
   CHECK(159, sys(CROI_SYS_FUTEX_GET_OWNER, a, (uint64_t)&koid, 0, 0, 0) == 0 && koid == 0);  // wake cleared it
 
   // Requeue: two waiters on a, moved to b, woken there.
-  volatile uint64_t w1[3] = {a, 99, 0}, w2[3] = {a, 99, 0};
+  volatile uint64_t w1[4] = {a, 99, 0, 0}, w2[4] = {a, 99, 0, 0};
   uint32_t t1 = start_thread(s, futex_waiter, (uint64_t)w1), t2 = start_thread(s, futex_waiter, (uint64_t)w2);
-  sys(CROI_SYS_NANOSLEEP, now_ns() + 5000000, 0, 0, 0, 0);
+  // Both about to wait, then time to block (a fixed 5 ms wasn't, for a
+  // thread a loaded host started late).
+  for (uint64_t until = now_ns() + 2000000000ull; !(w1[3] && w2[3]) && now_ns() < until;)
+    sys(CROI_SYS_NANOSLEEP, now_ns() + 1000000, 0, 0, 0, 0);
+  sys(CROI_SYS_NANOSLEEP, now_ns() + 20000000, 0, 0, 0, 0);
   CHECK(160, sys6(CROI_SYS_FUTEX_REQUEUE, a, 0, 0, b, 2, 0) == 0);
   CHECK(161, sys(CROI_SYS_FUTEX_WAKE, a, 10, 0, 0, 0) == 0 && w1[2] == 0 && w2[2] == 0);  // nobody left on a
   CHECK(162, sys(CROI_SYS_FUTEX_WAKE, b, 2, 0, 0, 0) == 0);
@@ -761,10 +807,15 @@ static int64_t sync_objects(const startup_t *s) {
   CHECK(163, w1[2] == 1 && w2[2] == 1 && w1[1] == 0 && w2[1] == 0);
 
   // wake_single_owner: one waiter wakes and owns the futex.
-  volatile uint64_t w3[3] = {c, 99, 0}, w4[3] = {c, 99, 0};
+  volatile uint64_t w3[4] = {c, 99, 0, 0}, w4[4] = {c, 99, 0, 0};
   uint32_t t3 = start_thread(s, futex_waiter, (uint64_t)w3), t4 = start_thread(s, futex_waiter, (uint64_t)w4);
-  sys(CROI_SYS_NANOSLEEP, now_ns() + 5000000, 0, 0, 0, 0);
+  for (uint64_t until = now_ns() + 2000000000ull; !(w3[3] && w4[3]) && now_ns() < until;)
+    sys(CROI_SYS_NANOSLEEP, now_ns() + 1000000, 0, 0, 0, 0);
+  sys(CROI_SYS_NANOSLEEP, now_ns() + 20000000, 0, 0, 0, 0);
   CHECK(164, sys(CROI_SYS_FUTEX_WAKE_SINGLE_OWNER, c, 0, 0, 0, 0) == 0);
+  // The woken one runs when it runs; then a moment for a wrong second.
+  for (uint64_t until = now_ns() + 2000000000ull; !(w3[2] || w4[2]) && now_ns() < until;)
+    sys(CROI_SYS_NANOSLEEP, now_ns() + 1000000, 0, 0, 0, 0);
   sys(CROI_SYS_NANOSLEEP, now_ns() + 2000000, 0, 0, 0, 0);
   CHECK(165, (w3[2] == 1) != (w4[2] == 1));
   uint32_t woke = w3[2] == 1 ? t3 : t4;
@@ -2310,7 +2361,10 @@ typedef struct {
 
 static void spinner(uint64_t arg) {
   spinner_t *p = (spinner_t *)arg;
-  while (!p->stop && now_ns() < p->until) p->seen |= 1ull << sys(CROI_SYS_TEST_PROFILE, 5, 0, 0, 0, 0);
+  // At least one sample: a thread a loaded host starts late still says
+  // where it ran.
+  do p->seen |= 1ull << sys(CROI_SYS_TEST_PROFILE, 5, 0, 0, 0, 0);
+  while (!p->stop && now_ns() < p->until);
   sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
 }
 
@@ -2385,6 +2439,19 @@ static int64_t extensions(const startup_t *s) {
     if (taken != ERR_ALREADY_BOUND) break;
   }
   CHECK(399, taken == 0 && sys(CROI_SYS_JOB_SET_CPU_RESERVATION, other, s->resource, 0, 0, 0) == 0);
+  // Killing a process whose threads wait in different ways (one spins)
+  // ends it promptly (Todhchai's compositor kill, M4).
+  for (int round = 0; round < 30; round++) {
+    uint32_t victim = spawn_child(s, s->job, 10);
+    sys(CROI_SYS_NANOSLEEP, now_ns() + 2000000 + (uint64_t)round * 100000, 0, 0, 0, 0);
+    uint64_t killed = now_ns();
+    CHECK(404, sys(CROI_SYS_TASK_KILL, victim, 0, 0, 0, 0) == 0);
+    uint32_t observed = 0;
+    sys(CROI_SYS_OBJECT_WAIT_ONE, victim, CROI_SIGNAL_TASK_TERMINATED, killed + 500000000ull, (uint64_t)&observed, 0);
+    CHECK(405, observed & CROI_SIGNAL_TASK_TERMINATED);
+    sys(CROI_SYS_HANDLE_CLOSE, victim, 0, 0, 0, 0);
+  }
+
   // system_powerctl's refusals (K10e; the real thing ends the boot, under
   // userboot.shutdown=): the resource, then the command, then its argument.
   uint32_t power = 0;

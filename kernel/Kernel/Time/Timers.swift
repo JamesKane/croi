@@ -132,6 +132,21 @@ enum Timers {
         return false
     }
 
+    /// Before this CPU idles (polls or halts; interrupts masked): the hardware
+    /// armed for the earliest timer still pending, or not at all. `cancel`
+    /// leaves it armed for speed, which on an idle CPU is a wakeup for
+    /// nothing (K10f: an idle machine takes none).
+    static func settle() {
+        let queue = unsafe self.queue
+        var earliest = UInt64.max
+        for i in 0..<32 where unsafe queue.pointee.entries[i].id != 0 {
+            earliest = min(earliest, unsafe queue.pointee.entries[i].latest)
+        }
+        guard unsafe earliest > queue.pointee.programmed else { return }
+        unsafe queue.pointee.programmed = earliest
+        if earliest == .max { disarmHardware() } else { armHardware(atNanoseconds: earliest) }
+    }
+
     /// The timer interrupt (interrupts masked).
     static func handleInterrupt() {
         let queue = unsafe self.queue
@@ -143,6 +158,7 @@ enum Timers {
             guard entry.id != 0, entry.deadline <= now, let callback = entry.callback else { continue }
             unsafe queue.pointee.entries[i] = TimerEntry()  // free first: the callback may re-arm
             callback(entry.argument, entry.context)
+            unsafe UnsafeMutablePointer<PerCpu>(bitPattern: UInt(arch_percpu()))!.pointee.stats.timerCallbacks += 1
         }
         program()
         // Nothing left: the arm64 virtual timer and the SBI timer stay
@@ -230,3 +246,4 @@ enum Timers {
         #endif
     }
 }
+

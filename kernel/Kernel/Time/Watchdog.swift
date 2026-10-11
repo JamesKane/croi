@@ -89,7 +89,11 @@ struct SbsaWatchdog {
 enum Watchdog {
     nonisolated(unsafe) private static var active: SbsaWatchdog?
     private static var timeoutSeconds: UInt64 { 30 }
-    private static var refreshNanoseconds: UInt64 { 5_000_000_000 }
+    /// Every 20-25 s (the slack lets it ride on another wakeup): the one
+    /// periodic wakeup left on an idle machine (K10f), 30 s timeout. The
+    /// first stage (WS0, 15 s) is only a signal nobody takes.
+    private static var refreshNanoseconds: UInt64 { 20_000_000_000 }
+    private static var refreshSlack: UInt64 { 5_000_000_000 }
 
     /// Maps and enables the GTDT's watchdog. Returns false if there is none.
     static func start(_ acpi: AcpiTables) -> Bool {
@@ -108,12 +112,12 @@ enum Watchdog {
         var watchdog = SbsaWatchdog(control: control, refresh: refresh)
         watchdog.enable(timeoutTicks: Clock.frequency * timeoutSeconds)
         active = watchdog
-        Timers.arm(deadline: Clock.now() + refreshNanoseconds, kickAndRearm, 0)
+        Timers.arm(deadline: Clock.now() + refreshNanoseconds, slack: refreshSlack, kickAndRearm, 0)
         return true
     }
 
     private static let kickAndRearm: Timers.Callback = { _, _ in
         active?.kick()
-        Timers.arm(deadline: Clock.now() + refreshNanoseconds, kickAndRearm, 0)
+        Timers.arm(deadline: Clock.now() + refreshNanoseconds, slack: refreshSlack, kickAndRearm, 0)
     }
 }

@@ -141,6 +141,8 @@ enum Syscalls {
     /// Runs the syscall in `frame` with interrupts on, and leaves its result
     /// in the return register. Back with interrupts masked.
     static func dispatch(_ frame: UnsafeMutablePointer<arch_exception_frame_t>) {
+        // Still masked: counted on the CPU that took it.
+        unsafe UnsafeMutablePointer<PerCpu>(bitPattern: UInt(arch_percpu()))!.pointee.stats.syscalls += 1
         arch_interrupts_enable()
         let number = unsafe ExceptionFrame.syscallNumber(frame.pointee)
         var a = InlineArray<6, UInt64>(repeating: 0)
@@ -326,6 +328,8 @@ enum Syscalls {
             return try DebugLogs.call(number, a, table)
         case 100...109:
             try exceptionCall(number, a, table)
+        case 86 where a[1] == UInt64(CROI_INFO_CPU_STATS):  // returns a count
+            return try CpuStatistics.info(a, table)
         case 80...89:
             try ipcCall(number, a, table)
         case 90...99:

@@ -70,6 +70,7 @@ RULES = {
     "edf.worst_wake": (0.50, 20_000),
     "power.shutdown_kernel": (0.50, 1_000_000),
     "power.log_drain": (0.50, 20_000_000),
+    "idle.wakeups": (0.0, 0.5),
 }
 DEFAULT_RULE = (0.25, 0)
 WINDOW = 5

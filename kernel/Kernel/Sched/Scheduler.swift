@@ -194,11 +194,21 @@ enum Scheduler {
                 refreshEligibility(me, Clock.now())
             }
             lock.unlockMasked()
-            if idlePollWindow != 0, poll(me) { continue }
+            let percpu = unsafe UnsafeMutablePointer<PerCpu>(bitPattern: UInt(arch_percpu()))!
+            // Before polling too: it takes interrupts, and a cancelled
+            // timer's stale deadline would be one.
+            Timers.settle()
+            let waiting = Clock.now()
+            if idlePollWindow != 0, poll(me) {
+                unsafe percpu.pointee.stats.idleTime += Clock.now() - waiting
+                continue
+            }
             // A wakeup aimed here after the check above sends an IPI, and a
             // throttled thread's period start has a timer: either ends the
             // wait.
             arch_wait_for_interrupt()
+            unsafe percpu.pointee.stats.idleTime += Clock.now() - waiting
+            unsafe percpu.pointee.stats.idleWakeups += 1
         }
     }
 
@@ -239,6 +249,9 @@ enum Scheduler {
         guard pollingCpus.load(ordering: .sequentiallyConsistent) & bit == 0 else { return }
         Ipi.requestReschedule(cpu)
     }
+
+    /// Context switches CPU `cpu` has made (read racily; CPU stats).
+    static func switchCount(_ cpu: Int) -> UInt64 { cpus[cpu].switches }
 
     private static var allCpus: UInt64 { Smp.count >= 64 ? .max : (1 << UInt64(Smp.count)) - 1 }
 
@@ -301,6 +314,7 @@ enum Scheduler {
     static func yield() {
         locked {
             let me = Int(Cpu.current)
+            unsafe UnsafeMutablePointer<PerCpu>(bitPattern: UInt(arch_percpu()))!.pointee.stats.yields += 1
             let thread = cpus[me].current!
             let now = Clock.now()
             charge(thread, me, now)

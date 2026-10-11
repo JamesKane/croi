@@ -66,12 +66,20 @@ enum Clock {
         return product.high << 32 | product.low >> 32
     }
 
-    /// The counter value at monotonic time `ns` (saturating).
+    /// The first counter value at or after monotonic time `ns`
+    /// (saturating): rounded up, so a timer armed for it never finds its
+    /// deadline still ahead (K10f: rv64's 10 MHz timebase fired up to a
+    /// tick early, and the interrupt that ran nothing was a wakeup).
     static func counter(atNanoseconds ns: UInt64) -> UInt64 {
         let product = ns.multipliedFullWidth(by: frequency)
         guard product.high < 1_000_000_000 else { return .max }
-        let (ticks, overflow) = base.addingReportingOverflow(UInt64(1_000_000_000).dividingFullWidth(product).quotient)
-        return overflow ? .max : ticks
+        let division = UInt64(1_000_000_000).dividingFullWidth(product)
+        let (ticks, overflow) = base.addingReportingOverflow(division.quotient + (division.remainder != 0 ? 1 : 0))
+        guard !overflow else { return .max }
+        // `now` rounds through `mult`: step past any shortfall that leaves.
+        var counter = ticks
+        while nanoseconds(counter: counter) < ns, counter < .max { counter += 1 }
+        return counter
     }
 
     /// Busy-waits at least `ns` nanoseconds.

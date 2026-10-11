@@ -611,7 +611,17 @@ if K10 splits (nothing else in M4 depends on it).
   ACPI_TRANSITION_S_STATE) and writes PM1a/b control (FADT), with the
   reset register for reboot; arm64 PSCI SYSTEM_OFF / SYSTEM_RESET; rv64
   SBI SRST. Budget: the call to QEMU exiting.
-- **K10f: an idle system makes no wakeups (M4: 0 per second).** croi's
+- **K10f: an idle system makes no wakeups (M4: 0 per second).** **Done**
+  (2026-10-11): `idle.wakeups` is 0 on all three arches, lean and full
+  (m2 counts every CPU's interrupts over 500 ms through Zircon's
+  ZX_INFO_CPU_STATS). Fixed: stale timer hardware after cancel, the
+  sampler's lapsing tick, deadlines rounded down to the counter, the
+  self-test deadman. The SBSA watchdog refresh stays (every 20-25 s,
+  `croi.watchdog=off` for none). Also fixed: a timeline waiter whose
+  value was reached between its check and the tick being armed slept to
+  its deadline (rv64 m2 hangs under host load). Still flaky under heavy
+  host load (TCG): self-test checks 163 (futex) and 397 (K10d's
+  reservation spinners), both timing-dependent, on the K10e tree too. croi's
   periodic kernel work audited and made event-driven or gated (the SBSA
   watchdog refresh, the debuglog dumper, the trace sampler's timer,
   idle polling's re-arming), and a budget line counting each CPU's

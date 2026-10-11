@@ -4,9 +4,10 @@ import Synchronization
 /// Tick sampling (roadmap "Trace", K6): while CROI_TRACE_SAMPLE is on,
 /// every CPU running a thread takes a sample each period, written as a
 /// SAMPLE record and frame-pointer FRAMES records (trace.h). A CPU arms its
-/// sampling timer only while it runs something: the tick that finds it idle
-/// lapses, and the next switch to a thread re-arms it, so idle CPUs stay
-/// tickless.
+/// sampling timer only while it runs something: a switch to its idle
+/// thread cancels it (K10f: before, the tick that found it idle lapsed,
+/// one wakeup per idle stretch, and after `stop` every armed one), and the
+/// next switch to a thread re-arms it, so idle CPUs stay tickless.
 ///
 /// Stacks are walked through frame pointers (kernel and user code keep
 /// them): kernel frames only within the interrupted stack, user frames by
@@ -34,7 +35,19 @@ enum Sampler {
     /// The scheduler switched this CPU to `next` (its lock held).
     @inline(__always)
     static func switched(to next: ThreadPointer) {
-        if croi_trace_categories() & CROI_TRACE_SAMPLE != 0, !next.pointee.isIdle { arm() }
+        if next.pointee.isIdle {
+            disarm()
+        } else if croi_trace_categories() & CROI_TRACE_SAMPLE != 0 {
+            arm()
+        }
+    }
+
+    /// Cancels this CPU's sampling timer, if it has one.
+    private static func disarm() {
+        let percpu = unsafe UnsafeMutablePointer<PerCpu>(bitPattern: UInt(arch_percpu()))!
+        guard unsafe percpu.pointee.samplerArmed != 0 else { return }
+        unsafe Timers.cancel(percpu.pointee.samplerTimer)
+        unsafe percpu.pointee.samplerArmed = 0
     }
 
     private static let armHere: Ipi.Function = { _ in

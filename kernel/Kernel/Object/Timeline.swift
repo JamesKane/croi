@@ -136,13 +136,22 @@ enum Timelines {
         guard t.pointee.synthetic else { return }
         let now = valueLocked(object)
         var earliest = Int64.max
+        var due = false
         var cursor = object.header.observers
         while let observer = cursor {
-            if observer.pointee.byValue, observer.pointee.atValue > now {
-                earliest = min(earliest, observer.pointee.atValue)
+            if observer.pointee.byValue {
+                if observer.pointee.atValue > now {
+                    earliest = min(earliest, observer.pointee.atValue)
+                } else {
+                    due = true
+                }
             }
             cursor = observer.pointee.next
         }
+        // The value is the clock's: a vblank can pass between a waiter's
+        // check and this, leaving it waiting for a value already reached
+        // with no tick armed (m2 hung so on a slow rv64 under load).
+        if due { Observers.notify(object) }
         guard earliest != .max else { return }
         let deadline = time(of: earliest, t)
         guard t.pointee.armedFor == 0 || deadline < t.pointee.armedFor else { return }

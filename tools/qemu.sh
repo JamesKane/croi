@@ -108,6 +108,11 @@ if [[ -n $expect ]]; then
         fi
       done
     fi
+    # The guest turned itself off without the line: no point waiting.
+    if [[ $line == "croi kernel: powering off"* || $line == "croi kernel: rebooting"* ]] &&
+       [[ $line != *"$expect"* ]]; then
+      break
+    fi
     if [[ $line == *"$expect"* ]]; then
       status=0
       if [[ -n $screendump ]]; then

@@ -43,6 +43,9 @@ struct PerCpu: ~Copyable {
     var pmuOverflows: UInt64 = 0
     /// Interrupts this CPU has handled (Scheduler.dump shows it).
     var interruptCount: UInt64 = 0
+    /// Counters for ZX_INFO_CPU_STATS (K10f), each written only by this
+    /// CPU, read racily.
+    var stats = CpuStats()
 
     init(number: UInt32, hardwareId: UInt64, acpiUid: UInt32, stack: StackRange, timerQueue: UInt64) {
         self.number = number
@@ -50,6 +53,55 @@ struct PerCpu: ~Copyable {
         self.stack = stack
         self.timerQueue = timerQueue
         topology.acpiUid = acpiUid
+    }
+}
+
+/// What a CPU has been doing (ZX_INFO_CPU_STATS, K10f). Interrupts and
+/// timer interrupts are counted elsewhere (`interruptCount`, the timer
+/// queue), context switches by the scheduler.
+struct CpuStats {
+    /// Time spent waiting in the idle loop (polling or halted), and how
+    /// many times a halt ended: on an idle machine, its wakeups.
+    var idleTime: UInt64 = 0
+    var idleWakeups: UInt64 = 0
+    var rescheduleIpis: UInt64 = 0
+    var genericIpis: UInt64 = 0
+    var timerCallbacks: UInt64 = 0
+    var syscalls: UInt64 = 0
+    var yields: UInt64 = 0
+}
+
+/// object_get_info(INFO resource, CROI_INFO_CPU_STATS): a record per CPU.
+enum CpuStatistics {
+    static func read(_ cpu: Int) -> croi_info_cpu_stats_t {
+        let record = unsafe UnsafePointer<PerCpu>(bitPattern: UInt(Smp.records[cpu]))!
+        let stats = unsafe record.pointee.stats
+        var info = croi_info_cpu_stats_t()
+        info.cpu_number = UInt32(cpu)
+        info.flags = Ipi.isReady(cpu) ? CROI_INFO_CPU_STATS_FLAG_ONLINE : 0
+        info.idle_time = Int64(bitPattern: stats.idleTime)
+        info.context_switches = Scheduler.switchCount(cpu)
+        info.yields = stats.yields
+        let timerInterrupts = Timers.inspect(cpu: cpu, id: 0).interrupts
+        let ipis = stats.rescheduleIpis + stats.genericIpis
+        info.timer_ints = timerInterrupts
+        info.ints = unsafe record.pointee.interruptCount &- timerInterrupts &- ipis
+        info.timers = stats.timerCallbacks
+        info.syscalls = stats.syscalls
+        info.reschedule_ipis = stats.rescheduleIpis
+        info.generic_ipis = stats.genericIpis
+        return info
+    }
+
+    /// The syscall: as many records as fit, returning how many.
+    static func info(_ a: InlineArray<6, UInt64>, _ table: borrowing HandleTable) throws(Status) -> Int64 {
+        let size = MemoryLayout<croi_info_cpu_stats_t>.size
+        try Resources.check(table, UInt32(truncatingIfNeeded: a[0]), system: UInt64(CROI_RSRC_SYSTEM_INFO_BASE))
+        let count = min(Int(min(a[3], 1 << 20)) / size, Smp.count)
+        guard count > 0 else { throw .bufferTooSmall }
+        try Syscalls.check(a[2], count * size)
+        for cpu in 0..<count { try Syscalls.put(read(cpu), a[2] + UInt64(cpu * size)) }
+        return Int64(count)
     }
 }
 

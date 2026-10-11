@@ -119,6 +119,15 @@ enum Ipi {
 
     /// The IPI interrupt handler.
     static func handle() {
+        // One count per IPI interrupt (CPU stats), by what it carries: a
+        // reschedule alone, or anything else.
+        if let percpu = unsafe UnsafeMutablePointer<PerCpu>(bitPattern: UInt(arch_percpu())) {
+            if unsafe percpu.pointee.ipiPending.load(ordering: .relaxed) == reschedule {
+                unsafe percpu.pointee.stats.rescheduleIpis += 1
+            } else {
+                unsafe percpu.pointee.stats.genericIpis += 1
+            }
+        }
         drainThisCpu()
     }
 

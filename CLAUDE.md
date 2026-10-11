@@ -868,7 +868,41 @@ Todhchai M4's shutdown):
   With --screendump, qemu.sh adds `-action shutdown=pause` so the screen
   can still be read after the guest powers off.
   bench.py passes --exits to trees that support it and records the budget.
-- Boot test mode 17 checks the refusals.
+- Boot test mode 17 checks the refusals (and, since K10f, kills a
+  process with threads in port, counter and event waits plus a spinner
+  30 times, each TERMINATED within 500 ms).
+
+An idle machine makes no wakeups, K10f (M4: 0 per second;
+resource.h CROI_INFO_CPU_STATS, Smp.swift `CpuStats`):
+- object_get_info(INFO resource or root, CROI_INFO_CPU_STATS = 16):
+  Zircon's zx_info_cpu_stats_t per CPU, as many as fit, returning the
+  count (no actual/avail pointers). Filled: idle_time, context_switches,
+  yields, ints (other interrupts), timer_ints, timers (callbacks),
+  syscalls, reschedule_ipis, generic_ipis (counted per IPI interrupt).
+- m2's last measurement: wait until the dumper has printed everything
+  (CROI_INFO_DEBUGLOG), fault in both stats buffers, sleep 500 ms (up
+  to three windows, the quietest kept: a periodic wakeup shows in each,
+  a straggler a loaded TCG host ran late in one), and
+  report every interrupt any CPU took less its own wake as budget
+  `idle.wakeups` (unit count, limit 1, always enforced: not a timing).
+  Its line shows per-CPU counts by kind for diagnosis.
+- What used to wake an idle CPU: `Timers.cancel` leaves the hardware
+  armed (hot path), so `Timers.settle()` re-arms for the earliest timer
+  still pending (or disarms) on idle entry, before the idle poll, which
+  takes interrupts; the sampler's tick lapsed once per idle stretch (and
+  after a stop), now cancelled on a switch to idle; deadline-to-counter
+  conversion rounded down (rv64's 10 MHz timebase fired up to a tick
+  early, then re-armed), now up; the self-test deadman stays armed 20 s
+  (disarmed when the self-tests end); a page fault in the window
+  broadcasts a shootdown on rv64 (m2 faults its buffers in first).
+- Found on the way: a synthetic timeline's value is the clock's, so a
+  vblank could pass between counter_wait's check and `watchLocked`,
+  which then saw the waiter's value reached and armed nothing: the
+  waiter slept until its deadline (m2 on rv64 under host load, ~1 boot
+  in 5). `watchLocked` now notifies observers already satisfied.
+- Left: the SBSA watchdog's refresh, now every 20-25 s with slack
+  (`croi.watchdog=off` removes it; QEMU has none). The debuglog dumper,
+  timeline ticks and idle polling were already event-driven.
 
 Memory statistics (Todhchai's M3 resident-memory budget; task.h,
 resource.h, UserAspace.taskStats, Kernel/Object/KernelMemory.swift):

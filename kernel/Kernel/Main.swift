@@ -235,7 +235,7 @@ func kernel_main_continue() -> Never {
         if BootOptions.has("croi.watchdog=off") {
             console.write("off (croi.watchdog=off)\n")
         } else if Watchdog.start(acpi) {
-            console.write("SBSA generic watchdog on, 30 s timeout, refreshed every 5 s\n")
+            console.write("SBSA generic watchdog on, 30 s timeout, refreshed every 20-25 s\n")
         } else {
             console.write("none in the GTDT\n")
         }
@@ -315,7 +315,7 @@ private func runSelfTests(_ console: Uart) {
     ProcessSelfTest.runDeadlineWakeups(console)
     ProcessSelfTest.runExtensions(console)
     ProgramSelfTest.run(console)
-    SelfTestDeadman.done.store(true, ordering: .relaxed)
+    SelfTestDeadman.disarm()
 }
 
 /// The end of boot: a last check, then user space.

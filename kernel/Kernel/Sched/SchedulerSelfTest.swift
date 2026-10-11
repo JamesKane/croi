@@ -226,13 +226,28 @@ enum SchedulerSelfTest {
 enum SelfTestDeadman {
     static let done = Atomic<Bool>(false)
 
+    nonisolated(unsafe) private static var ids = InlineArray<2, UInt32>(repeating: 0)
+
     static func arm() {
         Ipi.call(onCpu: 0, armHere, 0)
-        Ipi.call(onCpu: Smp.count - 1, armHere, 0)
+        Ipi.call(onCpu: Smp.count - 1, armHere, 1)
     }
 
-    private static let armHere: Ipi.Function = { _ in
-        Timers.arm(deadline: Clock.now() + 20_000_000_000, fire, 0)
+    /// The self-tests are done: cancelled, so an idle machine has no
+    /// timer left (K10f).
+    static func disarm() {
+        done.store(true, ordering: .relaxed)
+        Ipi.call(onCpu: 0, disarmHere, 0)
+        Ipi.call(onCpu: Smp.count - 1, disarmHere, 1)
+    }
+
+    private static let armHere: Ipi.Function = { slot in
+        ids[Int(slot)] = Timers.arm(deadline: Clock.now() + 20_000_000_000, fire, 0) ?? 0
+    }
+
+    private static let disarmHere: Ipi.Function = { slot in
+        if ids[Int(slot)] != 0 { Timers.cancel(ids[Int(slot)]) }
+        ids[Int(slot)] = 0
     }
 
     private static let fire: Timers.Callback = { _, _ in

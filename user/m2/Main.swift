@@ -142,8 +142,8 @@ struct M2 {
         print("m2: port wake from another core: median \(r.portWakeMedian) ns, p99 \(r.portWakeP99) ns (budget \(budgets.portWake))")
         print("m2: wake error, real-time intent: p99 \(r.wakeErrorP99 / 1000) us (budget \(budgets.wakeErrorP99 / 1000))")
         var missed = 0
-        func budget(_ name: String, _ value: UInt64, limit: UInt64? = nil, target: UInt64? = nil) {
-            var line = "m2: budget name=\(name) value=\(value) unit=ns"
+        func budget(_ name: String, _ value: UInt64, unit: String = "ns", limit: UInt64? = nil, target: UInt64? = nil) {
+            var line = "m2: budget name=\(name) value=\(value) unit=\(unit)"
             if let limit { line += " limit=\(limit)" }
             if let target { line += " target=\(target)" }
             print(line)
@@ -164,6 +164,12 @@ struct M2 {
             print("m2: spawn to main \((entered - spawned) / 1000) us (budget \(spawnToMainLimit / 1000))")
             budget("process.spawn_to_main", entered - spawned, limit: spawnToMainLimit)
         }
+        // K10f, M4's idle budget: 0 wakeups a second. Not a timing, so
+        // always enforced.
+        let (wakeups, perCpu) = try idleWakeups(resource: resource)
+        print("m2: idle for \(idleWindow / 1_000_000) ms: \(wakeups) wakeup(s) besides its own (per CPU: \(perCpu))")
+        budget("idle.wakeups", wakeups, unit: "count", limit: 1)
+        guard wakeups == 0 else { throw Failure(what: "staying idle", status: Int64(wakeups)) }
         guard croi_timing_is_real(), environmentHas("croi.enforce_budgets=1") else {
             print(missed == 0 ? "m2: budgets met (reported, not enforced)"
                               : "m2: \(missed) budget(s) over (reported, not enforced: see tools/bench.py)")
@@ -172,6 +178,69 @@ struct M2 {
         guard missed == 0 else { throw Failure(what: "meeting the budgets", status: Int64(missed)) }
         print(r.channelCall < budgets.channelCall ? "m2: budgets met" : "m2: budgets met, channel_call above target")
     }
+
+    static var idleWindow: UInt64 { 500_000_000 }
+
+    /// Every CPU's interrupts (each one a wakeup on an idle machine) over
+    /// `idleWindow` while m2 sleeps, less the one that ends its sleep;
+    /// counted from CROI_INFO_CPU_STATS. First m2 lets the console finish
+    /// its lines (the dumper writes them after m2 does) and its threads
+    /// exit.
+    static func idleWakeups(resource: UInt32) throws(Failure) -> (UInt64, String) {
+        var log: UInt32 = 0
+        try Sys.check("creating a log", Sys.call(CROI_SYS_DEBUGLOG_CREATE, 0, 0, Sys.address(&log)))
+        defer { Sys.close(log) }
+        let giveUp = Sys.now() + 2_000_000_000
+        var progress = croi_info_debuglog_t()
+        repeat {
+            _ = Sys.call(CROI_SYS_NANOSLEEP, Sys.now() + 10_000_000)
+            try Sys.check("reading debuglog progress",
+                          Sys.call(CROI_SYS_OBJECT_GET_INFO, UInt64(log), UInt64(CROI_INFO_DEBUGLOG), Sys.address(&progress),
+                                   UInt64(MemoryLayout<croi_info_debuglog_t>.size)))
+        } while progress.printed < progress.written && Sys.now() < giveUp
+        // Both buffers in hand and faulted in first: a page fault in the
+        // window would be a wakeup (rv64 broadcasts a shootdown per map).
+        var before = [croi_info_cpu_stats_t](repeating: croi_info_cpu_stats_t(), count: 64)
+        var after = before
+        try cpuStats(resource, into: &after)
+        // Up to three windows, the quietest kept: a periodic wakeup shows
+        // in every one, a straggler (a thread a loaded host ran late, as
+        // under TCG) in one.
+        var best: (UInt64, String) = (.max, "")
+        for _ in 0..<3 {
+            try cpuStats(resource, into: &before)
+            _ = Sys.call(CROI_SYS_NANOSLEEP, Sys.now() + idleWindow)
+            try cpuStats(resource, into: &after)
+            let window = count(before, after)
+            if window.0 < best.0 { best = window }
+            if best.0 == 0 { break }
+        }
+        return best
+    }
+
+    static func count(_ before: [croi_info_cpu_stats_t], _ after: [croi_info_cpu_stats_t]) -> (UInt64, String) {
+        var total: UInt64 = 0
+        var perCpu = ""
+        for i in 0..<cpus {
+            func taken(_ s: croi_info_cpu_stats_t) -> UInt64 { s.ints + s.timer_ints + s.reschedule_ipis + s.generic_ipis }
+            let n = taken(after[i]) - taken(before[i])
+            total += n
+            perCpu += i == 0 ? "\(n)" : " \(n)"
+            if n > 0 { perCpu += "(i\(after[i].ints - before[i].ints) t\(after[i].timer_ints - before[i].timer_ints) r\(after[i].reschedule_ipis - before[i].reschedule_ipis) g\(after[i].generic_ipis - before[i].generic_ipis) cb\(after[i].timers - before[i].timers) sw\(after[i].context_switches - before[i].context_switches))" }
+        }
+        return (total > 0 ? total - 1 : 0, perCpu)
+    }
+
+    static func cpuStats(_ resource: UInt32, into stats: inout [croi_info_cpu_stats_t]) throws(Failure) {
+        let count = stats.withUnsafeMutableBytes { raw in
+            Sys.call(CROI_SYS_OBJECT_GET_INFO, UInt64(resource), UInt64(CROI_INFO_CPU_STATS),
+                     UInt64(UInt(bitPattern: raw.baseAddress)), UInt64(raw.count))
+        }
+        try Sys.check("reading CPU stats", count < 0 ? count : 0)
+        cpus = Int(count)
+    }
+
+    nonisolated(unsafe) static var cpus = 0
 
     /// Whether the environment (the kernel command line) has `word`.
     static func environmentHas(_ word: StaticString) -> Bool {
