@@ -536,6 +536,11 @@ enum Processes {
         }
     }
 
+    private static func writeSigned(_ value: Int, _ console: Uart) {
+        if value < 0 { console.write("-") }
+        console.write(decimal: UInt64(value.magnitude))
+    }
+
     /// One live thread of a stuck process: the syscall (or trap) it
     /// entered by, and on amd64 the kernel return addresses from its saved
     /// context (raw, for llvm-symbolizer). Racy: a diagnostic.
@@ -604,11 +609,20 @@ enum Processes {
             let saved = arch_interrupts_save()  // dump takes the scheduler lock masked
             Scheduler.dump(to: console)
             arch_interrupts_restore(saved)
-            // Where each of its threads that is running elsewhere is.
+            console.write("  locks held (cpu, -1 free): heap ")
+            writeSigned(heapLock.holderCpu, console)
+            console.write(", pmm ")
+            writeSigned(pmmLock.holderCpu, console)
+            console.write(", vm ")
+            writeSigned(vmLock.holderCpu, console)
+            console.write(", debuglog ")
+            writeSigned(debugLogLock.holderCpu, console)
+            console.write("\n")
+            // Where every other CPU is (one that doesn't answer is running
+            // with interrupts masked).
             let masked = arch_interrupts_save()
-            let running = Scheduler.cpusRunning(processOf: object)
-            for i in 0..<running.count where running[i] != Int(Cpu.current) {
-                Ipi.requestReport(running[i])
+            for cpu in 0..<Smp.count where cpu != Int(Cpu.current) && Ipi.isReady(cpu) {
+                Ipi.requestReport(cpu)
             }
             arch_interrupts_restore(masked)
             Scheduler.sleep(until: Clock.now() + 50_000_000)  // let them print

@@ -69,6 +69,9 @@ struct SpinLock: ~Copyable {
         }
     }
 
+    /// The CPU holding it, or -1 (racy: lockup reports).
+    var holderCpu: Int { Int(holder.load(ordering: .relaxed)) - 1 }
+
     /// Releases the lock and restores the interrupt state from `acquire`.
     func release(_ saved: InterruptState) {
         guard holder.load(ordering: .relaxed) == Cpu.current + 1 else {
