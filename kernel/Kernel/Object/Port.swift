@@ -136,6 +136,31 @@ enum Ports {
         }
     }
 
+    /// Takes a queued kernel-source packet back out (its source is retiring);
+    /// false if a reader already took it (and will hand it back).
+    static func unqueue(_ port: PortPointer, _ record: QueuedPacketPointer) -> Bool {
+        port.pointee.packetsLock.withLock { () -> Bool in
+            var previous: UInt64 = 0
+            var cursor = port.pointee.head
+            while cursor != 0 {
+                let next = QueuedPacketPointer(address: cursor).pointee.next
+                if cursor == record.address {
+                    if previous != 0 {
+                        QueuedPacketPointer(address: previous).pointee.next = next
+                    } else {
+                        port.pointee.head = next
+                    }
+                    if port.pointee.tail == cursor { port.pointee.tail = previous }
+                    port.pointee.queued -= 1
+                    return true
+                }
+                previous = cursor
+                cursor = next
+            }
+            return false
+        }
+    }
+
     /// The next packet (interrupts first), copied under the lock, and its
     /// record if it needs `release` (an interrupt's stays its object's).
     private static func pop(_ port: PortPointer) -> (PortPacket, QueuedPacketPointer?)? {
@@ -357,9 +382,16 @@ struct PacketSource: ~Copyable {
 
     /// The owner (a context, an account) no longer reports: freed now, or
     /// once its queued packet is read.
+    /// Its owner is going. A packet still queued is taken back (nobody may
+    /// ever read it, and it holds the port); one a reader has already
+    /// taken is freed when handed back (`dequeued`).
     func retire() {
         let now = pointee.lock.withLock { () -> Bool in
             pointee.retired = true
+            if pointee.queued,
+               Ports.unqueue(PortPointer(object: ObjectPointer(address: pointee.port)), pointee.record) {
+                pointee.queued = false
+            }
             return !pointee.queued
         }
         if now { free() }

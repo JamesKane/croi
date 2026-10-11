@@ -588,7 +588,10 @@ if K10 splits (nothing else in M4 depends on it).
   vblanks, so the compositor's latch thread and a game's frame thread
   wake for the frame, not for an independent period. Audio DMA's
   interrupt to its thread is the same path.
-- **K10d: kernel-only extensions to user space.** Budget overruns to a
+- **K10d: kernel-only extensions to user space.** **Done** (2026-10-10):
+  `thread_bind_overrun_port` (122), `job_set_cpu_reservation` (108, CPU
+  system resource), CROI_INFO_THREAD_TRACE and CROI_INFO_DEBUGLOG (the
+  dumper's printed count, not flow control: writers pace to it). Budget overruns to a
   port (ext 3) for a deadline thread's own profile; CPU reservation for a
   job (ext 8, gated by a system resource); a thread's trace id through
   `object_get_info` (Todhchai's ask: joining its user trace with croi's

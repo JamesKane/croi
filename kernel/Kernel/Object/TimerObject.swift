@@ -76,10 +76,15 @@ enum TimerObjects {
         }
     }
 
-    /// timer_cancel.
+    /// timer_cancel: disarms, and de-asserts SIGNALED, as Zircon's does (a
+    /// timer that already fired is clear again). After `cancelArmed`, whose
+    /// new generation stops a firing in flight from setting it again.
     static func cancel(_ object: ObjectPointer) {
         let timer = TimerObjectPointer(object: object)
-        configure(timer) { cancelArmed(timer) }
+        configure(timer) {
+            cancelArmed(timer)
+            object.updateSignals(clear: Signals.signaled, set: 0)
+        }
     }
 
     private static func configure<R>(_ timer: TimerObjectPointer, _ body: () -> R) -> R {

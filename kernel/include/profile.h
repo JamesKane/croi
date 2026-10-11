@@ -58,3 +58,13 @@ typedef struct {
 } croi_profile_info_t;
 
 static_assert(sizeof(croi_profile_info_t) == 96);
+
+// thread_bind_overrun_port(thread, port, key) (croi's, K10d, ext 3):
+// MANAGE_THREAD on a thread with a deadline profile of its own (from
+// object_set_profile; else BAD_STATE), WRITE on the port. Each period the
+// thread's budget runs out before it yields, the port gets one coalescing
+// packet: payload[1] the context's total overruns, payload[2] how many
+// since the packet was last read. Binding again replaces the port.
+enum : uint32_t {
+  CROI_PKT_TYPE_BUDGET_OVERRUN = 0x80,
+};

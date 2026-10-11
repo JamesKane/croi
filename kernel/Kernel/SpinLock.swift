@@ -82,6 +82,9 @@ struct SpinLock: ~Copyable {
     /// restores them itself. For the scheduler, whose lock is handed across
     /// context switches (the thread that resumes releases it).
     func lockMasked() {
+        // Masked by the caller, or the thread could move between reading its
+        // CPU and taking the lock, and take it in another CPU's name.
+        guard !arch_interrupts_enabled() else { panic("spinlock: lockMasked with interrupts on") }
         let me = Cpu.current + 1
         while !holder.compareExchange(expected: 0, desired: me, ordering: .acquiring).exchanged {
             if holder.load(ordering: .relaxed) == me {

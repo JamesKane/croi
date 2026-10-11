@@ -29,6 +29,10 @@ struct JobObject: ~Copyable {
     var exceptionChannel: UInt64 = 0
     /// Job policy: an action per condition (CROI_POL_*), from the parent.
     var policy = InlineArray<16, UInt8>(repeating: 0)
+    /// K10d, ext 8: the CPU reservation tag its threads carry (its own, or
+    /// an ancestor's), and the CPUs it reserved itself.
+    var reservation: UInt32 = 0
+    var reservedCpus: UInt64 = 0
 
     static var defaultRights: Rights {
         [.basic, .read, .write, .getProperty, .setProperty, .getPolicy, .setPolicy, .enumerate, .destroy, .signal,
@@ -67,6 +71,8 @@ struct ProcessObject: ~Copyable {
     var returnCode: Int64 = 0
     /// Trace records name its threads task << 12 | index.
     let taskId: UInt32
+    /// Its job's CPU reservation tag (K10d), for its threads.
+    var reservation: UInt32 = 0
     /// The kernel's end of its exception channel (retained), or 0.
     var exceptionChannel: UInt64 = 0
 
@@ -190,6 +196,7 @@ enum Processes {
         let added = parent.header.lock.withLock { () -> Bool in
             guard !parentJob.pointee.dead else { return false }
             parentJob.pointee.children.append(job.address)
+            JobPointer(object: job).pointee.reservation = parentJob.pointee.reservation
             return true
         }
         guard added else {
@@ -199,10 +206,34 @@ enum Processes {
         return job
     }
 
+    /// job_set_cpu_reservation (K10d, ext 8): only while the job has no
+    /// children, and not under an ancestor's reservation. The tag is the
+    /// job's koid.
+    static func setCpuReservation(_ object: ObjectPointer, mask: UInt64) throws(Status) {
+        let job = JobPointer(object: object)
+        try object.header.lock.withLock { () throws(Status) in
+            guard job.pointee.children.isEmpty, !job.pointee.dead else { throw .badState }
+            guard job.pointee.reservation == 0 || job.pointee.reservedCpus != 0 else { throw .badState }
+            let tag = UInt32(truncatingIfNeeded: object.header.koid)
+            try Scheduler.setReservation(mask: mask, previous: job.pointee.reservedCpus, tag: tag)
+            job.pointee.reservedCpus = mask
+            job.pointee.reservation = mask == 0 ? 0 : tag
+        }
+    }
+
+    /// The thread's trace id (task << 12 | index), as its records carry it.
+    static func traceId(_ thread: ObjectPointer) -> UInt32 {
+        let t = ThreadObjectPointer(object: thread)
+        return ProcessPointer(object: t.pointee.process).pointee.taskId << 12 | t.pointee.index
+    }
+
     /// The job's record is going (Objects.destroy).
     static func destroyJob(_ object: ObjectPointer) {
         let job = JobPointer(object: object)
         Exceptions.releaseChannel(job.pointee.exceptionChannel)
+        if job.pointee.reservedCpus != 0 {
+            try? Scheduler.setReservation(mask: 0, previous: job.pointee.reservedCpus, tag: job.pointee.reservation)
+        }
         if let parent = job.pointee.parent {
             removeChild(object, from: parent)
             parent.release()
@@ -255,6 +286,7 @@ enum Processes {
         let added = job.header.lock.withLock { () -> Bool in
             guard !JobPointer(object: job).pointee.dead else { return false }
             JobPointer(object: job).pointee.children.append(process.address)
+            ProcessPointer(object: process).pointee.reservation = JobPointer(object: job).pointee.reservation
             return true
         }
         if added { job.updateSignals(clear: Signals.jobNoProcesses, set: 0) }
@@ -374,7 +406,8 @@ enum Processes {
         }
         object.retain()  // the scheduler thread's
         do throws(VmError) {
-            let handle = try Scheduler.spawn("user", extendedState: true, userThreadEntry, object.address)
+            let handle = try Scheduler.spawn("user", extendedState: true, reservation: p.pointee.reservation,
+                                             userThreadEntry, object.address)
             // Linked now, not when it first runs: from here on it can be
             // named as a futex owner or killed. (It may already have run
             // and exited: then it stays unlinked.)

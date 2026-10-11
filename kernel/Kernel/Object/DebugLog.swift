@@ -25,6 +25,13 @@ enum DebugLog {
     nonisolated(unsafe) private static var readers: UInt64 = 0
     nonisolated(unsafe) private static var dumperQueue = QueuePointer(address: 0)
     nonisolated(unsafe) private static var dumped: UInt64 = 0
+    /// Records the dumper has finished with (K10d: CROI_INFO_DEBUGLOG).
+    private static let printed = Atomic<UInt64>(0)
+
+    /// How far writing and printing have got.
+    static var progress: croi_info_debuglog_t {
+        croi_info_debuglog_t(written: next.load(ordering: .acquiring), printed: printed.load(ordering: .acquiring))
+    }
 
     static func initialize() {
         guard let raw = unsafe heap.allocate(size: Int(slots) * slotSize, alignment: Int(KernelLayout.pageSize)) else {
@@ -145,6 +152,7 @@ enum DebugLog {
             }
             var length = 0
             var dropped: UInt64 = 0
+            var done: UInt64 = 0
             debugLogLock.withLock {
                 let end = next.load(ordering: .relaxed)
                 if dumped < oldest(end) {
@@ -153,7 +161,9 @@ enum DebugLog {
                 }
                 length = format(slot(dumped), into: &line)
                 dumped += 1
+                done = dumped
             }
+            defer { printed.store(done, ordering: .releasing) }
             guard let console = panicConsole else { continue }
             if dropped != 0 {
                 console.write("[dlog: ")

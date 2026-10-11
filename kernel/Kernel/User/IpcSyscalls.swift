@@ -165,6 +165,20 @@ extension Syscalls {
                 try put(Msis.info(msi.object), a[2])
                 return
             }
+            if a[1] == UInt64(CROI_INFO_THREAD_TRACE) {  // K10d
+                guard a[3] >= UInt64(MemoryLayout<croi_info_thread_trace_t>.size) else { throw .bufferTooSmall }
+                try check(a[2], MemoryLayout<croi_info_thread_trace_t>.size)
+                let thread = try table.get(handle, type: .thread, rights: .inspect)
+                try put(croi_info_thread_trace_t(trace_id: Processes.traceId(thread.object), reserved: 0), a[2])
+                return
+            }
+            if a[1] == UInt64(CROI_INFO_DEBUGLOG) {  // K10d
+                guard a[3] >= UInt64(MemoryLayout<croi_info_debuglog_t>.size) else { throw .bufferTooSmall }
+                try check(a[2], MemoryLayout<croi_info_debuglog_t>.size)
+                _ = try table.get(handle, type: .log)
+                try put(DebugLog.progress, a[2])
+                return
+            }
             if a[1] == UInt64(CROI_INFO_RESOURCE) {
                 guard a[3] >= UInt64(MemoryLayout<croi_info_resource_t>.size) else { throw .bufferTooSmall }
                 try check(a[2], MemoryLayout<croi_info_resource_t>.size)

@@ -36,3 +36,19 @@ typedef struct {
 } croi_log_record_t;
 
 static_assert(sizeof(croi_log_record_t) + CROI_LOG_RECORD_DATA_MAX == CROI_LOG_RECORD_MAX);
+
+// object_get_info(log, CROI_INFO_DEBUGLOG) (croi's, K10d; any log handle):
+// how far the console dumper has got, for writers that pace themselves to
+// it (a trace export through the debuglog). Records are numbered from 0
+// in write order; `printed` counts those the dumper has finished with
+// (printed, or overwritten before it got to them).
+enum : uint32_t {
+  CROI_INFO_DEBUGLOG = 0x10002,
+};
+
+typedef struct {
+  uint64_t written;  // records written so far (the next record's number)
+  uint64_t printed;
+} croi_info_debuglog_t;
+
+static_assert(sizeof(croi_info_debuglog_t) == 16);

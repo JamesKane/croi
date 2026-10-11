@@ -82,6 +82,7 @@ enum : uint64_t {
   CROI_SYS_THREAD_READ_STATE = 105,      // (thread, kind, buffer, size): while in an exception
   CROI_SYS_THREAD_WRITE_STATE = 106,     // (thread, kind, buffer, size)
   CROI_SYS_JOB_SET_POLICY = 107,         // (job, options, topic 0, croi_policy_basic_t *, count)
+  CROI_SYS_JOB_SET_CPU_RESERVATION = 108, // (job, CPU resource, cpu_mask): task.h
 
   CROI_SYS_DEBUGLOG_CREATE = 110,  // (resource or 0, options: CROI_LOG_FLAG_READABLE, out)
   CROI_SYS_DEBUGLOG_WRITE = 111,   // (log, options: CROI_LOG_LOCAL, text, length <= 216)
@@ -89,6 +90,7 @@ enum : uint64_t {
   CROI_SYS_PROFILE_CREATE = 120,     // (resource, options 0, const croi_profile_info_t *, out)
   CROI_SYS_OBJECT_SET_PROFILE = 121, // (thread | interrupt | counter | timeline, profile, options,
                                      //  uint32_t *refusal or 0, timeline with ALIGN_TIMELINE)
+  CROI_SYS_THREAD_BIND_OVERRUN_PORT = 122, // (thread, port, key): profile.h
   // Resources and IO ports (K9a): Zircon's calls, values in resource.h.
   CROI_SYS_RESOURCE_CREATE = 130,  // (parent | options << 32, base, size, name, name_size, uint32_t *out)
   CROI_SYS_IOPORTS_REQUEST = 131,  // (IOPORT resource, io_addr, len): amd64

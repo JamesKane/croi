@@ -68,6 +68,17 @@ enum Profiles {
                 let timeline = try table.get(UInt32(truncatingIfNeeded: a[4]), type: .timeline, rights: .read)
                 try align(thread.object, to: timeline.object)
             }
+        case 122:  // thread_bind_overrun_port(thread, port, key), K10d
+            let thread = try table.get(UInt32(truncatingIfNeeded: a[0]), type: .thread, rights: .manageThread)
+            let port = try table.get(UInt32(truncatingIfNeeded: a[1]), type: .port, rights: .write)
+            let address = thread.object.header.lock.withLock { ThreadObjectPointer(object: thread.object).pointee.thread }
+            guard address != 0 else { throw .badState }
+            let source = try PacketSourcePointer.make(port: port, key: a[2], type: PortPacket.budgetOverrun)
+            guard let old = Scheduler.bindOverrunSource(ThreadPointer(address: address), source.address) else {
+                source.retire()
+                throw .badState
+            }
+            if old != 0 { PacketSourcePointer(address: old).retire() }
         default:
             throw .notSupported
         }
@@ -145,7 +156,8 @@ enum Profiles {
         if flags & UInt32(CROI_PROFILE_INFO_FLAG_DEADLINE) != 0 {
             let context: SchedContext
             do throws(AdmissionRefusal) {
-                context = try SchedContext(deadline: profile.pointee.params, affinity: mask ?? .max)
+                context = try SchedContext(deadline: profile.pointee.params, affinity: mask ?? .max,
+                                           reservation: Scheduler.reservation(of: scheduled))
             } catch {
                 switch error {
                 case .invalidParameters: throw .invalidArgs

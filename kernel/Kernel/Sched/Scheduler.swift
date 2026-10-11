@@ -250,7 +250,7 @@ enum Scheduler {
     /// `extendedState` gives it an FP/SIMD/vector save area (for user
     /// threads from K6; kernel threads don't need one).
     static func spawn(_ name: StaticString, cpu: Int? = nil, priority: Int = Thread.defaultPriority,
-                      context: SchedContextPointer? = nil, extendedState: Bool = false,
+                      context: SchedContextPointer? = nil, extendedState: Bool = false, reservation: UInt32 = 0,
                       _ entry: Thread.Entry, _ argument: UInt64) throws(VmError) -> ThreadHandle {
         guard (0...Thread.maxPriority).contains(priority) else { panic("sched: priority out of range") }
         reapZombies()
@@ -265,6 +265,7 @@ enum Scheduler {
         thread.pointee.savedSp = arch_thread_prepare(stack.top, thread.address)
         if extendedState { thread.pointee.extendedState = ExtendedState.allocate() }
         locked {
+            thread.pointee.reservation = reservation
             if let context { attach(thread, context) }
             makeReady(thread)
         }
@@ -926,11 +927,80 @@ enum Scheduler {
     @discardableResult
     static func reserve(cpu: Int, tag: UInt32) -> Bool {
         locked { () -> Bool in
-            var cursor = contexts
-            while let context = cursor {
-                if context.pointee.cpu == cpu, context.pointee.reservation != tag { return false }
-                cursor = context.pointee.next
+            guard !othersAdmitted(cpu, tag) else { return false }
+            reserveLocked(cpu, tag)
+            return true
+        }
+    }
+
+    /// Whether deadline reservations of a tag other than `tag` are admitted
+    /// on `cpu`. Lock held.
+    private static func othersAdmitted(_ cpu: Int, _ tag: UInt32) -> Bool {
+        var cursor = contexts
+        while let context = cursor {
+            if context.pointee.cpu == cpu, context.pointee.reservation != tag { return true }
+            cursor = context.pointee.next
+        }
+        return false
+    }
+
+    /// A job's CPU reservation (K10d, ext 8): the CPUs of `mask` for `tag`,
+    /// releasing those of `previous` not in it. All or nothing. The boot
+    /// CPU stays everyone's.
+    static func setReservation(mask: UInt64, previous: UInt64, tag: UInt32) throws(Status) {
+        guard tag != 0, mask & ~allCpus == 0, mask & 1 == 0 else { throw .invalidArgs }
+        let refused = locked { () -> Status? in
+            for cpu in 0..<Smp.count where mask & (1 << UInt64(cpu)) != 0 {
+                guard cpus[cpu].ready else { return .invalidArgs }
+                guard cpus[cpu].reservation == 0 || cpus[cpu].reservation == tag else { return .alreadyBound }
+                guard !othersAdmitted(cpu, tag) else { return .noResources }
             }
+            for cpu in 0..<Smp.count {
+                let bit: UInt64 = 1 << UInt64(cpu)
+                if mask & bit != 0 {
+                    if cpus[cpu].reservation != tag { reserveLocked(cpu, tag) }
+                } else if previous & bit != 0, cpus[cpu].reservation == tag {
+                    reserveLocked(cpu, 0)
+                }
+            }
+            return nil
+        }
+        if let refused { throw refused }
+    }
+
+    /// Whether a device interrupt may be routed to `cpu` by a thread of
+    /// reservation `tag` (none to a CPU reserved for someone else).
+    static func mayRoute(cpu: Int, tag: UInt32) -> Bool {
+        locked { cpus[cpu].reservation == 0 || cpus[cpu].reservation == tag }
+    }
+
+    /// The running thread's reservation tag.
+    static var currentReservation: UInt32 {
+        locked { tag(cpus[Int(Cpu.current)].current!) }
+    }
+
+    /// `thread`'s reservation tag.
+    static func reservation(of thread: ThreadPointer) -> UInt32 {
+        locked { tag(thread) }
+    }
+
+    /// Ext 3 (K10d): reports the overruns of `thread`'s own deadline context
+    /// (a profile object's) through `source`. Returns the source it
+    /// replaced (0 if none); nil if the thread has no such context.
+    static func bindOverrunSource(_ thread: ThreadPointer, _ source: UInt64) -> UInt64? {
+        locked { () -> UInt64? in
+            guard let context = thread.pointee.profileContext, context.pointee.profile.discipline == .deadline else {
+                return nil
+            }
+            let old = context.pointee.overrunSource
+            context.pointee.overrunSource = source
+            return old
+        }
+    }
+
+    /// Moves `cpu` to `tag`: whatever no longer belongs there leaves.
+    private static func reserveLocked(_ cpu: Int, _ tag: UInt32) {
+        do {
             cpus[cpu].reservation = tag
             // Move whatever no longer belongs here.
             var movers = QueueHead()
@@ -949,13 +1019,13 @@ enum Scheduler {
             }
             while let thread = movers.pop() { makeReady(thread) }
             requestPreemption(on: cpu)
-            return true
         }
     }
 
     /// The tag a thread's context reserves CPUs for, or 0.
     private static func tag(_ thread: ThreadPointer) -> UInt32 {
-        thread.pointee.context?.pointee.reservation ?? 0
+        let own = thread.pointee.context?.pointee.reservation ?? 0
+        return own != 0 ? own : thread.pointee.reservation
     }
 
     private static func allowed(_ thread: ThreadPointer, on cpu: Int) -> Bool {
@@ -1363,7 +1433,8 @@ enum Scheduler {
 
     /// The budget ran out before the work was done (ext 3).
     private static func overrun(_ thread: ThreadPointer) {
-        guard let context = thread.pointee.context else { return }
+        // Its own context's budget only, not one lent or inherited.
+        guard let context = thread.pointee.context, thread.pointee.effective == context.pointee.profile else { return }
         context.pointee.overruns += 1
         Trace.event(CROI_TRACE_SCHED, UInt16(CROI_TK_OVERRUN), context.pointee.overruns)
         if let hook = context.pointee.overrunHook {
@@ -1453,6 +1524,12 @@ enum Scheduler {
     /// threads if asked to and the running one should give way: its budget
     /// or slice is used up, or an eligible deadline thread comes first.
     static func preemptIfRequested() {
+        // Masked from here: the syscall path calls this with interrupts on,
+        // and a thread preempted between reading its CPU and taking the lock
+        // took it in another CPU's name (rv64 caught it: "released by a CPU
+        // that doesn't hold it").
+        let saved = arch_interrupts_save()
+        defer { arch_interrupts_restore(saved) }
         guard started.load(ordering: .acquiring),
               preemptPending.load(ordering: .relaxed) & (1 << UInt64(Cpu.current)) != 0 else { return }
         lock.lockMasked()

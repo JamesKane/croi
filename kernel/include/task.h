@@ -133,3 +133,26 @@ typedef struct {
 } croi_info_task_stats_t;
 
 static_assert(sizeof(croi_info_task_stats_t) == 40);
+
+// object_get_info(thread, CROI_INFO_THREAD_TRACE) (croi's, K10d; INSPECT):
+// the id croi's trace records name the thread by (task << 12 | index), so
+// a user trace can be joined with croi's sched and ipc records.
+enum : uint32_t {
+  CROI_INFO_THREAD_TRACE = 0x10001,
+};
+
+typedef struct {
+  uint32_t trace_id;
+  uint32_t reserved;
+} croi_info_thread_trace_t;
+
+static_assert(sizeof(croi_info_thread_trace_t) == 8);
+
+// job_set_cpu_reservation(job, resource, cpu_mask) (croi's, K10d, ext 8):
+// the CPUs in the mask run only threads of this job and its descendants,
+// and no other threads, timers or routed interrupts. Needs SET_POLICY on
+// the job and the CPU system resource (or root); only while the job has
+// no children (BAD_STATE), which then inherit it. The boot CPU can't be
+// reserved (INVALID_ARGS); a CPU another job holds is ALREADY_BOUND, one
+// with deadline reservations admitted for others NO_RESOURCES. Mask 0
+// releases; the job's destruction releases too.

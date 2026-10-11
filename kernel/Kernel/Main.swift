@@ -312,6 +312,7 @@ private func runSelfTests(_ console: Uart) {
     ProcessSelfTest.runCounters(console)
     ProcessSelfTest.runTimelines(console)
     ProcessSelfTest.runDeadlineWakeups(console)
+    ProcessSelfTest.runExtensions(console)
     ProgramSelfTest.run(console)
     SelfTestDeadman.done.store(true, ordering: .relaxed)
 }

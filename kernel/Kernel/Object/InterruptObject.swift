@@ -411,7 +411,8 @@ enum InterruptObjects {
         let interrupt = InterruptPointer(object: object)
         guard !interrupt.pointee.isVirtual else { throw .notSupported }
         var cpu = -1
-        for i in 0..<Smp.count where mask & (1 << UInt64(i)) != 0 {
+        let tag = Scheduler.currentReservation  // K10d: never onto another job's reserved CPU
+        for i in 0..<Smp.count where mask & (1 << UInt64(i)) != 0 && Scheduler.mayRoute(cpu: i, tag: tag) {
             let record = unsafe UnsafePointer<PerCpu>(bitPattern: UInt(Smp.records[i]))!
             if unsafe record.pointee.interruptsReady.load(ordering: .acquiring) {
                 cpu = i

@@ -26,6 +26,9 @@ struct Thread: ~Copyable {
     /// A deadline context a profile object made for it (K8c): it owns it,
     /// and it goes when the thread is freed or another profile replaces it.
     var profileContext: SchedContextPointer? = nil
+    /// The CPU reservation tag of its job (K10d, ext 8), or 0: it runs only
+    /// on CPUs reserved for that tag (a context's own tag wins).
+    var reservation: UInt32 = 0
     var baseWeight: UInt64
     /// Its base profile plus what it inherits from waiters on the owned
     /// wait queues it holds (`ownedQueues`), transitively.

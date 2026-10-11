@@ -459,7 +459,9 @@ syscalls 90-97 in User/SyncSyscalls.swift):
 - Timer objects (22): set arms a per-CPU kernel timer holding a reference
   (generation numbers ignore stale callbacks; cancel IPIs the arming
   CPU); slack windows as Zircon's center/early/late; zero slack for a
-  thread on a deadline profile. Not yet: cancel on last handle close; the
+  thread on a deadline profile. Set and cancel clear SIGNALED (cancel
+  too for a timer that already fired, as Zircon's). Not yet: cancel on
+  last handle close; the
   kernel timer queue's 32-entry limit (NO_RESOURCES).
 
 Exceptions and job policy (K7d, Kernel/Object/Exception.swift, task.h,
@@ -656,7 +658,7 @@ User/DriverSyscalls.swift; Todhchai item 13):
 - `interrupt_set_affinity` (146, croi's): routes to the lowest CPU of the
   mask with `interruptsReady` (IOAPIC physical destination, IROUTER, PLIC
   enable bits); INVALID_ARGS when none, NOT_SUPPORTED for virtual ones.
-  Until set, the boot CPU. It doesn't yet consult `reserve(cpu:tag:)`.
+  Until set, the boot CPU. CPUs another job reserved are skipped (K10d).
 - `DeviceIrqs`: handler table (heap, by number) under `tableLock`, held
   while a handler runs, so `unregister` means no handler is running; lock
   order table -> object -> controller (and object -> scheduler -> port
@@ -800,6 +802,41 @@ Deadline-carrying wakeups, K10c (Todhchai ext 5 and 10; profile.h):
   re-aligned at once. `SchedContextRecord.intent` is still stored only.
 - Test hooks 3/4 (syscall 6) return the running thread's period start
   and deadline. Boot test mode 16 (`ProcessSelfTest.runDeadlineWakeups`).
+
+Kernel-only extensions reaching user space, K10d (task.h, profile.h,
+log.h; Todhchai ext 3 and 8, its trace export):
+- `thread_bind_overrun_port` (122; MANAGE_THREAD, port WRITE): the
+  thread's own deadline context (`profileContext`, from
+  object_set_profile; else BAD_STATE) gets a PacketSource of type 0x80
+  (payload[1] total overruns, [2] since last read), swapped under the
+  scheduler lock so the context's deinit retires whichever is bound.
+  Overruns count only while the thread runs on its context's own profile
+  (not a lent or inherited one).
+- `job_set_cpu_reservation` (108; SET_POLICY on the job, CPU system
+  resource base 4 or root): `Scheduler.setReservation` reserves the
+  mask's CPUs for tag = the job's koid, all or nothing (boot CPU
+  INVALID_ARGS, another tag's CPU ALREADY_BOUND, other tags' deadline
+  contexts admitted there NO_RESOURCES), only while the job has no
+  children and no inherited tag (BAD_STATE). Child jobs and processes
+  copy the tag at creation, threads get it at spawn (`Thread.reservation`;
+  a context's own tag wins in `tag`), deadline contexts are admitted with
+  it. Mask 0 or the job's destruction releases. `interrupt_set_affinity`
+  skips CPUs reserved for another tag (`mayRoute`); interrupts routed
+  before a reservation stay where they are.
+- object_get_info CROI_INFO_THREAD_TRACE (0x10001, INSPECT): task << 12
+  | index, as trace records name the thread. CROI_INFO_DEBUGLOG (0x10002,
+  any log handle): records written and records the dumper has finished
+  (`DebugLog.printed`, stored after the console write).
+- Test hook 5 (syscall 6) returns the current CPU. Boot test mode 17
+  (`ProcessSelfTest.runExtensions`; child submode 9 reports its CPUs).
+- Fixed on the way (since K8c): `Syscalls.dispatch` called
+  `preemptIfRequested` with interrupts on, so a thread could read its CPU,
+  be preempted and moved, and take the scheduler lock in the old CPU's
+  name (rv64: "released by a CPU that doesn't hold it", ~2 boots in 3
+  with mode 17). It masks interrupts itself now, and `lockMasked` panics
+  if called with them on. A retiring PacketSource takes its queued packet
+  back out of the port (`Ports.unqueue`); it used to wait for a reader
+  that might never come, keeping the port alive.
 
 Memory statistics (Todhchai's M3 resident-memory budget; task.h,
 resource.h, UserAspace.taskStats, Kernel/Object/KernelMemory.swift):

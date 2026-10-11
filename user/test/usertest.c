@@ -424,6 +424,14 @@ static int64_t child(uint32_t self, uint64_t submode, uint64_t vdso) {
     return sys(CROI_SYS_PROCESS_EXIT, sys(CROI_SYS_EVENT_CREATE, 0, (uint64_t)&event, 0, 0, 0) == ERR_ACCESS_DENIED ? 60 : 61,
                0, 0, 0, 0);
   }
+  case 9: {  // in a job with reserved CPUs: exit with the CPUs it ran on
+    uint64_t seen = 0;
+    for (int i = 0; i < 300; i++) {
+      seen |= 1ull << sys(CROI_SYS_TEST_PROFILE, 5, 0, 0, 0, 0);
+      if (i % 10 == 0) sys(CROI_SYS_NANOSLEEP, now_ns() + 100000, 0, 0, 0, 0);
+    }
+    return sys(CROI_SYS_PROCESS_EXIT, (int64_t)seen, 0, 0, 0, 0);
+  }
   }
   return 97;
 }
@@ -780,6 +788,8 @@ static int64_t sync_objects(const startup_t *s) {
                  !(wait_for(timer, SIGNALED, 100000000) & SIGNALED));
   CHECK(175, sys(CROI_SYS_TIMER_SET, timer, 1, 0, 0, 0) == 0 &&
                  (wait_for(timer, SIGNALED, 1000000000) & SIGNALED));  // already due
+  CHECK(208, sys(CROI_SYS_TIMER_CANCEL, timer, 0, 0, 0, 0) == 0 &&
+                 !(wait_for(timer, SIGNALED, 0) & SIGNALED));  // cancel clears a fired timer, as Zircon's
   // A deadline profile gets zero slack: half a second of late slack ignored.
   CHECK(176, sys(CROI_SYS_TEST_PROFILE, 1, 0, 0, 0, 0) == 0);
   deadline = now_ns() + 5000000;
@@ -2291,6 +2301,95 @@ static int64_t deadline_wakeups(const startup_t *s) {
   return 0x600D;
 }
 
+// Mode 17 (K10d): kernel-only extensions reaching user space.
+typedef struct {
+  volatile uint64_t until;
+  volatile uint64_t seen;  // CPUs it ran on
+  volatile uint32_t stop;
+} spinner_t;
+
+static void spinner(uint64_t arg) {
+  spinner_t *p = (spinner_t *)arg;
+  while (!p->stop && now_ns() < p->until) p->seen |= 1ull << sys(CROI_SYS_TEST_PROFILE, 5, 0, 0, 0, 0);
+  sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
+}
+
+static int64_t extensions(const startup_t *s) {
+  // A thread's trace id: task << 12 | index, distinct per thread.
+  // They spin until told to stop (5 s at most): on a slow emulator a fixed
+  // 20 ms ran out before the deadline profile below could overrun.
+  spinner_t one = {.until = now_ns() + 5000000000ull}, two = {.until = now_ns() + 5000000000ull};
+  uint32_t a = start_thread(s, spinner, (uint64_t)&one), b = start_thread(s, spinner, (uint64_t)&two);
+  croi_info_thread_trace_t ta, tb;
+  CHECK(390, info(a, CROI_INFO_THREAD_TRACE, &ta, sizeof ta) == 0 && info(b, CROI_INFO_THREAD_TRACE, &tb, sizeof tb) == 0 &&
+                 ta.trace_id != tb.trace_id && (ta.trace_id >> 12) == (tb.trace_id >> 12) && (ta.trace_id & 0xFFF) != 0 &&
+                 info(s->process, CROI_INFO_THREAD_TRACE, &ta, sizeof ta) == ERR_WRONG_TYPE);
+  // Overruns to a port: a deadline thread spinning past its budget.
+  uint32_t port = 0, deadline = 0, refusal = 0;
+  croi_profile_info_t profile;
+  zero_bytes(&profile, sizeof profile);
+  profile.flags = CROI_PROFILE_INFO_FLAG_DEADLINE;
+  profile.deadline_params.capacity = 1000000;
+  profile.deadline_params.relative_deadline = 5000000;
+  profile.deadline_params.period = 5000000;
+  CHECK(391, sys(CROI_SYS_PORT_CREATE, 0, (uint64_t)&port, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_THREAD_BIND_OVERRUN_PORT, a, port, 7, 0, 0) == ERR_BAD_STATE &&  // no profile yet
+                 sys(CROI_SYS_PROFILE_CREATE, s->resource, 0, (uint64_t)&profile, (uint64_t)&deadline, 0) == 0 &&
+                 sys(CROI_SYS_OBJECT_SET_PROFILE, a, deadline, 0, (uint64_t)&refusal, 0) == 0 &&
+                 sys(CROI_SYS_THREAD_BIND_OVERRUN_PORT, a, port, 7, 0, 0) == 0);
+  croi_port_packet_t p;
+  CHECK(392, port_next(port, 100000000, &p) == 0 && p.type == CROI_PKT_TYPE_BUDGET_OVERRUN && p.key == 7 &&
+                 p.payload[1] >= 1 && p.payload[2] >= 1);
+  one.stop = two.stop = 1;
+  join_checked(a);
+  join_checked(b);
+  // The debuglog's dumper catches up with what was written.
+  uint32_t log = 0;
+  croi_info_debuglog_t d;
+  CHECK(393, sys(CROI_SYS_DEBUGLOG_CREATE, 0, 0, (uint64_t)&log, 0, 0) == 0 &&
+                 sys(CROI_SYS_DEBUGLOG_WRITE, log, 0, (uint64_t)"k10d: paced", 11, 0) == 0 &&
+                 info(log, CROI_INFO_DEBUGLOG, &d, sizeof d) == 0 && d.written >= 1 && d.printed <= d.written);
+  uint64_t target = d.written, give_up = now_ns() + 2000000000;
+  while (now_ns() < give_up && info(log, CROI_INFO_DEBUGLOG, &d, sizeof d) == 0 && d.printed < target) sleep_ns(1000000);
+  CHECK(394, d.printed >= target);
+  // CPU 3 reserved for a job: its process runs there only, nobody else does.
+  uint32_t job = 0, other = 0, tracing = 0;
+  CHECK(395, sys(CROI_SYS_JOB_CREATE, s->job, 0, (uint64_t)&job, 0, 0) == 0 &&
+                 sys(CROI_SYS_JOB_CREATE, s->job, 0, (uint64_t)&other, 0, 0) == 0 &&
+                 resource_create(s->resource, CROI_RSRC_KIND_SYSTEM, CROI_RSRC_SYSTEM_TRACING_BASE, 1, &tracing) == 0 &&
+                 sys(CROI_SYS_JOB_SET_CPU_RESERVATION, job, tracing, 1u << 3, 0, 0) == ERR_OUT_OF_RANGE &&
+                 sys(CROI_SYS_JOB_SET_CPU_RESERVATION, job, s->resource, 1u << 0 | 1u << 3, 0, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_JOB_SET_CPU_RESERVATION, job, s->resource, 1u << 3, 0, 0) == 0 &&
+                 sys(CROI_SYS_JOB_SET_CPU_RESERVATION, other, s->resource, 1u << 3, 0, 0) == ERR_ALREADY_BOUND);
+  spinner_t loads[3];
+  uint32_t workers[3];
+  for (int i = 0; i < 3; i++) {
+    loads[i].until = now_ns() + 30000000;
+    loads[i].seen = 0;
+    loads[i].stop = 0;
+    workers[i] = start_thread(s, spinner, (uint64_t)&loads[i]);
+  }
+  uint32_t process = spawn_child(s, job, 9);
+  CHECK(396, (wait_terminated(process) & CROI_SIGNAL_TASK_TERMINATED) && return_code(process) == 1 << 3);
+  for (int i = 0; i < 3; i++) {
+    join_checked(workers[i]);
+    CHECK(397, loads[i].seen != 0 && !(loads[i].seen & 1 << 3));
+  }
+  // A job with children can't change it; its end releases the CPU.
+  CHECK(398, sys(CROI_SYS_JOB_SET_CPU_RESERVATION, job, s->resource, 0, 0, 0) == ERR_BAD_STATE);
+  sys(CROI_SYS_HANDLE_CLOSE, process, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, job, 0, 0, 0, 0);
+  int64_t taken = -1;
+  for (uint64_t until = now_ns() + 2000000000; now_ns() < until; sleep_ns(1000000)) {
+    taken = sys(CROI_SYS_JOB_SET_CPU_RESERVATION, other, s->resource, 1u << 3, 0, 0);
+    if (taken != ERR_ALREADY_BOUND) break;
+  }
+  CHECK(399, taken == 0 && sys(CROI_SYS_JOB_SET_CPU_RESERVATION, other, s->resource, 0, 0, 0) == 0);
+  uint32_t handles[] = {port, deadline, log, other, tracing};
+  for (int i = 0; i < 5; i++) sys(CROI_SYS_HANDLE_CLOSE, handles[i], 0, 0, 0, 0);
+  return 0x600D;
+}
+
 // Mode 4: something to sample. Three frames deep, spin for `ns`, with a
 // clock syscall every 64 iterations (so some samples land in the kernel
 // and must continue into these frames).
@@ -2336,6 +2435,7 @@ __attribute__((section(".text.start"))) [[noreturn]] void _start(uint64_t mode, 
             : mode == 14 ? counters((const startup_t *)handle)
             : mode == 15 ? timelines((const startup_t *)handle)
             : mode == 16 ? deadline_wakeups((const startup_t *)handle)
+            : mode == 17 ? extensions((const startup_t *)handle)
             : mode >= 0x400 ? child((uint32_t)mode, handle, vdso_base)
                         : objects());
 }

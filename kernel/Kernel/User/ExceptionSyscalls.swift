@@ -97,6 +97,10 @@ extension Syscalls {
             }
             let job = try table.get(handle, type: .job, rights: .setPolicy)
             try Policy.set(job.object, options: UInt32(truncatingIfNeeded: a[1]), entries, count: Int(a[4]))
+        case 108:  // job_set_cpu_reservation(job, CPU resource, cpu_mask), K10d
+            let job = try table.get(handle, type: .job, rights: .setPolicy)
+            try Resources.check(table, UInt32(truncatingIfNeeded: a[1]), system: UInt64(CROI_RSRC_SYSTEM_CPU_BASE))
+            try Processes.setCpuReservation(job.object, mask: a[2])
         default:
             throw .notSupported
         }

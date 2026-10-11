@@ -275,6 +275,19 @@ enum ProcessSelfTest {
         console.write("periods aligned to vblanks\n")
     }
 
+    static func runExtensions(_ console: Uart) {
+        let before = Counts()
+        let exitCode = runInProcess(mode: 17)
+        guard exitCode == 0x600D else {
+            console.write("  extensions: user program failed check ")
+            console.write(decimal: UInt64(bitPattern: exitCode))
+            console.write("\n")
+            panic("extensions self-test: user side")
+        }
+        before.expectUnchanged(console)
+        console.write("  extensions: thread trace ids, overruns to a port, debuglog progress, a job's reserved CPU\n")
+    }
+
     /// Live processes, address spaces and objects, to check nothing leaked.
     struct Counts {
         let processes = Processes.live.load(ordering: .relaxed)
