@@ -106,6 +106,30 @@ enum ProgramSelfTest {
             console.write("\n")
             panic("program self-test: a static PIE's random base")
         }
+        // The same program as an ET_EXEC whose dynamic section has no
+        // relocations (linked --export-dynamic): where it was linked.
+        let (stdout3, stdout3Rights) = created { () throws(Status) in try DebugLogs.create(readable: false) }
+        handles[0] = ProgramLoader.StartupHandle(object: stdout3, rights: stdout3Rights,
+                                                 info: croi_pa_hnd(UInt32(CROI_PA_FD), 1))
+        let executable = unsafe RawSpan(_unsafeStart: UnsafeRawPointer(bitPattern: UInt(croi_swift_test_exec_address()))!,
+                                        byteCount: Int(croi_swift_test_exec_size()))
+        let third: ObjectPointer
+        do throws(Status) {
+            third = try ProgramLoader.start(
+                executable, name: "swifttest-exec", job: Processes.rootJob, handles: handles.span,
+                environment: unsafe Span(_unsafeStart: environment.utf8Start, count: environment.utf8CodeUnitCount))
+        } catch {
+            panic("program self-test: loading an executable with a dynamic section")
+        }
+        stdout3.release()
+        let giveUp3 = Clock.now() + 30_000_000_000
+        while !Processes.info(process: third).exited {
+            guard Clock.now() < giveUp3 else { panic("program self-test: the third run never ended") }
+            Scheduler.sleep(until: Clock.now() + 2_000_000)
+        }
+        let thirdCode = Processes.info(process: third).returnCode
+        third.release()
+        guard thirdCode == 0x600D else { panic("program self-test: the executable with a dynamic section failed") }
         before.expectUnchanged(console)
         console.write("  swift:  Embedded Swift static PIE at random bases (")
         console.write(hex: firstBase)
@@ -114,7 +138,8 @@ enum ProgramSelfTest {
         console.write("): processargs (handles, environment), ")
         console.write("heap over its VMAR, stdout as ")
         console.write(decimal: UInt64(matched))
-        console.write(" debuglog records, debuglog create/read/wait from user mode; all torn down\n")
+        console.write(" debuglog records, debuglog create/read/wait from user mode; an ET_EXEC with a dynamic section")
+        console.write(" and no relocations; all torn down\n")
     }
 
     private static func created(_ body: () throws(Status) -> (ObjectPointer, Rights)) -> (ObjectPointer, Rights) {

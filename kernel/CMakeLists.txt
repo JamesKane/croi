@@ -172,6 +172,10 @@ croi_user_binary(${_vdso_bin} PIC
 croi_user_runtime()
 set(_swift_test ${CMAKE_CURRENT_BINARY_DIR}/swifttest.elf)
 croi_user_program(${_swift_test} PIE SWIFT ${_user_dir}/test/swift/Main.swift)
+# The same as a fixed-address program with a dynamic section and no
+# relocations (Todhchai's dlopen hosts, linked --export-dynamic).
+set(_swift_test_exec ${CMAKE_CURRENT_BINARY_DIR}/swifttestexec.elf)
+croi_user_program(${_swift_test_exec} EXPORT_DYNAMIC SWIFT ${_user_dir}/test/swift/Main.swift)
 # userboot (K8b), carried in the kernel image like Zircon's; it shares
 # lib/elf's sources with the kernel and loader.
 set(_userboot ${CMAKE_CURRENT_BINARY_DIR}/userboot.elf)
@@ -180,8 +184,8 @@ croi_user_program(${_userboot} PIE
         ${_user_dir}/userboot/Power.swift
         ${PROJECT_SOURCE_DIR}/lib/elf/Elf/ElfImage.swift)
 set_source_files_properties(userprogram.S PROPERTIES
-  OBJECT_DEPENDS "${_user_bin};${_vdso_bin};${_swift_test};${_userboot}"
-  COMPILE_DEFINITIONS "CROI_USER_PROGRAM=\"${_user_bin}\";CROI_VDSO=\"${_vdso_bin}\";CROI_SWIFT_TEST=\"${_swift_test}\";CROI_USERBOOT=\"${_userboot}\"")
+  OBJECT_DEPENDS "${_user_bin};${_vdso_bin};${_swift_test};${_swift_test_exec};${_userboot}"
+  COMPILE_DEFINITIONS "CROI_USER_PROGRAM=\"${_user_bin}\";CROI_VDSO=\"${_vdso_bin}\";CROI_SWIFT_TEST=\"${_swift_test}\";CROI_SWIFT_TEST_EXEC=\"${_swift_test_exec}\";CROI_USERBOOT=\"${_userboot}\"")
 
 # bootfs (K8b): the programs userboot can start, in Zircon's bootfs format
 # (tools/mkbootfs.py), served on the ESP as \croi\bootfs.img.

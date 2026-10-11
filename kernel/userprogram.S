@@ -28,6 +28,15 @@ croi_swift_test_start:
 .globl croi_swift_test_end
 croi_swift_test_end:
 
+// The same program as an ET_EXEC with a relocation-free dynamic section.
+.section .rodata.swift_test_exec, "a"
+.balign 16
+.globl croi_swift_test_exec_start
+croi_swift_test_exec_start:
+    .incbin CROI_SWIFT_TEST_EXEC
+.globl croi_swift_test_exec_end
+croi_swift_test_exec_end:
+
 // userboot (user/userboot), an ELF: the first user process (K8b).
 .section .rodata.userboot, "a"
 .balign 16

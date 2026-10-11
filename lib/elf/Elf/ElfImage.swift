@@ -162,11 +162,11 @@ public struct ElfImage {
     /// place segments in separate memory (VMOs) apply them themselves.
     public func forEachRelocation(in file: RawSpan, _ body: (UInt64, UInt64) throws(Error) -> Void) throws(Error) {
         guard let dynamic else { return }
-        guard kind == .pie else { throw Error("an executable with a dynamic section") }
         let bad = Error("bad dynamic section")
         var rela: UInt64?
         var relaSize: UInt64 = 0
         var relaEntry: UInt64 = 24
+        var other = Self.OtherRelocations()
         var at = dynamic
         while true {
             guard let offset = fileOffset(of: at, length: 16) else { throw bad }
@@ -176,12 +176,13 @@ public struct ElfImage {
             case 7: rela = value        // DT_RELA
             case 8: relaSize = value    // DT_RELASZ
             case 9: relaEntry = value   // DT_RELAENT
-            default: ()
+            default: other.note(tag, value)
             }
             if tag == 0 { break }
             at += 16
         }
-        guard let rela, relaEntry >= 24, relaSize > 0 else { return }
+        try checkDynamic(rela: rela, relaSize: relaSize, other)
+        guard kind == .pie, let rela, relaEntry >= 24, relaSize > 0 else { return }
         guard let start = fileOffset(of: rela, length: relaSize) else { throw bad }
         let badReloc = Error("relocation out of bounds")
         var entry = start
@@ -198,14 +199,42 @@ public struct ElfImage {
         }
     }
 
+    /// DT_REL / DT_JMPREL tables (sizes from DT_RELSZ / DT_PLTRELSZ):
+    /// nothing croi applies.
+    struct OtherRelocations {
+        var rel = false, relSize: UInt64 = 0, jmprel = false, pltSize: UInt64 = 0
+
+        mutating func note(_ tag: UInt64, _ value: UInt64) {
+            switch tag {
+            case 17: rel = true         // DT_REL
+            case 18: relSize = value    // DT_RELSZ
+            case 23: jmprel = true      // DT_JMPREL
+            case 2: pltSize = value     // DT_PLTRELSZ
+            default: ()
+            }
+        }
+    }
+
+    /// An ET_EXEC loads at its link addresses: its dynamic section (a
+    /// program linked --export-dynamic for dlopen'd libraries) is only a
+    /// symbol table, refused only if it has relocations to apply. Neither
+    /// kind may carry REL or PLT relocations (static PIEs have RELATIVE
+    /// RELA entries only).
+    private func checkDynamic(rela: UInt64?, relaSize: UInt64, _ other: OtherRelocations) throws(Error) {
+        if (other.rel && other.relSize > 0) || (other.jmprel && other.pltSize > 0) {
+            throw Error("unsupported relocation tables")
+        }
+        if kind != .pie, rela != nil, relaSize > 0 { throw Error("an executable with relocations") }
+    }
+
     private func relocate(_ image: inout MutableRawSpan, runAddress: UInt64) throws(Error) {
         guard let dynamic else { return }
-        guard kind == .pie else { throw Error("an executable with a dynamic section") }
         let bad = Error("bad dynamic section")
 
         var rela: UInt64?
         var relaSize: UInt64 = 0
         var relaEntry: UInt64 = 24
+        var other = Self.OtherRelocations()
         guard dynamic >= base else { throw bad }
         var offset = dynamic - base
         while true {
@@ -216,12 +245,13 @@ public struct ElfImage {
             case 7: rela = value        // DT_RELA
             case 8: relaSize = value    // DT_RELASZ
             case 9: relaEntry = value   // DT_RELAENT
-            default: ()
+            default: other.note(tag, value)
             }
             if tag == 0 { break }
             offset += 16
         }
-        guard let rela, relaEntry >= 24 else { return }
+        try checkDynamic(rela: rela, relaSize: relaSize, other)
+        guard kind == .pie, let rela, relaEntry >= 24 else { return }
         guard rela >= base else { throw bad }
 
         let badReloc = Error("relocation out of bounds")

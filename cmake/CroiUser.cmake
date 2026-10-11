@@ -80,9 +80,9 @@ function(croi_user_runtime)
   set(CROI_USER_RUNTIME_PIE ${_dir}/libcroi-runtime-pie.a PARENT_SCOPE)
 endfunction()
 
-#   croi_user_program(<out.elf> [PIE] [SOURCES <c>...] [SWIFT <swift>...] [STACK <bytes>])
+#   croi_user_program(<out.elf> [PIE] [EXPORT_DYNAMIC] [SOURCES <c>...] [SWIFT <swift>...] [STACK <bytes>])
 function(croi_user_program output)
-  cmake_parse_arguments(U "PIE" "STACK" "SOURCES;SWIFT" ${ARGN})
+  cmake_parse_arguments(U "PIE;EXPORT_DYNAMIC" "STACK" "SOURCES;SWIFT" ${ARGN})
   # PIE: a static PIE (K11b), linked at 0, loaded at a random base by
   # croi's loaders, which apply its R_*_RELATIVE relocations.
   set(_cpie)
@@ -98,6 +98,19 @@ function(croi_user_program output)
   endif()
   get_filename_component(_name ${output} NAME_WE)
   set(_dir ${CMAKE_CURRENT_BINARY_DIR}/${_name}.dir)
+  # EXPORT_DYNAMIC: a dynamic section with no relocations (a program that
+  # hosts dlopen'd libraries); the loaders take it as a symbol table.
+  # (lld makes a dynamic section for a non-PIC executable only when a
+  # shared object is linked: an empty one, --as-needed, so no DT_NEEDED.)
+  set(_dynamic_commands)
+  set(_dynamic_inputs)
+  if(U_EXPORT_DYNAMIC)
+    set(_link --image-base=0x1000000 --export-dynamic --no-dynamic-linker)
+    set(_dynamic_commands
+        COMMAND ${CMAKE_C_COMPILER} --target=${CROI_CLANG_TRIPLE} -c -x c /dev/null -o ${_dir}/empty.o
+        COMMAND ${CMAKE_LINKER} -shared -soname=libempty.so ${_dir}/empty.o -o ${_dir}/libempty.so)
+    set(_dynamic_inputs --as-needed ${_dir}/libempty.so)
+  endif()
   set(_objects)
   set(_commands)
   foreach(_source ${U_SOURCES})
@@ -124,9 +137,10 @@ function(croi_user_program output)
   add_custom_command(OUTPUT ${output}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${_dir}
     ${_commands}
+    ${_dynamic_commands}
     COMMAND ${CMAKE_LINKER} ${_link} -e _start -zseparate-loadable-segments
             -zmax-page-size=4096 -znoexecstack -zstack-size=${U_STACK} --gc-sections --build-id=sha1
-            ${_objects} ${_runtime} -o ${output}
+            ${_objects} ${_runtime} ${_dynamic_inputs} -o ${output}
     DEPENDS ${U_SOURCES} ${U_SWIFT} ${_runtime} ${PROJECT_SOURCE_DIR}/user/include/module.modulemap
     COMMENT "Building user program ${_name}")
 endfunction()

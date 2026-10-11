@@ -1403,6 +1403,14 @@ ProgramLoader `randomBase`, userboot `randomPlace`; cmake `PIE`):
   userboot and bin/m2 are PIEs, so every boot loads both ways; ET_EXEC
   programs (Todhchai's, the self-tests' fixed-address ones) still load
   where linked.
+- An ET_EXEC may have a dynamic section (a program linked
+  --export-dynamic to host dlopen'd libraries, Todhchai's M5k): it is
+  only a symbol table, refused only if it has RELA, REL or JMPREL
+  entries to apply (REL and JMPREL are refused for PIEs too). The program
+  self-test runs user/test/swift a third time built that way
+  (`croi_user_program(... EXPORT_DYNAMIC ...)`: lld makes the section for
+  a non-PIC executable only with a shared object linked, so an empty one
+  goes in --as-needed).
 - Relocations: R_*_RELATIVE only; `ElfImage.forEachRelocation(in:)`
   reads PT_DYNAMIC and the RELA table from the file, and the loaders
   write `base - linkBase + addend` into the segment's VMO before mapping

@@ -50,6 +50,14 @@ static inline uint64_t croi_swift_test_size(void) {
   return (uint64_t)(croi_swift_test_end - croi_swift_test_start);
 }
 
+// The same program as an ET_EXEC with a relocation-free dynamic section.
+extern const uint8_t croi_swift_test_exec_start[];
+extern const uint8_t croi_swift_test_exec_end[];
+static inline uint64_t croi_swift_test_exec_address(void) { return (uint64_t)croi_swift_test_exec_start; }
+static inline uint64_t croi_swift_test_exec_size(void) {
+  return (uint64_t)(croi_swift_test_exec_end - croi_swift_test_exec_start);
+}
+
 // userboot (user/userboot), an ELF: the first user process (K8b).
 extern const uint8_t croi_userboot_start[];
 extern const uint8_t croi_userboot_end[];
