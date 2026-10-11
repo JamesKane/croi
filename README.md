@@ -45,8 +45,15 @@ file system on virtio-blk and a framebuffer console on croi, with every
 system budget met under KVM, resident memory included (2-2.5 MiB at the
 console against 32 MiB).
 
-The next target is **M4, Todhchai's native desktop v0**: a compositor,
-input and audio. What it needs from the kernel is milestone K10 below.
+**K10, the kernel side of Todhchai's M4 (native desktop v0), is done**
+(2026-10-11): counters and display timelines a compositor waits on,
+wakeups that carry a deadline, overrun ports and CPU reservation, power
+control, and an idle machine that takes no wakeups (Todhchai's idle
+desktop: 0 in 60 s). Bringing M4 up on croi also found and fixed a
+killed thread that ran on until an unrelated interrupt (amd64's SYSCALL
+return skipped the kill check) and long timers firing early under KVM.
+Next is what Todhchai's M5 (Vulkan over virtio-gpu) needs, then the
+deferred list below.
 
 | Milestone | Scope | Status |
 |---|---|---|
@@ -60,7 +67,7 @@ input and audio. What it needs from the kernel is milestone K10 below.
 | K7 | Channels, eventpairs, timers, futexes with owners; jobs, processes, threads, exceptions, job policy | ✅ |
 | K8 | Debuglog, ELF loading, Swift user programs, bootfs + userboot, the M2 exit test and budgets | ✅ |
 | K9 | M3: resources, physical VMOs, firmware data (ZBI items), interrupt objects with affinity, MSI/MSI-X (amd64), BTI without an IOMMU, boot budgets, task and kernel memory stats | ✅ |
-| K10 | M4: counters, display timeline, wakeups that carry a deadline, frame intent, overrun ports, CPU reservation, power control, no idle wakeups | ⬜ next |
+| K10 | M4: counters, display timeline, wakeups that carry a deadline, frame intent, overrun ports, CPU reservation, power control, no idle wakeups, CPU stats | ✅ |
 | Later | IOMMUs (VT-d first), GICv3 ITS and RISC-V IMSIC, FIFOs/sockets/streams, VMO clones, pager, debugger syscalls | ⬜ after M4 |
 
 See [`docs/roadmap.md`](docs/roadmap.md) for the detailed plan and the
@@ -166,10 +173,14 @@ ninja -C build/rv64 run             # boot interactively (Ctrl-A x quits)
 
 Each test boot runs the kernel's self-tests (PMM, heap, SMP, IPIs and
 shootdowns, timers, the scheduler, the VM, objects, user mode, IPC,
-processes and exceptions, resources, interrupts, MSI, DMA, and a
-framebuffer screendump check), then userboot starts `bin/m2`, the M2 exit
-test. `croi.selftest=off` on the kernel command line skips the self-tests,
-as Todhchai's boots do (`boot-lean` tests that path).
+processes and exceptions, resources, interrupts, MSI, DMA, counters,
+timelines, power control refusals, and a framebuffer screendump check),
+then userboot starts `bin/m2`, the M2 exit test, which ends by counting
+an idle machine's wakeups; then userboot powers the machine off
+(`userboot.shutdown=poweroff`) and QEMU must exit by itself.
+`croi.selftest=off` on the kernel command line skips the self-tests, as
+Todhchai's boots do (`boot-lean` tests that path; on arm64 and rv64
+`boot-lean-icount` runs it with guest time from instruction counts).
 
 Timings are judged separately from correctness, after Todhchai's
 discipline: every budget is printed as a `budget name=... value=...`

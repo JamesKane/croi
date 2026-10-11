@@ -4,8 +4,11 @@ croi's first consumer is Todhchai (`../todhchai`). Its kernel requirements
 are in `../todhchai/docs/croi-requirements.md` (items 1–19 and extensions
 ext 1–10), and its milestone M2 ("croi reaches user space") was croi's
 first big target, reached on 2026-10-10 (K8c). Its M3 (native tier 0)
-closed the same day on croi's K9; M4 (native desktop v0) is next: K10
-(agreed with Todhchai). This file orders croi's work so those needs are designed in
+closed the same day on croi's K9; its M4 (native desktop v0) needed K10
+(agreed with Todhchai), done on 2026-10-11 with M4's kernel budgets met
+(idle desktop: 0 wakeups in 60 s). M5 (Vulkan over virtio-gpu) is next
+for Todhchai; its asks on croi so far are covered by existing calls
+(BAR sub-range physical VMOs with a per-VMO cache policy, counter_wait_async). This file orders croi's work so those needs are designed in
 early, not bolted on later. Reviewed against the requirements on
 2026-10-09 and re-synced on 2026-10-10.
 
@@ -619,9 +622,18 @@ if K10 splits (nothing else in M4 depends on it).
   self-test deadman. The SBSA watchdog refresh stays (every 20-25 s,
   `croi.watchdog=off` for none). Also fixed: a timeline waiter whose
   value was reached between its check and the tick being armed slept to
-  its deadline (rv64 m2 hangs under host load). Still flaky under heavy
-  host load (TCG): self-test checks 163 (futex) and 397 (K10d's
-  reservation spinners), both timing-dependent, on the K10e tree too. croi's
+  its deadline (rv64 m2 hangs under host load). Self-tests that
+  synchronized on fixed sleeps (futex checks 163-165, K10d's spinners,
+  the sched early-wake round) wait for their threads now.
+  After K10, from Todhchai's M4 bring-up (2026-10-11): amd64's SYSCALL
+  return skipped the kill check, so a killed thread retrying failed calls
+  ran until an interrupt caught it in user mode (mode 17 now kills a
+  syscall retry loop); long TSC deadlines under KVM fired early by the
+  host clock's skew (~30 ppm: measured against the HPET and armed later,
+  so a 60 s sleep is one wakeup); process teardown and timer objects
+  blocked instead of spinning on yield (a deadline thread lost a period
+  per spin); `croi.kill_watch=1` reports kills that don't finish. First
+  bench history recorded (bench/history/brimstone.tsv, 75d8a0c). croi's
   periodic kernel work audited and made event-driven or gated (the SBSA
   watchdog refresh, the debuglog dumper, the trace sampler's timer,
   idle polling's re-arming), and a budget line counting each CPU's
