@@ -108,7 +108,8 @@ extension Syscalls {
     private static func vmarAllocate(_ table: borrowing HandleTable, _ a: InlineArray<6, UInt64>) throws(Status) {
         let options = UInt32(truncatingIfNeeded: a[0] >> 32)
         let canMap = UInt32(CROI_VM_CAN_MAP_READ | CROI_VM_CAN_MAP_WRITE | CROI_VM_CAN_MAP_EXECUTE)
-        guard options & ~canMap == 0, a[1] == 0 else { throw .invalidArgs }
+        let specific = options & UInt32(CROI_VM_SPECIFIC) != 0
+        guard options & ~(canMap | UInt32(CROI_VM_SPECIFIC)) == 0, specific || a[1] == 0 else { throw .invalidArgs }
         try check(a[3], 4)
         try check(a[4], 8)
         let parent = try table.get(UInt32(truncatingIfNeeded: a[0]), type: .vmar)
@@ -124,7 +125,8 @@ extension Syscalls {
         let v = VmarPointer(object: parent.object).info
         let region = try vm { () throws(VmError) -> Region in
             try UserAspace.withView(v.aspace) { (aspace: borrowing UserAspace) throws(VmError) -> Region in
-                try aspace.allocateRegion(size: a[2], in: v.region)
+                try aspace.allocateRegion(size: a[2], in: v.region,
+                                          at: specific ? (a[1] <= UInt64.max - v.base ? v.base + a[1] : .max) : nil)
             }
         }
         let child = try Processes.makeVmar(v.aspace, region: region.id, base: region.base, size: region.size)

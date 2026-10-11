@@ -28,6 +28,7 @@ enum ProgramSelfTest {
         } catch {
             panic("program self-test: loading the Swift program")
         }
+        let firstBase = ProgramLoader.lastBase
         stdout.release()
         let giveUp = Clock.now() + 30_000_000_000
         while !Processes.info(process: process).exited {
@@ -74,8 +75,43 @@ enum ProgramSelfTest {
         }
         guard matched == expected.count else { panic("program self-test: records missing") }
         reader.release()
+
+        // A static PIE (K11b) lands somewhere new each time: a second run.
+        let (stdout2, stdout2Rights) = created { () throws(Status) in try DebugLogs.create(readable: false) }
+        handles[0] = ProgramLoader.StartupHandle(object: stdout2, rights: stdout2Rights,
+                                                 info: croi_pa_hnd(UInt32(CROI_PA_FD), 1))
+        let second: ObjectPointer
+        do throws(Status) {
+            second = try ProgramLoader.start(
+                image, name: "swifttest", job: Processes.rootJob, handles: handles.span,
+                environment: unsafe Span(_unsafeStart: environment.utf8Start, count: environment.utf8CodeUnitCount))
+        } catch {
+            panic("program self-test: loading the Swift program again")
+        }
+        let secondBase = ProgramLoader.lastBase
+        stdout2.release()
+        let giveUp2 = Clock.now() + 30_000_000_000
+        while !Processes.info(process: second).exited {
+            guard Clock.now() < giveUp2 else { panic("program self-test: the second run never ended") }
+            Scheduler.sleep(until: Clock.now() + 2_000_000)
+        }
+        let secondCode = Processes.info(process: second).returnCode
+        second.release()
+        guard secondCode == 0x600D, firstBase != secondBase, firstBase != 0, secondBase != 0,
+              firstBase % KernelLayout.pageSize == 0, secondBase % KernelLayout.pageSize == 0 else {
+            console.write("  swift:  PIE bases ")
+            console.write(hex: firstBase)
+            console.write(", ")
+            console.write(hex: secondBase)
+            console.write("\n")
+            panic("program self-test: a static PIE's random base")
+        }
         before.expectUnchanged(console)
-        console.write("  swift:  Embedded Swift program from an ELF: processargs (handles, environment), ")
+        console.write("  swift:  Embedded Swift static PIE at random bases (")
+        console.write(hex: firstBase)
+        console.write(", ")
+        console.write(hex: secondBase)
+        console.write("): processargs (handles, environment), ")
         console.write("heap over its VMAR, stdout as ")
         console.write(decimal: UInt64(matched))
         console.write(" debuglog records, debuglog create/read/wait from user mode; all torn down\n")

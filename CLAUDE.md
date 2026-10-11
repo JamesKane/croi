@@ -509,7 +509,7 @@ syscalls 110-112):
   256 KiB) and a bootstrap channel whose first message is Zircon's
   processargs: PROC_SELF, THREAD_SELF, VMAR_ROOT, then the caller's
   handles (PA_FD 1 = stdout debuglog, PA_RESOURCE, ...), argv[0], the
-  environment. Not yet: PT_GNU_RELRO stays writable; PIEs/ASLR.
+  environment. Not yet: PT_GNU_RELRO stays writable. Static PIEs load at a random base (K11b).
 - User programs (`croi_user_program` in cmake/CroiUser.cmake): C and/or
   Embedded Swift, linked at 0x1000000 with separate page-aligned
   segments, against the user runtime (user/lib/runtime, C: `_start` reads
@@ -966,6 +966,27 @@ Randomness, K11b (Kernel/Random.swift, syscalls 181-182; handoff v5):
 - `cprng_draw(buffer, length)` (181) and `cprng_add_entropy` (182):
   Zircon's, at most 256 bytes (CROI_CPRNG_MAX_LEN), INVALID_ARGS beyond
   or for a bad buffer. `Random.word()` for kernel use (ASLR).
+
+Static PIEs and ASLR, K11b (lib/elf `forEachRelocation`,
+ProgramLoader `randomBase`, userboot `randomPlace`; cmake `PIE`):
+- `croi_user_program(... PIE ...)` builds a static PIE (-fPIE C and
+  Swift importer flags, the runtime's -fPIE flavor libcroi-runtime-pie.a,
+  `ld.lld -static -pie --no-dynamic-linker -ztext`, linked at 0).
+  userboot and bin/m2 are PIEs, so every boot loads both ways; ET_EXEC
+  programs (Todhchai's, the self-tests' fixed-address ones) still load
+  where linked.
+- Relocations: R_*_RELATIVE only; `ElfImage.forEachRelocation(in:)`
+  reads PT_DYNAMIC and the RELA table from the file, and the loaders
+  write `base - linkBase + addend` into the segment's VMO before mapping
+  it (so RELRO-to-be pages are written while writable; PT_GNU_RELRO
+  still isn't enforced).
+- Bases: a random page in the lower half of the user range (kernel:
+  `Random.word()`, `UserAspace.isRangeFree`, 16 tries; userboot:
+  cprng_draw and `vmar_allocate` with SPECIFIC, croi's now as Zircon's,
+  ALREADY_EXISTS on a collision, retried). userboot maps writable
+  segments as K11a children of the file's range of bootfs (copied at
+  first touch, the tail past the file's bytes zeroed with
+  vmo_op_range ZERO), read-only ones straight from bootfs.
 
 Memory statistics (Todhchai's M3 resident-memory budget; task.h,
 resource.h, UserAspace.taskStats, Kernel/Object/KernelMemory.swift):

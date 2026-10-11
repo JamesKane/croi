@@ -41,16 +41,19 @@ enum ProgramLoader {
             }
             throw .invalidArgs
         }
-        guard elf.kind == .executable else { throw .notSupported }
         let created = try Processes.create(job: job)
         let process = created.process
         let vmar = created.vmar
         defer { vmar.release() }
         do throws(Status) {
             let record = VmarPointer(object: vmar).info.aspace
+            // A static PIE (K11b) runs at a random base; an ET_EXEC where linked.
+            let runBase = elf.kind == .pie ? try randomBase(record, size: elf.size) : elf.base
+            let delta = runBase &- elf.base
             for i in 0..<elf.segmentCount {
-                try load(elf.segments[i], from: image, into: record)
+                try load(elf.segments[i], of: elf, from: image, into: record, delta: delta)
             }
+            lastBase = runBase
             let stackSize = ((elf.stackSize ?? defaultStackSize) + KernelLayout.pageSize - 1) & ~(KernelLayout.pageSize - 1)
             let stack = try vmStatus { () throws(VmError) -> Vmo in try Vmo(anonymous: stackSize) }
             let stackBase = try vmStatus { () throws(VmError) -> UInt64 in
@@ -62,7 +65,7 @@ enum ProgramLoader {
             defer { thread.release() }
             let bootstrap = try bootstrapChannel(name: name, process: process, thread: thread, vmar: vmar,
                                                  handles: handles, environment: environment)
-            try Processes.start(thread: thread, pc: elf.entry, sp: stackBase + stackSize, arg0: UInt64(bootstrap),
+            try Processes.start(thread: thread, pc: elf.entry &+ delta, sp: stackBase + stackSize, arg0: UInt64(bootstrap),
                                 arg1: 0, first: true)
         } catch {
             process.release()  // no thread ran: the last reference tears it down
@@ -71,8 +74,29 @@ enum ProgramLoader {
         return process
     }
 
-    private static func load(_ segment: ElfImage.Segment, from image: RawSpan,
-                             into record: UserAspacePointer) throws(Status) {
+    /// Where the last program started was loaded (self-tests: ASLR).
+    nonisolated(unsafe) private(set) static var lastBase: UInt64 = 0
+
+    /// A random page-aligned base for `size` bytes in the lower half of the
+    /// user range, free in `record` (the vDSO is already mapped): ASLR.
+    private static func randomBase(_ record: UserAspacePointer, size: UInt64) throws(Status) -> UInt64 {
+        let low = UserLayout.base, high = UserLayout.top / 2
+        guard size < high - low else { throw .noMemory }
+        let pages = (high - low - size) / KernelLayout.pageSize
+        for _ in 0..<16 {
+            let base = low + (Random.word() % pages) * KernelLayout.pageSize
+            let free = try vmStatus { () throws(VmError) -> Bool in
+                try UserAspace.withView(record) { (aspace: borrowing UserAspace) throws(VmError) -> Bool in
+                    aspace.isRangeFree(base, size: size)
+                }
+            }
+            if free { return base }
+        }
+        throw .noMemory
+    }
+
+    private static func load(_ segment: ElfImage.Segment, of elf: ElfImage, from image: RawSpan,
+                             into record: UserAspacePointer, delta: UInt64) throws(Status) {
         let size = (segment.memsz + KernelLayout.pageSize - 1) & ~(KernelLayout.pageSize - 1)
         guard size > 0 else { return }
         let vmo = try vmStatus { () throws(VmError) -> Vmo in try Vmo(anonymous: size) }
@@ -81,6 +105,20 @@ enum ProgramLoader {
                 vmo.writeBytes(at: 0, from: UInt64(UInt(bitPattern: bytes.baseAddress!)) + segment.offset,
                                count: segment.filesz)
             }
+        }
+        // The static PIE's relocations that land here, before it's mapped.
+        do throws(ElfImage.Error) {
+            try elf.forEachRelocation(in: image) { (target, addend) throws(ElfImage.Error) in
+                guard target >= segment.vaddr, target - segment.vaddr <= size - 8 else { return }
+                var value = (delta &+ addend).littleEndian
+                withUnsafeBytes(of: &value) { raw in
+                    vmo.writeBytes(at: target - segment.vaddr, from: UInt64(UInt(bitPattern: raw.baseAddress!)), count: 8)
+                }
+            }
+        } catch {
+            throw .invalidArgs
+        }
+        if segment.filesz > 0 {
             if segment.executable {
                 try vmStatus { () throws(VmError) in try vmo.syncInstructions(offset: 0, size: size) }
             }
@@ -91,7 +129,7 @@ enum ProgramLoader {
         if segment.executable { rights.insert(.execute) }
         _ = try vmStatus { () throws(VmError) -> UInt64 in
             try UserAspace.withView(record) { (aspace: borrowing UserAspace) throws(VmError) -> UInt64 in
-                try aspace.map(vmo, size: size, at: segment.vaddr, rights: rights)
+                try aspace.map(vmo, size: size, at: segment.vaddr &+ delta, rights: rights)
             }
         }
     }

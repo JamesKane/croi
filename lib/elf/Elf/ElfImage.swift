@@ -143,6 +143,61 @@ public struct ElfImage {
         try relocate(&image, runAddress: runAddress)
     }
 
+    /// The file offset of link-time address `vaddr` (within a segment's
+    /// file bytes), or nil.
+    public func fileOffset(of vaddr: UInt64, length: UInt64 = 1) -> UInt64? {
+        for i in 0..<segmentCount {
+            let segment = segments[i]
+            if vaddr >= segment.vaddr, vaddr - segment.vaddr <= segment.filesz,
+               length <= segment.filesz - (vaddr - segment.vaddr) {
+                return segment.offset + (vaddr - segment.vaddr)
+            }
+        }
+        return nil
+    }
+
+    /// Each R_*_RELATIVE relocation of a static PIE, read from the file:
+    /// `body(target, addend)` with the target's link-time address; the
+    /// value to store there is the run base - `base` + addend. Loaders that
+    /// place segments in separate memory (VMOs) apply them themselves.
+    public func forEachRelocation(in file: RawSpan, _ body: (UInt64, UInt64) throws(Error) -> Void) throws(Error) {
+        guard let dynamic else { return }
+        guard kind == .pie else { throw Error("an executable with a dynamic section") }
+        let bad = Error("bad dynamic section")
+        var rela: UInt64?
+        var relaSize: UInt64 = 0
+        var relaEntry: UInt64 = 24
+        var at = dynamic
+        while true {
+            guard let offset = fileOffset(of: at, length: 16) else { throw bad }
+            let tag = try file.elfRead(UInt64.self, at: offset, else: bad)
+            let value = try file.elfRead(UInt64.self, at: offset + 8, else: bad)
+            switch tag {
+            case 7: rela = value        // DT_RELA
+            case 8: relaSize = value    // DT_RELASZ
+            case 9: relaEntry = value   // DT_RELAENT
+            default: ()
+            }
+            if tag == 0 { break }
+            at += 16
+        }
+        guard let rela, relaEntry >= 24, relaSize > 0 else { return }
+        guard let start = fileOffset(of: rela, length: relaSize) else { throw bad }
+        let badReloc = Error("relocation out of bounds")
+        var entry = start
+        while entry < start + relaSize {
+            let target = try file.elfRead(UInt64.self, at: entry, else: badReloc)
+            let info = try file.elfRead(UInt64.self, at: entry + 8, else: badReloc)
+            let addend = try file.elfRead(UInt64.self, at: entry + 16, else: badReloc)
+            entry += relaEntry
+            let type = UInt32(truncatingIfNeeded: info)
+            if type == 0 { continue }
+            guard type == Self.relativeRelocation else { throw Error("unsupported relocation type") }
+            guard target >= base, target - base <= size - 8 else { throw badReloc }
+            try body(target, addend)
+        }
+    }
+
     private func relocate(_ image: inout MutableRawSpan, runAddress: UInt64) throws(Error) {
         guard let dynamic else { return }
         guard kind == .pie else { throw Error("an executable with a dynamic section") }

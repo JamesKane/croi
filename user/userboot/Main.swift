@@ -77,7 +77,6 @@ struct Userboot {
             say("\n")
             throw Failure(what: "reading its ELF", status: -10)
         }
-        guard elf.kind == .executable else { throw Failure(what: "loading a PIE (not yet)", status: -2) }
 
         var process: UInt32 = 0
         var vmar: UInt32 = 0
@@ -91,10 +90,20 @@ struct Userboot {
         var region = croi_info_vmar_t()
         try call("reading its VMAR", sys(CROI_SYS_OBJECT_GET_INFO, UInt64(vmar), UInt64(CROI_INFO_VMAR), address(&region),
                                          UInt64(MemoryLayout<croi_info_vmar_t>.size)))
-        for i in 0..<elf.segmentCount {
-            try load(elf.segments[i], file: file, bootfs: bootfs, bootfsBase: bootfsBase, vmar: vmar,
-                     vmarBase: region.base)
+        // A static PIE (K11b) goes in a child VMAR at a random place in the
+        // lower half of the root; an ET_EXEC where it was linked.
+        var target = (vmar: vmar, base: region.base)
+        var delta: UInt64 = 0
+        if elf.kind == .pie {
+            target = try randomPlace(in: vmar, region, size: elf.size)
+            delta = target.base &- elf.base
         }
+        let fileBytes = image.extracting(Int(file.offset)..<Int(file.offset + file.length))
+        for i in 0..<elf.segmentCount {
+            try load(elf.segments[i], of: elf, file: file, fileBytes: fileBytes, bootfs: bootfs,
+                     bootfsBase: bootfsBase, vmar: target.vmar, vmarBase: target.base, delta: delta)
+        }
+        if target.vmar != vmar { _ = sys(CROI_SYS_HANDLE_CLOSE, UInt64(target.vmar)) }  // the region stays
         let stackSize = ((elf.stackSize ?? defaultStackSize) + pageSize - 1) & ~(pageSize - 1)
         var stack: UInt32 = 0
         var stackBase: UInt64 = 0
@@ -151,7 +160,7 @@ struct Userboot {
             }
         })
         _ = sys(CROI_SYS_HANDLE_CLOSE, UInt64(ours))
-        try call("starting it", sys(CROI_SYS_PROCESS_START, UInt64(process), UInt64(thread), elf.entry,
+        try call("starting it", sys(CROI_SYS_PROCESS_START, UInt64(process), UInt64(thread), elf.entry &+ delta,
                                     stackBase + stackSize, UInt64(theirs), 0))
         say("userboot: started ")
         write(next)
@@ -168,32 +177,88 @@ struct Userboot {
         if let shutdown { try Power.act(shutdown, resource: keptResource, bootData: keptBootData) }
     }
 
-    /// Maps one PT_LOAD segment of the program at `file` in bootfs: one
-    /// that is all file (read-only code and data) straight from the bootfs
-    /// VMO's pages; anything else copied into a VMO of its own.
-    static func load(_ segment: ElfImage.Segment, file: Bootfs.File, bootfs: UInt32, bootfsBase: UInt64,
-                     vmar: UInt32, vmarBase: UInt64) throws(Failure) {
+    /// A child VMAR of `size` bytes at a random page in the lower half of
+    /// the root VMAR (ASLR, from cprng_draw), retried where it collides.
+    static func randomPlace(in root: UInt32, _ region: croi_info_vmar_t, size: UInt64) throws(Failure)
+        -> (vmar: UInt32, base: UInt64) {
+        let pages = (region.len / 2 - size) / pageSize
+        let canMap = UInt32(CROI_VM_CAN_MAP_READ | CROI_VM_CAN_MAP_WRITE | CROI_VM_CAN_MAP_EXECUTE | CROI_VM_SPECIFIC)
+        for _ in 0..<16 {
+            var random: UInt64 = 0
+            try call("drawing a base", sys(UInt64(CROI_SYS_CPRNG_DRAW), address(&random), 8))
+            var child: UInt32 = 0
+            var base: UInt64 = 0
+            let status = sys(CROI_SYS_VMAR_ALLOCATE, UInt64(root) | UInt64(canMap) << 32, (random % pages) * pageSize,
+                             size, address(&child), address(&base))
+            if status == 0 { return (child, base) }
+            guard status == -26 else { throw Failure(what: "placing it", status: status) }  // ALREADY_EXISTS: again
+        }
+        throw Failure(what: "placing it", status: -4)
+    }
+
+    /// Maps one PT_LOAD segment of the program at `file` in bootfs, at its
+    /// address plus `delta`: one that is all file (read-only code and data)
+    /// straight from the bootfs VMO's pages; anything else as a K11a child
+    /// of the file's range (pages copied at first touch, the part past the
+    /// file's bytes zeroed), with the static PIE's relocations written in.
+    static func load(_ segment: ElfImage.Segment, of elf: ElfImage, file: Bootfs.File, fileBytes: RawSpan,
+                     bootfs: UInt32, bootfsBase: UInt64, vmar: UInt32, vmarBase: UInt64,
+                     delta: UInt64) throws(Failure) {
         let size = (segment.memsz + pageSize - 1) & ~(pageSize - 1)
         guard size > 0 else { return }
-        guard segment.vaddr >= vmarBase else { throw Failure(what: "placing a segment", status: -10) }
+        let runAddress = segment.vaddr &+ delta
+        guard runAddress >= vmarBase else { throw Failure(what: "placing a segment", status: -10) }
         var options = UInt32(CROI_VM_SPECIFIC)
         if segment.readable { options |= UInt32(CROI_VM_PERM_READ) }
         if segment.writable { options |= UInt32(CROI_VM_PERM_WRITE) }
         if segment.executable { options |= UInt32(CROI_VM_PERM_EXECUTE) }
+        var relocations = 0
+        do throws(ElfImage.Error) {
+            try elf.forEachRelocation(in: fileBytes) { (target, _) throws(ElfImage.Error) in
+                if target >= segment.vaddr, target - segment.vaddr < size { relocations += 1 }
+            }
+        } catch {
+            throw Failure(what: "reading its relocations", status: -10)
+        }
         var mapped: UInt64 = 0
-        if !segment.writable, segment.filesz == segment.memsz {
+        let fileOffset = file.offset + segment.offset
+        if !segment.writable, segment.filesz == segment.memsz, relocations == 0 {
             try call("mapping a segment", sys(CROI_SYS_VMAR_MAP, UInt64(vmar) | UInt64(options) << 32,
-                                              segment.vaddr - vmarBase, UInt64(bootfs), file.offset + segment.offset,
-                                              size, address(&mapped)))
+                                              runAddress - vmarBase, UInt64(bootfs), fileOffset, size, address(&mapped)))
             return
         }
         var vmo: UInt32 = 0
-        try call("making a segment", sys(CROI_SYS_VMO_CREATE, size, 0, address(&vmo)))
+        if fileOffset % pageSize == 0 {
+            try call("making a segment", sys(UInt64(CROI_SYS_VMO_CREATE_CHILD), UInt64(bootfs),
+                                             UInt64(CROI_VMO_CHILD_SNAPSHOT_AT_LEAST_ON_WRITE), fileOffset, size,
+                                             address(&vmo)))
+            if segment.filesz < size {
+                try call("zeroing a segment's tail", sys(UInt64(CROI_SYS_VMO_OP_RANGE), UInt64(vmo),
+                                                          UInt64(CROI_VMO_OP_ZERO), segment.filesz,
+                                                          size - segment.filesz, 0, 0))
+            }
+        } else {
+            try call("making a segment", sys(CROI_SYS_VMO_CREATE, size, 0, address(&vmo)))
+            try call("copying a segment", sys(CROI_SYS_VMO_WRITE, UInt64(vmo), bootfsBase + fileOffset, 0,
+                                              segment.filesz))
+        }
         defer { _ = sys(CROI_SYS_HANDLE_CLOSE, UInt64(vmo)) }  // the mapping keeps it
-        try call("copying a segment", sys(CROI_SYS_VMO_WRITE, UInt64(vmo), bootfsBase + file.offset + segment.offset, 0,
-                                          segment.filesz))
+        if relocations > 0 {
+            var failed: Int64 = 0
+            do throws(ElfImage.Error) {
+                try elf.forEachRelocation(in: fileBytes) { (target, addend) throws(ElfImage.Error) in
+                    guard target >= segment.vaddr, target - segment.vaddr < size else { return }
+                    var value = delta &+ addend
+                    let status = sys(CROI_SYS_VMO_WRITE, UInt64(vmo), address(&value), target - segment.vaddr, 8)
+                    if status != 0 { failed = status }
+                }
+            } catch {
+                throw Failure(what: "reading its relocations", status: -10)
+            }
+            try call("relocating a segment", failed)
+        }
         try call("mapping a segment", sys(CROI_SYS_VMAR_MAP, UInt64(vmar) | UInt64(options) << 32,
-                                          segment.vaddr - vmarBase, UInt64(vmo), 0, size, address(&mapped)))
+                                          runAddress - vmarBase, UInt64(vmo), 0, size, address(&mapped)))
     }
 
     /// The processargs message (processargs.h): header, handle infos,

@@ -47,32 +47,52 @@ function(croi_user_runtime)
     ${PROJECT_SOURCE_DIR}/lib/rt/string.c
     ${PROJECT_SOURCE_DIR}/lib/rt/int128.c
     ${PROJECT_SOURCE_DIR}/lib/rt/stack_protector.c)
-  set(_objects)
-  set(_commands)
-  foreach(_source ${_sources})
-    get_filename_component(_name ${_source} NAME_WE)
-    set(_object ${_dir}/${_name}.o)
-    set(_protect -fstack-protector-strong)
-    if(_name STREQUAL stack_protector)
-      set(_protect -fno-stack-protector)
+  # Two flavors: fixed-address (ET_EXEC programs) and -fPIE (static PIEs,
+  # K11b), libcroi-runtime.a and libcroi-runtime-pie.a.
+  foreach(_flavor "" "-pie")
+    set(_objects)
+    set(_commands)
+    set(_code)
+    if(_flavor STREQUAL "-pie")
+      set(_code -fPIE)
     endif()
-    list(APPEND _commands COMMAND ${CMAKE_C_COMPILER} ${CROI_USER_COMMON_CFLAGS} ${_protect} -c ${_source} -o ${_object})
-    list(APPEND _objects ${_object})
+    foreach(_source ${_sources})
+      get_filename_component(_name ${_source} NAME_WE)
+      set(_object ${_dir}/${_name}${_flavor}.o)
+      set(_protect -fstack-protector-strong)
+      if(_name STREQUAL stack_protector)
+        set(_protect -fno-stack-protector)
+      endif()
+      list(APPEND _commands COMMAND ${CMAKE_C_COMPILER} ${CROI_USER_COMMON_CFLAGS} ${_code} ${_protect}
+                                    -c ${_source} -o ${_object})
+      list(APPEND _objects ${_object})
+    endforeach()
+    add_custom_command(OUTPUT ${_dir}/libcroi-runtime${_flavor}.a
+      COMMAND ${CMAKE_COMMAND} -E make_directory ${_dir}
+      ${_commands}
+      COMMAND ${CMAKE_COMMAND} -E rm -f ${_dir}/libcroi-runtime${_flavor}.a
+      COMMAND ${CMAKE_AR} rcs ${_dir}/libcroi-runtime${_flavor}.a ${_objects}
+      DEPENDS ${_sources} ${PROJECT_SOURCE_DIR}/user/include/croi/runtime.h
+              ${PROJECT_SOURCE_DIR}/user/include/croi/syscall.h
+      COMMENT "Building the user runtime${_flavor}")
   endforeach()
   set(CROI_USER_RUNTIME ${_dir}/libcroi-runtime.a PARENT_SCOPE)
-  add_custom_command(OUTPUT ${_dir}/libcroi-runtime.a
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${_dir}
-    ${_commands}
-    COMMAND ${CMAKE_COMMAND} -E rm -f ${_dir}/libcroi-runtime.a
-    COMMAND ${CMAKE_AR} rcs ${_dir}/libcroi-runtime.a ${_objects}
-    DEPENDS ${_sources} ${PROJECT_SOURCE_DIR}/user/include/croi/runtime.h
-            ${PROJECT_SOURCE_DIR}/user/include/croi/syscall.h
-    COMMENT "Building the user runtime")
+  set(CROI_USER_RUNTIME_PIE ${_dir}/libcroi-runtime-pie.a PARENT_SCOPE)
 endfunction()
 
-#   croi_user_program(<out.elf> [SOURCES <c>...] [SWIFT <swift>...] [STACK <bytes>])
+#   croi_user_program(<out.elf> [PIE] [SOURCES <c>...] [SWIFT <swift>...] [STACK <bytes>])
 function(croi_user_program output)
-  cmake_parse_arguments(U "" "STACK" "SOURCES;SWIFT" ${ARGN})
+  cmake_parse_arguments(U "PIE" "STACK" "SOURCES;SWIFT" ${ARGN})
+  # PIE: a static PIE (K11b), linked at 0, loaded at a random base by
+  # croi's loaders, which apply its R_*_RELATIVE relocations.
+  set(_cpie)
+  set(_link -static --image-base=0x1000000)
+  set(_runtime ${CROI_USER_RUNTIME})
+  if(U_PIE)
+    set(_cpie -fPIE)
+    set(_link -static -pie --no-dynamic-linker -ztext)
+    set(_runtime ${CROI_USER_RUNTIME_PIE})
+  endif()
   if(NOT U_STACK)
     set(U_STACK 262144)
   endif()
@@ -82,7 +102,7 @@ function(croi_user_program output)
   set(_commands)
   foreach(_source ${U_SOURCES})
     get_filename_component(_base ${_source} NAME_WE)
-    list(APPEND _commands COMMAND ${CMAKE_C_COMPILER} ${CROI_USER_COMMON_CFLAGS} -fstack-protector-strong
+    list(APPEND _commands COMMAND ${CMAKE_C_COMPILER} ${CROI_USER_COMMON_CFLAGS} ${_cpie} -fstack-protector-strong
                                   -c ${_source} -o ${_dir}/${_base}.o)
     list(APPEND _objects ${_dir}/${_base}.o)
   endforeach()
@@ -90,7 +110,7 @@ function(croi_user_program output)
     # The user-mode flags (not the kernel's -mno-sse and friends); C
     # declarations come from user/include/module.modulemap (CroiRuntime).
     set(_xcc)
-    foreach(_f ${CROI_USER_CFLAGS} -std=c23 -fno-omit-frame-pointer -I${PROJECT_SOURCE_DIR}/user/include
+    foreach(_f ${CROI_USER_CFLAGS} ${_cpie} -std=c23 -fno-omit-frame-pointer -I${PROJECT_SOURCE_DIR}/user/include
                -I${PROJECT_SOURCE_DIR}/kernel/include)
       list(APPEND _xcc -Xcc ${_f})
     endforeach()
@@ -104,9 +124,9 @@ function(croi_user_program output)
   add_custom_command(OUTPUT ${output}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${_dir}
     ${_commands}
-    COMMAND ${CMAKE_LINKER} -static -e _start --image-base=0x1000000 -zseparate-loadable-segments
+    COMMAND ${CMAKE_LINKER} ${_link} -e _start -zseparate-loadable-segments
             -zmax-page-size=4096 -znoexecstack -zstack-size=${U_STACK} --gc-sections --build-id=sha1
-            ${_objects} ${CROI_USER_RUNTIME} -o ${output}
-    DEPENDS ${U_SOURCES} ${U_SWIFT} ${CROI_USER_RUNTIME} ${PROJECT_SOURCE_DIR}/user/include/module.modulemap
+            ${_objects} ${_runtime} -o ${output}
+    DEPENDS ${U_SOURCES} ${U_SWIFT} ${_runtime} ${PROJECT_SOURCE_DIR}/user/include/module.modulemap
     COMMENT "Building user program ${_name}")
 endfunction()

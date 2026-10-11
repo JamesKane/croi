@@ -183,8 +183,9 @@ struct UserAspace: ~Copyable {
     /// A reservation holds its range for views (`mapView`).
     /// A JIT reservation (`jit`, entitled code generation) gets a
     /// protection key where the hardware has them (see Jit).
+    @inline(never)
     func allocateRegion(size: UInt64, alignment: UInt64 = KernelLayout.pageSize, in parent: UInt32 = root,
-                        reservation: Bool = false, jit: Bool = false) throws(VmError) -> Region {
+                        at fixed: UInt64? = nil, reservation: Bool = false, jit: Bool = false) throws(VmError) -> Region {
         guard size > 0, size % KernelLayout.pageSize == 0, alignment % KernelLayout.pageSize == 0,
               alignment & (alignment - 1) == 0, !jit || reservation else { throw .invalidArgument }
         var key: UInt8 = 0
@@ -197,7 +198,14 @@ struct UserAspace: ~Copyable {
             guard !container.reservation else { throw .invalidArgument }
             let base: UInt64
             do throws(VmError) {
-                base = try findGap(size, alignment, in: container)
+                if let fixed {
+                    // vmar_allocate's SPECIFIC (K11b: a loader's random base).
+                    guard fixed % KernelLayout.pageSize == 0, container.contains(fixed, size),
+                          isFree(fixed, size, in: container) else { throw .alreadyMapped(fixed) }
+                    base = fixed
+                } else {
+                    base = try findGap(size, alignment, in: container)
+                }
             } catch {
                 Jit.freeKey(key)
                 throw error
@@ -209,6 +217,15 @@ struct UserAspace: ~Copyable {
             while index < record.pointee.regions.count, record.pointee.regions[index].base < base { index += 1 }
             record.pointee.regions.insert(region, at: index)
             return region
+        }
+    }
+
+    /// Whether [base, base+size) of the root region is free (nothing mapped
+    /// or reserved there): a loader picking a random base (K11b).
+    func isRangeFree(_ base: UInt64, size: UInt64) -> Bool {
+        record.pointee.lock.withLock { () -> Bool in
+            guard let container = try? region(Self.root), container.contains(base, size) else { return false }
+            return isFree(base, size, in: container)
         }
     }
 

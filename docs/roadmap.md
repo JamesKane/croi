@@ -658,7 +658,12 @@ and futex_requeue (K7c).
   linker needs (writable segments; NO_WRITE children over a library's
   range of bootfs or a file). SLICE and strict SNAPSHOT stay
   NOT_SUPPORTED until something needs them.
-- **K11b: position-independent programs and randomness.** ET_DYN
+- **K11b: position-independent programs and randomness.** **Done**
+  (2026-10-11): handoff v5 carries EFI_RNG_PROTOCOL bytes, the kernel's
+  ChaCha20 CPRNG (with RDSEED/RDRAND, RNDR, counter jitter), syscalls
+  181-182; static PIEs at random bases in ProgramLoader and userboot
+  (vmar_allocate SPECIFIC, writable segments as K11a children of
+  bootfs); userboot, m2 and the Swift test program are PIEs. ET_DYN
   loading in ProgramLoader and userboot (today "a PIE (not yet)"), with
   a randomized load base (ASLR) from `cprng_draw` (Zircon's
   zx_cprng_draw: RDRAND/RNDR/Zkr-seeded, for libc's stack guard, hash

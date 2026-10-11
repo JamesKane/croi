@@ -140,11 +140,11 @@ croi_user_binary(${_vdso_bin} PIC
   INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/include)
 croi_user_runtime()
 set(_swift_test ${CMAKE_CURRENT_BINARY_DIR}/swifttest.elf)
-croi_user_program(${_swift_test} SWIFT ${_user_dir}/test/swift/Main.swift)
+croi_user_program(${_swift_test} PIE SWIFT ${_user_dir}/test/swift/Main.swift)
 # userboot (K8b), carried in the kernel image like Zircon's; it shares
 # lib/elf's sources with the kernel and loader.
 set(_userboot ${CMAKE_CURRENT_BINARY_DIR}/userboot.elf)
-croi_user_program(${_userboot}
+croi_user_program(${_userboot} PIE
   SWIFT ${_user_dir}/userboot/Main.swift ${_user_dir}/userboot/Bootfs.swift
         ${_user_dir}/userboot/Power.swift
         ${PROJECT_SOURCE_DIR}/lib/elf/Elf/ElfImage.swift)
@@ -155,7 +155,7 @@ set_source_files_properties(userprogram.S PROPERTIES
 # bootfs (K8b): the programs userboot can start, in Zircon's bootfs format
 # (tools/mkbootfs.py), served on the ESP as \croi\bootfs.img.
 set(_m2 ${CMAKE_CURRENT_BINARY_DIR}/m2.elf)
-croi_user_program(${_m2} SWIFT ${_user_dir}/m2/Main.swift ${_user_dir}/m2/Sys.swift ${_user_dir}/m2/Bench.swift)
+croi_user_program(${_m2} PIE SWIFT ${_user_dir}/m2/Main.swift ${_user_dir}/m2/Sys.swift ${_user_dir}/m2/Bench.swift)
 set(CROI_BOOTFS_IMAGE ${CMAKE_BINARY_DIR}/bootfs.img PARENT_SCOPE)
 add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/bootfs.img
   COMMAND ${Python3_EXECUTABLE} -I ${PROJECT_SOURCE_DIR}/tools/mkbootfs.py ${CMAKE_BINARY_DIR}/bootfs.img
