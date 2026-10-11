@@ -433,7 +433,7 @@ enum Exceptions {
 
     /// The scheduler thread of a thread object in an exception (`frame`
     /// found it there, and it can't exit while waiting).
-    private static func runningThread(_ thread: ObjectPointer) -> ThreadPointer {
+    static func runningThread(_ thread: ObjectPointer) -> ThreadPointer {
         ThreadPointer(address: thread.header.lock.withLock { ThreadObjectPointer(object: thread).pointee.thread })
     }
 
@@ -447,7 +447,7 @@ enum Exceptions {
 
     /// Its registers: in an exception, or parked suspended (K13g: the frame
     /// at its kernel stack top); else BAD_STATE.
-    private static func frame(of thread: ObjectPointer) throws(Status) -> UnsafeMutablePointer<arch_exception_frame_t> {
+    static func frame(of thread: ObjectPointer) throws(Status) -> UnsafeMutablePointer<arch_exception_frame_t> {
         let address = try thread.header.lock.withLock { () throws(Status) -> UInt64 in
             let t = ThreadObjectPointer(object: thread)
             if t.pointee.exceptionFrame != 0 { return t.pointee.exceptionFrame }

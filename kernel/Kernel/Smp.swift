@@ -397,6 +397,7 @@ enum CpuStacks {
         // it off for all).
         croi_user_protection = arch_user_protection_enable() != 0 ? 1 : 0
         arch_user_counter_enable()
+        arch_debug_cpu_init()  // arm64: the OS lock off (K13g)
         #if arch(x86_64)
         // GDT (8 entries) and TSS (104 bytes plus the I/O bitmap and its
         // terminating byte: IoPorts), never freed.

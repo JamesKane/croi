@@ -55,6 +55,7 @@ enum UserTraps {
     /// (perhaps where the handler moved it).
     private static func offer(_ frame: UnsafeMutablePointer<arch_exception_frame_t>) -> Bool {
         let type = unsafe ExceptionFrame.exceptionType(frame.pointee)
+        unsafe HardwareDebug.trapped(frame)  // DR6 / a watchpoint's FAR, before interrupts (K13g)
         arch_interrupts_enable()
         let disposition = unsafe Exceptions.raise(type, frame: frame)
         _ = arch_interrupts_save()

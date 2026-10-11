@@ -498,3 +498,76 @@ arch_hw_random:
     pop     %rbx
     ret
 .size arch_hw_random, . - arch_hw_random
+
+// Hardware debug (K13g): DR0-3, DR6, DR7 by number.
+.globl arch_debug_read
+.type arch_debug_read, @function
+arch_debug_read:
+    cmp     $0, %rdi
+    jne     1f
+    mov     %dr0, %rax
+    ret
+1:  cmp     $1, %rdi
+    jne     2f
+    mov     %dr1, %rax
+    ret
+2:  cmp     $2, %rdi
+    jne     3f
+    mov     %dr2, %rax
+    ret
+3:  cmp     $3, %rdi
+    jne     6f
+    mov     %dr3, %rax
+    ret
+6:  cmp     $6, %rdi
+    jne     7f
+    mov     %dr6, %rax
+    ret
+7:  mov     %dr7, %rax
+    ret
+.size arch_debug_read, . - arch_debug_read
+
+.globl arch_debug_write
+.type arch_debug_write, @function
+arch_debug_write:
+    cmp     $0, %rdi
+    jne     1f
+    mov     %rsi, %dr0
+    ret
+1:  cmp     $1, %rdi
+    jne     2f
+    mov     %rsi, %dr1
+    ret
+2:  cmp     $2, %rdi
+    jne     3f
+    mov     %rsi, %dr2
+    ret
+3:  cmp     $3, %rdi
+    jne     6f
+    mov     %rsi, %dr3
+    ret
+6:  cmp     $6, %rdi
+    jne     7f
+    mov     %rsi, %dr6
+    ret
+7:  mov     %rsi, %dr7
+    ret
+.size arch_debug_write, . - arch_debug_write
+
+// arm64's; nothing here.
+.globl arch_debug_cpu_init
+.type arch_debug_cpu_init, @function
+arch_debug_cpu_init:
+    ret
+.size arch_debug_cpu_init, . - arch_debug_cpu_init
+.globl arch_debug_load
+.type arch_debug_load, @function
+arch_debug_load:
+    ret
+.size arch_debug_load, . - arch_debug_load
+.globl arch_debug_features
+.type arch_debug_features, @function
+arch_debug_features:
+    xor     %eax, %eax
+    ret
+.size arch_debug_features, . - arch_debug_features

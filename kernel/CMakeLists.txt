@@ -62,6 +62,7 @@ add_library(kernel-swift OBJECT
   Kernel/Object/Names.swift
   Kernel/Object/ClockObject.swift
   Kernel/Object/Debug.swift
+  Kernel/Object/HardwareDebug.swift
   Kernel/Object/Futex.swift
   Kernel/Object/TimerObject.swift
   Kernel/Object/Exception.swift

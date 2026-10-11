@@ -817,11 +817,11 @@ THREAD, VMO, maps, handle table) and the NAME property.
 - **K13f: clock objects.** **Done** (2026-10-11): Zircon's clocks,
   mappable ones included; reference ticks are monotonic ns. A UTC clock
   for user space (PA_CLOCK_UTC) is the time service's to create.
-- **K13g: debugging.** Parts 1 and 2 **done** (2026-10-11): task_suspend
-  and tokens (syscalls restarted in the kernel for the waits that can be),
-  process_read/write_memory; debugger channels (process and job),
-  PROCESS/THREAD_STARTING and THREAD_EXITING, second chance, exception
-  reports. Part 3 next: single-step and hardware breakpoints.
+- **K13g: debugging.** **Done** (2026-10-11), in three parts:
+  task_suspend and tokens (syscalls restarted in the kernel for the waits
+  that can be), process_read/write_memory; debugger channels (process and
+  job), PROCESS/THREAD_STARTING and THREAD_EXITING, second chance,
+  exception reports; single-step and hardware breakpoints (amd64, arm64).
 
 ### K13a (agreed with Todhchai, 2026-10-11): VMO slices and ZERO_CHILDREN
 

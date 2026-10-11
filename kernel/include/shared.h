@@ -72,6 +72,17 @@ enum : uint32_t { CROI_VDSO_MAGIC = 0x53445643 /* "CVDS" */ };
 // scounteren.TM; amd64 nothing (rdtsc is allowed while CR4.TSD is clear).
 void arch_user_counter_enable(void);
 
+// Hardware debug (K13g). amd64: DR0-3, DR6, DR7 by number (0-3, 6, 7).
+// arm64: the OS lock cleared (per CPU, at start); MDSCR_EL1; the
+// breakpoint / watchpoint registers loaded from a
+// croi_thread_state_debug_regs_t (the first `bps` / `wps` pairs), or zeroed;
+// ID_AA64DFR0_EL1.
+uint64_t arch_debug_read(uint64_t n);
+void arch_debug_write(uint64_t n, uint64_t value);
+void arch_debug_cpu_init(void);
+void arch_debug_load(const void *_Nullable regs, uint64_t mdscr, uint64_t bps, uint64_t wps);
+uint64_t arch_debug_features(void);
+
 // User cache maintenance (the vDSO's cache_flush), per CPU: arm64
 // SCTLR_EL1.UCI/UCT, rv64 senvcfg.CBCFE when `zicbom`; amd64 nothing.
 void arch_user_cache_enable(uint64_t zicbom);

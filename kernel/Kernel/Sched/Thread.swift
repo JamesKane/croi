@@ -113,6 +113,9 @@ struct Thread: ~Copyable {
     /// syscall it is in may be restarted (a wait woken for a suspension
     /// then sets `suspendRetry`, and the syscall is made again later).
     var suspendPending = false
+    /// K13g part 3: its single-step and hardware breakpoint state (a heap
+    /// DebugState, from the first write), or 0.
+    var debugState: UInt64 = 0
     var restartable = false
     var suspendRetry = false
     var interruptible = false

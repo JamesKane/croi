@@ -1493,10 +1493,34 @@ Debugger channels, K13g part 2 (Kernel/Object/Exception.swift; task.h):
 - process_exit marks the caller killed before it exits (Zircon kills it
   too), so its THREAD_EXITING doesn't wait for a debugger: a process that
   was its own debugger hung there.
-- Not yet: single-step and hardware breakpoints (part 3), the debugger
-  channel's ZX_EXCP_USER (thread_raise_exception).
+- Not yet: the debugger channel's ZX_EXCP_USER (thread_raise_exception).
 - Mode 17's `debugger`: our own process's debugger sees a thread start
   (registers) and exit, a breakpoint with a second chance.
+
+Single-step and hardware breakpoints, K13g part 3 (Kernel/Object/HardwareDebug.swift,
+cpu.S `arch_debug_*`; task.h):
+- thread_read/write_state kinds DEBUG_REGS (4, croi_thread_state_debug_
+  regs_t per arch) and SINGLE_STEP (5, u32 0/1), on a stopped thread
+  (suspended or in an exception); writes need debugging syscalls (Zircon's
+  bit test gates both). A thread's state is `Thread.debugState` (heap
+  DebugState from its first write), loaded at a switch to it and cleared
+  at a switch to one without (`cpus[].debugLoaded`).
+- amd64: TF in the frame's RFLAGS (stays until cleared); DR0-3 (0 or user
+  addresses), DR6 (user bits B0-3, BD, BS, BT) and DR7 (L/G0-3, RW/LEN;
+  LE/GE/bit 10 forced). A user #DB is HW_BREAKPOINT with DR6 saved for the
+  debugger and reset; a kernel #DB (a user watchpoint hit by a user copy)
+  is ignored.
+- arm64: MDSCR_EL1.SS per thread plus SPSR.SS in the frame (one
+  instruction per write, Zircon's); breakpoint and watchpoint pairs up to
+  ID_AA64DFR0_EL1's counts, EL0 only (control registers rebuilt from
+  their E bit), MDSCR_EL1.MDE while any is enabled; EC 0x30/0x32/0x34 from
+  EL0 are HW_BREAKPOINT, a watchpoint's FAR/ESR saved. The OS lock (set at
+  reset, it disables debug exceptions) is cleared on every CPU.
+- rv64: single-step NOT_SUPPORTED, debug registers a u32 written and
+  ignored (Zircon's).
+- Mode 17's `stepping`: from a software breakpoint, one stepped
+  instruction and a hardware breakpoint on a function (QEMU TCG delivers
+  both on amd64 and arm64).
 
 Randomness, K11b (Kernel/Random.swift, syscalls 181-182; handoff v5):
 - The loader reads 32 bytes from EFI_RNG_PROTOCOL if the firmware has

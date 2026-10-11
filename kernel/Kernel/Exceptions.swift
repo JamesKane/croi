@@ -58,6 +58,7 @@ func arch_exception(_ frame: UnsafeMutablePointer<arch_exception_frame_t>) {
         }
         return
     }
+    if unsafe HardwareDebug.kernelTrap(frame) { return }  // a user watchpoint hit by a user copy (K13g)
     if unsafe ExceptionFrame.isBreakpoint(frame.pointee) {
         unsafe ExceptionFrame.skipBreakpoint(&frame.pointee)
         breakpointsHandled += 1
@@ -84,6 +85,7 @@ enum ExceptionFrame {
     static func exceptionType(_ f: arch_exception_frame_t) -> UInt32 {
         switch f.vector {
         case 14: UInt32(CROI_EXCP_FATAL_PAGE_FAULT)
+        case 1: UInt32(CROI_EXCP_HW_BREAKPOINT)  // #DB: single-step, DR breakpoints (K13g)
         case 6: UInt32(CROI_EXCP_UNDEFINED_INSTRUCTION)
         case 3: UInt32(CROI_EXCP_SW_BREAKPOINT)
         case 17: UInt32(CROI_EXCP_UNALIGNED_ACCESS)
@@ -201,6 +203,7 @@ enum ExceptionFrame {
         case 0x20, 0x24: UInt32(CROI_EXCP_FATAL_PAGE_FAULT)       // instruction / data abort, lower EL
         case 0x00: UInt32(CROI_EXCP_UNDEFINED_INSTRUCTION)
         case 0x3C: UInt32(CROI_EXCP_SW_BREAKPOINT)                // BRK
+        case 0x30, 0x32, 0x34: UInt32(CROI_EXCP_HW_BREAKPOINT)    // breakpoint, step, watchpoint (K13g)
         case 0x22, 0x26: UInt32(CROI_EXCP_UNALIGNED_ACCESS)       // PC / SP alignment
         default: UInt32(CROI_EXCP_GENERAL)
         }

@@ -519,3 +519,33 @@ arch_hw_random:
     li      a0, 0
     ret
 .size arch_hw_random, . - arch_hw_random
+
+// Hardware debug (K13g): rv64 has none to offer user space (Zircon's
+// neither); stubs.
+.globl arch_debug_read
+.type arch_debug_read, @function
+arch_debug_read:
+    li      a0, 0
+    ret
+.size arch_debug_read, . - arch_debug_read
+.globl arch_debug_write
+.type arch_debug_write, @function
+arch_debug_write:
+    ret
+.size arch_debug_write, . - arch_debug_write
+.globl arch_debug_cpu_init
+.type arch_debug_cpu_init, @function
+arch_debug_cpu_init:
+    ret
+.size arch_debug_cpu_init, . - arch_debug_cpu_init
+.globl arch_debug_load
+.type arch_debug_load, @function
+arch_debug_load:
+    ret
+.size arch_debug_load, . - arch_debug_load
+.globl arch_debug_features
+.type arch_debug_features, @function
+arch_debug_features:
+    li      a0, 0
+    ret
+.size arch_debug_features, . - arch_debug_features

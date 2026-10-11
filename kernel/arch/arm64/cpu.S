@@ -725,3 +725,398 @@ arch_hw_random:
     mov     w0, #1
     ret
 .size arch_hw_random, . - arch_hw_random
+
+// Hardware debug (K13g). The OS lock is set at reset and keeps debug
+// exceptions (breakpoints, single-step) off: cleared on every CPU.
+.globl arch_debug_cpu_init
+.type arch_debug_cpu_init, %function
+arch_debug_cpu_init:
+    msr     oslar_el1, xzr
+    isb
+    ret
+.size arch_debug_cpu_init, . - arch_debug_cpu_init
+
+// void arch_debug_load(regs or NULL, mdscr, bps, wps): the first `bps`
+// breakpoint and `wps` watchpoint pairs from a croi_thread_state_debug_
+// regs_t (zero with NULL), then MDSCR_EL1 (SS bit 0, MDE bit 15).
+.globl arch_debug_load
+.type arch_debug_load, %function
+arch_debug_load:
+    msr     mdscr_el1, xzr          // off while the pairs change
+    isb
+    cmp     x2, #0
+    b.ls    1f
+    cbz     x0, 2f
+    ldr     w9, [x0, #0]
+    ldr     x10, [x0, #8]
+    b       3f
+2:  mov     x9, xzr
+    mov     x10, xzr
+3:  msr     dbgbcr0_el1, x9
+    msr     dbgbvr0_el1, x10
+1:
+    cmp     x3, #0
+    b.ls    1f
+    cbz     x0, 2f
+    ldr     w9, [x0, #256]
+    ldr     x10, [x0, #264]
+    b       3f
+2:  mov     x9, xzr
+    mov     x10, xzr
+3:  msr     dbgwcr0_el1, x9
+    msr     dbgwvr0_el1, x10
+1:
+    cmp     x2, #1
+    b.ls    1f
+    cbz     x0, 2f
+    ldr     w9, [x0, #16]
+    ldr     x10, [x0, #24]
+    b       3f
+2:  mov     x9, xzr
+    mov     x10, xzr
+3:  msr     dbgbcr1_el1, x9
+    msr     dbgbvr1_el1, x10
+1:
+    cmp     x3, #1
+    b.ls    1f
+    cbz     x0, 2f
+    ldr     w9, [x0, #272]
+    ldr     x10, [x0, #280]
+    b       3f
+2:  mov     x9, xzr
+    mov     x10, xzr
+3:  msr     dbgwcr1_el1, x9
+    msr     dbgwvr1_el1, x10
+1:
+    cmp     x2, #2
+    b.ls    1f
+    cbz     x0, 2f
+    ldr     w9, [x0, #32]
+    ldr     x10, [x0, #40]
+    b       3f
+2:  mov     x9, xzr
+    mov     x10, xzr
+3:  msr     dbgbcr2_el1, x9
+    msr     dbgbvr2_el1, x10
+1:
+    cmp     x3, #2
+    b.ls    1f
+    cbz     x0, 2f
+    ldr     w9, [x0, #288]
+    ldr     x10, [x0, #296]
+    b       3f
+2:  mov     x9, xzr
+    mov     x10, xzr
+3:  msr     dbgwcr2_el1, x9
+    msr     dbgwvr2_el1, x10
+1:
+    cmp     x2, #3
+    b.ls    1f
+    cbz     x0, 2f
+    ldr     w9, [x0, #48]
+    ldr     x10, [x0, #56]
+    b       3f
+2:  mov     x9, xzr
+    mov     x10, xzr
+3:  msr     dbgbcr3_el1, x9
+    msr     dbgbvr3_el1, x10
+1:
+    cmp     x3, #3
+    b.ls    1f
+    cbz     x0, 2f
+    ldr     w9, [x0, #304]
+    ldr     x10, [x0, #312]
+    b       3f
+2:  mov     x9, xzr
+    mov     x10, xzr
+3:  msr     dbgwcr3_el1, x9
+    msr     dbgwvr3_el1, x10
+1:
+    cmp     x2, #4
+    b.ls    1f
+    cbz     x0, 2f
+    ldr     w9, [x0, #64]
+    ldr     x10, [x0, #72]
+    b       3f
+2:  mov     x9, xzr
+    mov     x10, xzr
+3:  msr     dbgbcr4_el1, x9
+    msr     dbgbvr4_el1, x10
+1:
+    cmp     x3, #4
+    b.ls    1f
+    cbz     x0, 2f
+    ldr     w9, [x0, #320]
+    ldr     x10, [x0, #328]
+    b       3f
+2:  mov     x9, xzr
+    mov     x10, xzr
+3:  msr     dbgwcr4_el1, x9
+    msr     dbgwvr4_el1, x10
+1:
+    cmp     x2, #5
+    b.ls    1f
+    cbz     x0, 2f
+    ldr     w9, [x0, #80]
+    ldr     x10, [x0, #88]
+    b       3f
+2:  mov     x9, xzr
+    mov     x10, xzr
+3:  msr     dbgbcr5_el1, x9
+    msr     dbgbvr5_el1, x10
+1:
+    cmp     x3, #5
+    b.ls    1f
+    cbz     x0, 2f
+    ldr     w9, [x0, #336]
+    ldr     x10, [x0, #344]
+    b       3f
+2:  mov     x9, xzr
+    mov     x10, xzr
+3:  msr     dbgwcr5_el1, x9
+    msr     dbgwvr5_el1, x10
+1:
+    cmp     x2, #6
+    b.ls    1f
+    cbz     x0, 2f
+    ldr     w9, [x0, #96]
+    ldr     x10, [x0, #104]
+    b       3f
+2:  mov     x9, xzr
+    mov     x10, xzr
+3:  msr     dbgbcr6_el1, x9
+    msr     dbgbvr6_el1, x10
+1:
+    cmp     x3, #6
+    b.ls    1f
+    cbz     x0, 2f
+    ldr     w9, [x0, #352]
+    ldr     x10, [x0, #360]
+    b       3f
+2:  mov     x9, xzr
+    mov     x10, xzr
+3:  msr     dbgwcr6_el1, x9
+    msr     dbgwvr6_el1, x10
+1:
+    cmp     x2, #7
+    b.ls    1f
+    cbz     x0, 2f
+    ldr     w9, [x0, #112]
+    ldr     x10, [x0, #120]
+    b       3f
+2:  mov     x9, xzr
+    mov     x10, xzr
+3:  msr     dbgbcr7_el1, x9
+    msr     dbgbvr7_el1, x10
+1:
+    cmp     x3, #7
+    b.ls    1f
+    cbz     x0, 2f
+    ldr     w9, [x0, #368]
+    ldr     x10, [x0, #376]
+    b       3f
+2:  mov     x9, xzr
+    mov     x10, xzr
+3:  msr     dbgwcr7_el1, x9
+    msr     dbgwvr7_el1, x10
+1:
+    cmp     x2, #8
+    b.ls    1f
+    cbz     x0, 2f
+    ldr     w9, [x0, #128]
+    ldr     x10, [x0, #136]
+    b       3f
+2:  mov     x9, xzr
+    mov     x10, xzr
+3:  msr     dbgbcr8_el1, x9
+    msr     dbgbvr8_el1, x10
+1:
+    cmp     x3, #8
+    b.ls    1f
+    cbz     x0, 2f
+    ldr     w9, [x0, #384]
+    ldr     x10, [x0, #392]
+    b       3f
+2:  mov     x9, xzr
+    mov     x10, xzr
+3:  msr     dbgwcr8_el1, x9
+    msr     dbgwvr8_el1, x10
+1:
+    cmp     x2, #9
+    b.ls    1f
+    cbz     x0, 2f
+    ldr     w9, [x0, #144]
+    ldr     x10, [x0, #152]
+    b       3f
+2:  mov     x9, xzr
+    mov     x10, xzr
+3:  msr     dbgbcr9_el1, x9
+    msr     dbgbvr9_el1, x10
+1:
+    cmp     x3, #9
+    b.ls    1f
+    cbz     x0, 2f
+    ldr     w9, [x0, #400]
+    ldr     x10, [x0, #408]
+    b       3f
+2:  mov     x9, xzr
+    mov     x10, xzr
+3:  msr     dbgwcr9_el1, x9
+    msr     dbgwvr9_el1, x10
+1:
+    cmp     x2, #10
+    b.ls    1f
+    cbz     x0, 2f
+    ldr     w9, [x0, #160]
+    ldr     x10, [x0, #168]
+    b       3f
+2:  mov     x9, xzr
+    mov     x10, xzr
+3:  msr     dbgbcr10_el1, x9
+    msr     dbgbvr10_el1, x10
+1:
+    cmp     x3, #10
+    b.ls    1f
+    cbz     x0, 2f
+    ldr     w9, [x0, #416]
+    ldr     x10, [x0, #424]
+    b       3f
+2:  mov     x9, xzr
+    mov     x10, xzr
+3:  msr     dbgwcr10_el1, x9
+    msr     dbgwvr10_el1, x10
+1:
+    cmp     x2, #11
+    b.ls    1f
+    cbz     x0, 2f
+    ldr     w9, [x0, #176]
+    ldr     x10, [x0, #184]
+    b       3f
+2:  mov     x9, xzr
+    mov     x10, xzr
+3:  msr     dbgbcr11_el1, x9
+    msr     dbgbvr11_el1, x10
+1:
+    cmp     x3, #11
+    b.ls    1f
+    cbz     x0, 2f
+    ldr     w9, [x0, #432]
+    ldr     x10, [x0, #440]
+    b       3f
+2:  mov     x9, xzr
+    mov     x10, xzr
+3:  msr     dbgwcr11_el1, x9
+    msr     dbgwvr11_el1, x10
+1:
+    cmp     x2, #12
+    b.ls    1f
+    cbz     x0, 2f
+    ldr     w9, [x0, #192]
+    ldr     x10, [x0, #200]
+    b       3f
+2:  mov     x9, xzr
+    mov     x10, xzr
+3:  msr     dbgbcr12_el1, x9
+    msr     dbgbvr12_el1, x10
+1:
+    cmp     x3, #12
+    b.ls    1f
+    cbz     x0, 2f
+    ldr     w9, [x0, #448]
+    ldr     x10, [x0, #456]
+    b       3f
+2:  mov     x9, xzr
+    mov     x10, xzr
+3:  msr     dbgwcr12_el1, x9
+    msr     dbgwvr12_el1, x10
+1:
+    cmp     x2, #13
+    b.ls    1f
+    cbz     x0, 2f
+    ldr     w9, [x0, #208]
+    ldr     x10, [x0, #216]
+    b       3f
+2:  mov     x9, xzr
+    mov     x10, xzr
+3:  msr     dbgbcr13_el1, x9
+    msr     dbgbvr13_el1, x10
+1:
+    cmp     x3, #13
+    b.ls    1f
+    cbz     x0, 2f
+    ldr     w9, [x0, #464]
+    ldr     x10, [x0, #472]
+    b       3f
+2:  mov     x9, xzr
+    mov     x10, xzr
+3:  msr     dbgwcr13_el1, x9
+    msr     dbgwvr13_el1, x10
+1:
+    cmp     x2, #14
+    b.ls    1f
+    cbz     x0, 2f
+    ldr     w9, [x0, #224]
+    ldr     x10, [x0, #232]
+    b       3f
+2:  mov     x9, xzr
+    mov     x10, xzr
+3:  msr     dbgbcr14_el1, x9
+    msr     dbgbvr14_el1, x10
+1:
+    cmp     x3, #14
+    b.ls    1f
+    cbz     x0, 2f
+    ldr     w9, [x0, #480]
+    ldr     x10, [x0, #488]
+    b       3f
+2:  mov     x9, xzr
+    mov     x10, xzr
+3:  msr     dbgwcr14_el1, x9
+    msr     dbgwvr14_el1, x10
+1:
+    cmp     x2, #15
+    b.ls    1f
+    cbz     x0, 2f
+    ldr     w9, [x0, #240]
+    ldr     x10, [x0, #248]
+    b       3f
+2:  mov     x9, xzr
+    mov     x10, xzr
+3:  msr     dbgbcr15_el1, x9
+    msr     dbgbvr15_el1, x10
+1:
+    cmp     x3, #15
+    b.ls    1f
+    cbz     x0, 2f
+    ldr     w9, [x0, #496]
+    ldr     x10, [x0, #504]
+    b       3f
+2:  mov     x9, xzr
+    mov     x10, xzr
+3:  msr     dbgwcr15_el1, x9
+    msr     dbgwvr15_el1, x10
+1:
+    msr     mdscr_el1, x1
+    isb
+    ret
+.size arch_debug_load, . - arch_debug_load
+
+.globl arch_debug_features
+.type arch_debug_features, %function
+arch_debug_features:
+    mrs     x0, id_aa64dfr0_el1
+    ret
+.size arch_debug_features, . - arch_debug_features
+
+// amd64's; nothing here.
+.globl arch_debug_read
+.type arch_debug_read, %function
+arch_debug_read:
+    mov     x0, xzr
+    ret
+.size arch_debug_read, . - arch_debug_read
+.globl arch_debug_write
+.type arch_debug_write, %function
+arch_debug_write:
+    ret
+.size arch_debug_write, . - arch_debug_write

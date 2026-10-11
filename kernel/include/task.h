@@ -79,6 +79,8 @@ enum : uint32_t {
 
   // thread_read_state / thread_write_state kinds.
   CROI_THREAD_STATE_GENERAL_REGS = 0,
+  CROI_THREAD_STATE_DEBUG_REGS = 4,   // K13g: croi_thread_state_debug_regs_t
+  CROI_THREAD_STATE_SINGLE_STEP = 5,  // uint32_t: 0 or 1 (not on rv64)
 };
 
 typedef struct {
@@ -358,3 +360,38 @@ typedef struct {
     uint8_t reserved[88];
   } u;
 } croi_info_maps_t;
+
+// zx_thread_state_debug_regs_t per architecture (K13g). amd64: DR0-3 must
+// be 0 or user addresses; DR6 and DR7 keep only their user bits. arm64:
+// breakpoint and watchpoint pairs (only the E bit of a control register
+// matters; the kernel fills in the EL0 match), the counts and the last
+// watchpoint hit's FAR/ESR read only. rv64: nothing (writes ignored).
+#if defined(__x86_64__)
+typedef struct {
+  uint64_t dr[4];
+  uint64_t dr6;
+  uint64_t dr7;
+} croi_thread_state_debug_regs_t;
+#elif defined(__aarch64__)
+typedef struct {
+  struct {
+    uint32_t dbgbcr;
+    uint8_t padding1[4];
+    uint64_t dbgbvr;
+  } hw_bps[16];
+  struct {
+    uint32_t dbgwcr;
+    uint8_t padding1[4];
+    uint64_t dbgwvr;
+  } hw_wps[16];
+  uint64_t far;
+  uint32_t esr;
+  uint8_t hw_bps_count;
+  uint8_t hw_wps_count;
+  uint8_t padding1[2];
+} croi_thread_state_debug_regs_t;
+#else
+typedef struct {
+  uint32_t unused;
+} croi_thread_state_debug_regs_t;
+#endif

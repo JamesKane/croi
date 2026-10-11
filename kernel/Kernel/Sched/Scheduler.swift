@@ -24,6 +24,8 @@ struct CpuScheduler {
     /// The user FS and GS bases loaded here (amd64; see Thread.tls).
     var tls: UInt64 = 0
     var gs: UInt64 = 0
+    /// A thread's hardware debug state is loaded here (K13g).
+    var debugLoaded = false
     /// Wakes the CPU when the first throttled thread's period starts.
     var eligibilityTimer: UInt32 = 0
     var eligibilityAt: UInt64 = 0
@@ -1518,6 +1520,7 @@ enum Scheduler {
         }
         loadPkru(next.pointee.pkru, me)
         switchUserTls(from: current, to: next, me)
+        if next.pointee.debugState != 0 || cpus[me].debugLoaded { HardwareDebug.switchTo(next, loaded: &cpus[me].debugLoaded) }
         if let aspace = next.pointee.aspace { IoPorts.switched(to: aspace, me) }
         setKernelStack(next.pointee.stack.top)
         Sampler.switched(to: next)
@@ -1757,6 +1760,7 @@ enum Scheduler {
             }
         }
         ExtendedState.free(thread.pointee.extendedState)
+        HardwareDebug.free(thread)
         if thread.pointee.waitState != 0 { WaitStatePointer(address: thread.pointee.waitState).free() }
         Pmu.release(thread)
         let raw = unsafe UnsafeMutablePointer<Thread>(bitPattern: UInt(thread.address))!

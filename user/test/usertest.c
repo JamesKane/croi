@@ -3477,6 +3477,109 @@ static int64_t debugger_checks(const startup_t *s, uint32_t *channel_out) {
   return 0;
 }
 
+// K13g part 3: single-step and a hardware breakpoint, from a software
+// breakpoint the debugger catches (whose frame is the thread's own).
+static void __attribute__((noinline)) watched_call(void) {
+  __asm__ volatile("");
+}
+
+static void stepper(uint64_t arg) {
+  (void)arg;
+#if defined(__x86_64__)
+  __asm__ volatile("int3; nop; nop; nop");
+#elif defined(__aarch64__)
+  __asm__ volatile("brk #0; nop; nop; nop");
+#else
+  __asm__ volatile(".4byte 0x00100073; nop; nop; nop");
+#endif
+  watched_call();
+  sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
+}
+
+static int64_t stepping_checks(const startup_t *s, uint32_t *channel_out);
+
+static int64_t stepping(const startup_t *s) {
+  uint32_t channel = 0;
+  int64_t result = stepping_checks(s, &channel);
+  if (channel != 0) sys(CROI_SYS_HANDLE_CLOSE, channel, 0, 0, 0, 0);
+  return result;
+}
+
+static int resume(uint32_t exception) {
+  uint32_t handled = CROI_EXCEPTION_STATE_HANDLED;
+  return sys(CROI_SYS_OBJECT_SET_PROPERTY, exception, CROI_PROP_EXCEPTION_STATE, (uint64_t)&handled, 4, 0) == 0 &&
+         sys(CROI_SYS_HANDLE_CLOSE, exception, 0, 0, 0, 0) == 0;
+}
+
+static int64_t stepping_checks(const startup_t *s, uint32_t *channel_out) {
+  uint32_t channel = 0, exception = 0, on = 1, off = 0;
+  croi_exception_info_t info;
+  croi_thread_state_general_regs_t regs;
+  croi_thread_state_debug_regs_t debug_regs;
+  CHECK(560, sys(CROI_SYS_TASK_CREATE_EXCEPTION_CHANNEL, s->process, CROI_EXCEPTION_CHANNEL_DEBUGGER, (uint64_t)&channel,
+                 0, 0) == 0 && (*channel_out = channel));
+  uint32_t thread = start_thread(s, stepper, 0);
+  CHECK(561, next_exception(channel, &info, &exception) && info.type == CROI_EXCP_THREAD_STARTING && resume(exception) &&
+                 next_exception(channel, &info, &exception) && info.type == CROI_EXCP_SW_BREAKPOINT &&
+                 sys(CROI_SYS_THREAD_READ_STATE, thread, CROI_THREAD_STATE_GENERAL_REGS, (uint64_t)&regs, sizeof regs, 0) == 0);
+#if defined(__x86_64__)
+  uint64_t after = regs.rip;  // past the int3
+#else
+  regs.pc += 4;  // past brk / ebreak
+  uint64_t after = regs.pc;
+  CHECK(562, sys(CROI_SYS_THREAD_WRITE_STATE, thread, CROI_THREAD_STATE_GENERAL_REGS, (uint64_t)&regs, sizeof regs, 0) == 0);
+#endif
+  for (unsigned i = 0; i < sizeof debug_regs; i++) ((volatile char *)&debug_regs)[i] = 0;
+#if defined(__x86_64__)
+  debug_regs.dr[0] = (uint64_t)watched_call;
+  debug_regs.dr7 = 1;  // L0, execute, one byte
+#elif defined(__aarch64__)
+  debug_regs.hw_bps[0].dbgbcr = 1;
+  debug_regs.hw_bps[0].dbgbvr = (uint64_t)watched_call;
+#endif
+#if defined(__x86_64__) || defined(__aarch64__)
+  CHECK(563, sys(CROI_SYS_THREAD_WRITE_STATE, thread, CROI_THREAD_STATE_SINGLE_STEP, (uint64_t)&on, 4, 0) == 0 &&
+                 sys(CROI_SYS_THREAD_WRITE_STATE, thread, CROI_THREAD_STATE_DEBUG_REGS, (uint64_t)&debug_regs,
+                     sizeof debug_regs, 0) == 0 &&
+                 resume(exception) &&
+                 next_exception(channel, &info, &exception) && info.type == CROI_EXCP_HW_BREAKPOINT &&
+                 sys(CROI_SYS_THREAD_READ_STATE, thread, CROI_THREAD_STATE_GENERAL_REGS, (uint64_t)&regs, sizeof regs, 0) == 0);
+#if defined(__x86_64__)
+  CHECK(564, regs.rip == after + 1 &&  // one nop
+                 sys(CROI_SYS_THREAD_READ_STATE, thread, CROI_THREAD_STATE_DEBUG_REGS, (uint64_t)&debug_regs, sizeof debug_regs,
+                     0) == 0 && (debug_regs.dr6 & (1u << 14)));  // BS
+#else
+  CHECK(564, regs.pc == after + 4);
+#endif
+  CHECK(565, sys(CROI_SYS_THREAD_WRITE_STATE, thread, CROI_THREAD_STATE_SINGLE_STEP, (uint64_t)&off, 4, 0) == 0 &&
+                 resume(exception) &&
+                 next_exception(channel, &info, &exception) && info.type == CROI_EXCP_HW_BREAKPOINT &&
+                 sys(CROI_SYS_THREAD_READ_STATE, thread, CROI_THREAD_STATE_GENERAL_REGS, (uint64_t)&regs, sizeof regs, 0) == 0 &&
+                 sys(CROI_SYS_THREAD_READ_STATE, thread, CROI_THREAD_STATE_DEBUG_REGS, (uint64_t)&debug_regs, sizeof debug_regs,
+                     0) == 0);
+#if defined(__x86_64__)
+  CHECK(566, regs.rip == (uint64_t)watched_call && (debug_regs.dr6 & 1u));  // B0
+#else
+  CHECK(566, regs.pc == (uint64_t)watched_call && debug_regs.hw_bps_count >= 1);
+#endif
+  for (unsigned i = 0; i < sizeof debug_regs; i++) ((volatile char *)&debug_regs)[i] = 0;
+  CHECK(567, sys(CROI_SYS_THREAD_WRITE_STATE, thread, CROI_THREAD_STATE_DEBUG_REGS, (uint64_t)&debug_regs,
+                 sizeof debug_regs, 0) == 0 && resume(exception));
+#else
+  CHECK(563, sys(CROI_SYS_THREAD_WRITE_STATE, thread, CROI_THREAD_STATE_SINGLE_STEP, (uint64_t)&on, 4, 0) ==
+                 ERR_NOT_SUPPORTED &&
+                 sys(CROI_SYS_THREAD_WRITE_STATE, thread, CROI_THREAD_STATE_DEBUG_REGS, (uint64_t)&debug_regs,
+                     sizeof debug_regs, 0) == 0 &&
+                 resume(exception));
+  (void)after;
+  (void)off;
+#endif
+  CHECK(568, next_exception(channel, &info, &exception) && info.type == CROI_EXCP_THREAD_EXITING &&
+                 sys(CROI_SYS_HANDLE_CLOSE, exception, 0, 0, 0, 0) == 0);
+  join(thread);
+  return 0;
+}
+
 // K13b: FIFOs (Zircon's: records into the peer's ring, READABLE /
 // WRITABLE / PEER_CLOSED, user signals to the peer) and
 // vmo_replace_as_executable (a VMEX resource; the handle consumed).
@@ -3806,6 +3909,8 @@ static int64_t extensions(const startup_t *s) {
   if (dbg != 0) return dbg;
   int64_t attached = debugger(s);
   if (attached != 0) return attached;
+  int64_t stepped = stepping(s);
+  if (stepped != 0) return stepped;
   int64_t random = cprng_checks();
   if (random != 0) return random;
 
