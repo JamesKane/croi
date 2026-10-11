@@ -412,7 +412,7 @@ Processes (K7a, Kernel/Object/Process.swift, include/task.h, syscalls
   WRMSRs); arm64 TPIDR_EL0 saved and restored per user thread; rv64 tp
   is in the frame. thread_read/write_state carry them.
 - `vmo_create` rounds sizes up to a page (Zircon's RoundSize); size 0
-  is still refused (Zircon allows it).
+  makes a zero-size VMO, as Zircon's (since K9a).
 - Lock order: job -> process -> thread object -> scheduler.
 
 Channels (K7b, Kernel/Object/Channel.swift, include/ipc.h, syscalls 80-86
@@ -487,8 +487,8 @@ syscalls 100-107 in User/ExceptionSyscalls.swift):
   result checks BAD_HANDLE. KILL marks the process killed and lets the
   syscall unwind (Swift frames hold references) before the thread exits
   on its way out; *_EXCEPTION raise POLICY_ERROR first.
-- Not yet: debugger channels, exception reports with fault details,
-  SError delivery to the faulting process.
+- Not yet: SError delivery to the faulting process. (Debugger channels
+  and exception reports came in K13g.)
 
 Debuglog and user programs (K8a, Kernel/Object/DebugLog.swift,
 Kernel/User/ProgramLoader.swift, include/log.h, include/processargs.h,
@@ -1196,9 +1196,10 @@ VMO children, K11a (Vmo.swift `init(childOf:)`, VmoObject
   NOT_SUPPORTED (its page would read as the parent's again); ZERO
   writes zeros into a copy. Rights as Zircon: the parent handle's (needs
   DUPLICATE and READ) plus GET/SET_PROPERTY; WRITE added and EXECUTE
-  removed unless NO_WRITE removes WRITE. SNAPSHOT, SLICE, REFERENCE,
-  SNAPSHOT_MODIFIED, RESIZABLE: NOT_SUPPORTED; physical or contiguous
-  parents: NOT_SUPPORTED. Mode 17 checks it (`vmo_children`).
+  removed unless NO_WRITE removes WRITE. SNAPSHOT, REFERENCE,
+  SNAPSHOT_MODIFIED: NOT_SUPPORTED (SLICE came in K13a, CHILD_RESIZABLE in
+  K13h); physical or contiguous parents of a snapshot: NOT_SUPPORTED. Mode
+  17 checks it (`vmo_children`).
 
 VMO slices, ZERO_CHILDREN and handle counts, K13a (Vmo.swift `init(sliceOf:)`,
 `childAdded`/`childGone`; VmoObject; agreed with Todhchai for the GPU
@@ -1284,7 +1285,8 @@ syscalls 194-201; vmo.h):
   min(old, new) to the VMO's end), ZX_PROP_VMO_CONTENT_SIZE (17). Reads
   stop at it; writes zero-fill a gap past it and grow it by what lands;
   a write at or past the VMO's end is OUT_OF_RANGE, one reaching it cut
-  short (VMOs never grow: croi has no resizable VMOs); append writes at
+  short (streams never grow their VMO, as the pinned tree's don't:
+  vmo_set_size does, K13h); append writes at
   the stream size. Size changes are serialized by one global Mutex
   (Zircon: a per-VMO StreamSizeManager). A user buffer that faults ends
   a transfer short, NOT_FOUND if nothing moved. vmo_write doesn't move
@@ -1401,7 +1403,7 @@ TaskSyscalls `vmarOpRange`, syscall 76; task.h, vmo.h):
   PROCESS_MAPS (aspace, then regions and mappings depth first; V1/V2
   entries), HANDLE_TABLE (INSPECT | MANAGE_PROCESS | MANAGE_THREAD;
   `HandleTable.snapshot`). Not tracked: page-fault and lock-contention
-  time, debugger attachment.
+  time. (Debugger attachment: K13g.)
 - vmar_op_range (76): COMMIT, DECOMMIT, MAP_RANGE, ZERO, DONT_NEED (a
   no-op: no eviction), ALWAYS_NEED, PREFETCH; rights by op on the VMAR
   handle, then per mapping; gaps BAD_STATE; mappings of sub-VMARs only
@@ -1658,13 +1660,15 @@ SMP (`Kernel/Smp.swift`, `include/smp.h`, `arch/<arch>/smp.S`):
   4 GiB. Trampolines turn the MMU on at a physical PC and let the next
   fetch fault into a vector/stvec that holds the continuation's virtual
   address (rv64, arm64); amd64 jumps via the bootstrap PML4's kernel half.
-- Secondaries run `kernel_ap_main`: exception vectors (amd64: shared IDT,
-  no TSS yet), self-test, then idle with interrupts masked.
+- Secondaries run `kernel_ap_main`: exception vectors (amd64: shared IDT;
+  each CPU then installs its own GDT copy, TSS and guarded exception
+  stack, `CpuStacks.installThisCpu`), self-test, then the scheduler's idle.
 - Boot self-test: per-CPU identity, and all CPUs incrementing a counter
   with a non-atomic load+store under one SpinLock after a start barrier
   (verified to fail without the lock).
-- Not yet: per-CPU TSS/IST and emergency stacks (shared today),
-  calibrated delays for INIT/SIPI (spin loops), CPU hotplug, a scheduler.
+- Not yet: CPU hotplug. (Per-CPU TSS/IST and exception stacks, the
+  calibrated INIT/SIPI delays (`Clock.delay`) and the scheduler came
+  later: see Kernel stacks, Time and Threads.)
 
 Interrupts (`Kernel/Irq/`, K2a): `Interrupts` initializes the controllers
 before secondaries start and dispatches everything `arch_exception` sees

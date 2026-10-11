@@ -90,9 +90,12 @@ as information).
 | 11 | Job, process, thread, exceptions, job policy | **Done** (K7a, K7d) |
 | 12 | userboot + bootfs | **Done** (K8b) |
 | 18 (core) | ktrace rings, categories, user marks, tick and PMU sampling, per-thread PMU counters | **Done** (K3–K6, see "Trace" below) |
-| 13 | Resources, interrupt objects, MSI | **Partial**: resources and physical VMOs (K9a), interrupt objects (K9c), MSI/MSI-X on amd64 (K9d). The GICv3 ITS and the IMSIC are left |
-| 14 | BTI/PMT and IOMMUs | **Partial**: BTI/PMT without an IOMMU, contiguous VMOs, BTI properties (K9e). IOMMUs after M3 |
-| 15–19 | FIFO/counter/stream/socket/clock/debuglog, pager, rings, debug syscalls | After M3, except debuglog (K8a) and exception channels (K7d). Item 17 needs nothing from croi |
+| 13 | Resources, interrupt objects, MSI | **Done** except SMC: resources and physical VMOs (K9a), interrupt objects (K9c), MSI/MSI-X on amd64 (K9d), the GICv3 ITS (K12h), RISC-V AIA (K12i). Not yet: the SMC resource and `smc_call` |
+| 14 | BTI/PMT and IOMMUs | **Done** (K9e, K12): VT-d, AMD-Vi, SMMUv3, SMMUv2 (unverified on hardware), the RISC-V IOMMU, interrupt remapping |
+| 15 | FIFO, counter, stream, socket, clock, debuglog | **Done** (K8a, K10a, K13b, K13c, K13f) |
+| 16 | Pager | **Done** (K13d, K13h); no eviction yet |
+| 17 | Rings | Nothing needed from croi; Zircon's IOB not implemented |
+| 19 | Debug syscalls | **Done** (K7d, K13g) except keeping a crashed process frozen for post-mortem attach |
 | 20 | Firmware data for user space (ACPI tables and op regions, GOP framebuffer) behind resources | **Done** (K9b) |
 
 ## Milestones
@@ -696,16 +699,16 @@ the SMC resource.
   quarantined pages are released (with the stub they stay pinned).
   Faults: the fault event MSI, logged and counted. Tested on QEMU's
   intel-iommu with edu's DMA engine (boot test mode 18).
-  Not yet: queued invalidation, interrupt remapping (so APIC IDs above
-  255 stay NOT_SUPPORTED for MSI), ATS/device TLBs, scopes behind
+  Not yet (then; queued invalidation and interrupt remapping came in
+  K12f): ATS/device TLBs, scopes behind
   bridges, large pages in domains, the boot-time decision for devices no
   driver claims (pass-through today; Zircon blocks them).
 - **K12b: AMD-Vi.** **Done** (2026-10-11). croi's iommu_create type
   (0x10000, croi_iommu_desc_amd_t: the IVHD's registers and IVMD unity
   ranges), BTIs as VT-d's on a shared `IoDomain` layer; device table,
   command buffer with completion-wait polling, event log with its MSI.
-  Tested on QEMU's amd-iommu (`boot-amd-iommu`). Not yet: interrupt
-  remapping, IVHD device scopes (a unit covers its segment), ATS, 5/6
+  Tested on QEMU's amd-iommu (`boot-amd-iommu`). Not yet (interrupt
+  remapping came in K12g): IVHD device scopes (a unit covers its segment), ATS, 5/6
   levels, restarting the event log after an overflow. Unverified on
   hardware (this host has an AMD IOMMU, but croi doesn't boot it here).
 - **K12c: Arm SMMUv3.** **Done** (2026-10-11). Zircon's ARM_SMMU type
@@ -732,8 +735,8 @@ the SMC resource.
   of pass-through contexts (base or extended format), command queue with
   IOFENCE.C, fault queue (polled); first-stage Sv48/Sv39 domains on the
   shared layer. Tested on QEMU's riscv-iommu-pci with edu, both context
-  formats. Not yet: interrupts (IMSIC MSIs, wired lines), MSI page
-  tables (interrupt remapping), ATS/PRI, process directories, second
+  formats. Not yet (MSI page tables came in K12j): interrupts (IMSIC
+  MSIs, wired lines), ATS/PRI, process directories, second
   stage. QEMU 10.2 builds no RIMT for its platform IOMMU (`iommu-sys`).
 - **K12f: VT-d interrupt remapping.** **Done** (2026-10-11). The
   kernel brings VT-d units up at boot with queued invalidation and, where
@@ -799,16 +802,16 @@ THREAD, VMO, maps, handle table) and the NAME property.
   semantics from the pinned tree (its Rust dispatchers), quirks included.
   Socket buffers are 256 KiB page rings (Zircon: 264160 bytes of mbufs);
   datagram lengths are counted in the ring. Streams never grow their VMO
-  (croi has no resizable VMOs; the pinned tree records the RESIZE right
-  and never reads it either); one global lock serializes stream-size
+  (the pinned tree records the RESIZE right and never reads it either;
+  resizable VMOs came in K13h); one global lock serializes stream-size
   changes where Zircon has a per-VMO StreamSizeManager.
 - **K13d: the pager.** **Done** (2026-10-11), in two parts: pager
   objects and VMOs, READ requests (faults, kernel copies, streams,
   commit, pin, snapshot children reading through), supply, FAIL, detach
   and COMPLETE; then dirty tracking (TRAP_DIRTY and DIRTY requests, op
   DIRTY, WRITEBACK_BEGIN/END, query_dirty_ranges, query_vmo_stats, clean
-  pages dropped at detach). Not yet: eviction, zero intervals, resizable
-  or unbounded pager VMOs (croi has no resizable VMOs).
+  pages dropped at detach). Not yet: eviction, zero intervals (beyond
+  K13h's grown space), unbounded pager VMOs.
 - **K13e: the small calls.** **Done** (2026-10-11), in two parts:
   object_wait_many, handle_close_many, port_cancel_key, the channel *_etc
   calls, ZX_PROP_NAME; then vmar_op_range and the info topics (PROCESS,
@@ -826,6 +829,47 @@ THREAD, VMO, maps, handle table) and the NAME property.
   snapshot children and pager VMOs, vmo_set_size, mapping past the end,
   a pager VMO's grown space as dirty zeros. Still not: UNBOUNDED,
   DISCARDABLE, streams growing their VMO (the pinned tree doesn't either).
+
+### Open items (2026-10-11)
+
+What is still open after K13, gathered from the milestones above, CLAUDE.md's
+"Not yet" notes and Todhchai's requirements. Where croi knowingly differs
+from Zircon, see docs/zircon-divergences.md.
+
+**Todhchai's requirements and extensions**
+- Requirement 13: the SMC resource and `smc_call` (arm64 boards' SCMI;
+  scoped by function-ID range, the board review's extension).
+- Requirement 19: keeping a crashed process frozen for post-mortem attach.
+- Requirement 3: page loaning for contiguous VMOs (the Q8B fragmentation
+  answer); ACPI-reclaim memory stays wired.
+- Requirement 9: lazy AMX through XFD, SME streaming mode, per-thread SVE
+  vector lengths (none available under QEMU TCG).
+- Requirement 1: the GENI UART (Q8B); a text console on the framebuffer.
+- Extensions: 5 (scheduling-context handoff on interrupt wakeup: the field
+  exists, unused), 10 (the frame intent: stored only), 11 and 12 (an idle
+  governor and the frequency floor: KP, which needs the power service).
+
+**Zircon pieces not yet in croi**
+- VM: eviction and reclaim (clean pager pages, DISCARDABLE, DONT_NEED /
+  ALWAYS_NEED hints), UNBOUNDED VMOs, SNAPSHOT (isolated), REFERENCE and
+  SNAPSHOT_MODIFIED children, slices of anonymous VMOs.
+- IOB, restricted mode, membarrier, thread_raise_exception (ZX_EXCP_USER
+  to job debuggers), the ktrace/sampler syscalls (croi has its own).
+- Timers: cancel on the last handle's close; the per-CPU queue's
+  32-entry limit.
+
+**Kernel internals**
+- Load balancing of fair threads between CPUs beyond wakeup placement.
+- PT_GNU_RELRO enforcement in the loaders.
+- amd64 5-level paging, KASLR, VHE-only arm64 CPUs, pointer
+  authentication (EL2 doesn't un-trap it yet).
+- IOMMUs: ATS, two-level SMMUv3 stream tables, stage 2, posted
+  interrupts, source verification for MSI-X, identity-level MSI isolation
+  on rv64; SMMUv2 and every unit unverified on hardware.
+- Board bring-up: handoff v4 board rules, GIC erratum checks; the
+  watchdog and SError paths unverified on hardware; SError delivery to
+  the faulting process.
+- Budgets: channel_call's 1 µs target (~1.4 µs under KVM).
 
 ### K13a (agreed with Todhchai, 2026-10-11): VMO slices and ZERO_CHILDREN
 
