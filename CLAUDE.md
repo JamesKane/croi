@@ -743,7 +743,13 @@ syscalls 150-156; Todhchai item 14 without an IOMMU):
   depend on where pages land. Not covered: quarantine through process
   death, and a BTI dying with PMTs quarantined.
 
-Intel VT-d, K12a (Kernel/Iommu/IntelIommu.swift, include/dma.h; amd64):
+IOMMUs, K12 (Kernel/Iommu/, include/dma.h; amd64). `IoDomain.swift` is
+shared: a claimed device's `IoDomain` (unit, kind, domain id, device id,
+root, levels), its IOVA allocator and page-table walks (VT-d and AMD-Vi
+entries differ only in bits; table writes and IOTLB invalidation dispatch
+on `IommuKind`), and `Iommus` (attach/detach/unbind for Dma.swift).
+
+Intel VT-d, K12a (Kernel/Iommu/IntelIommu.swift):
 - `Dmar` reads ACPI's DMAR at boot (its DRHDs); iommu_create(INTEL,
   zx_iommu_desc_intel_t) needs a register base it lists (NOT_FOUND) and
   binds one object per unit (ALREADY_BOUND; a unit whose object went can
@@ -770,6 +776,27 @@ Intel VT-d, K12a (Kernel/Iommu/IntelIommu.swift, include/dma.h; amd64):
   DRHD, a driver reads the DMAR itself): edu's DMA engine copies through
   pinned IOVAs, a write to a read-only and to an unpinned IOVA fault
   (QEMU prints its own lines for those), re-claim and re-bind.
+
+AMD-Vi, K12b (Kernel/Iommu/AmdIommu.swift; croi's type CROI_IOMMU_TYPE_AMD
+= 0x10000 with croi_iommu_desc_amd_t, Zircon has none):
+- `Ivrs` (IVHDs: registers, segment, the IOMMU's own device id and
+  capability offset) and `Mcfg` (ECAM windows) are read at boot. A unit
+  must be an IVHD's (NOT_FOUND), covers its segment except itself; unity
+  ranges in the descriptor (IVMD) are identity mapped for the devices
+  they name.
+- `AmdviUnit`: a 2 MiB device table for every device id (entries invalid:
+  untranslated), a one-page command buffer (each batch ends with a
+  COMPLETION_WAIT storing a sequence number to a semaphore page the CPU
+  polls) and event log, whose interrupt is an MSI the kernel writes into
+  the IOMMU function's MSI capability (`mapPhysical(shared:)` of its
+  config page, bus mastering on). Claimed: V, TV, mode 4, IR, IW, domain
+  id; released: V and TV with mode 0 and no permissions (blocked). Event
+  batches log the first four and count the rest.
+- QEMU: `qemu.sh --iommu amd` (`amd-iommu,intremap=off,dma-remap=on`:
+  without dma-remap QEMU 10.2 doesn't translate emulated devices, and
+  edu's test DMA wrote physical memory); test `boot-amd-iommu`. QEMU's
+  events carry address 0, and a refused 64-byte DMA logs one fault per
+  4-byte access.
 
 Counters, K10a (Kernel/Object/Counter.swift, User/CounterSyscalls.swift,
 include/counter.h, syscalls 160-165):

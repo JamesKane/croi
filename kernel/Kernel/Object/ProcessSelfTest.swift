@@ -222,10 +222,10 @@ enum ProcessSelfTest {
     static func runIommu(_ console: Uart) {
         #if arch(x86_64)
         let before = Counts()
-        let faults = Vtd.faultsCounted()
+        let faults = Iommus.faultsCounted()
         let exitCode = runInProcess(mode: 18)
         if exitCode == 0x600E {
-            console.write("  iommu:  skipped (no VT-d unit or no edu device)\n")
+            console.write("  iommu:  skipped (no IOMMU or no edu device)\n")
             return
         }
         guard exitCode == 0x600D else {
@@ -237,15 +237,16 @@ enum ProcessSelfTest {
         // The two refused writes were recorded (the fault event is an MSI
         // to the boot CPU; give it a moment).
         let settle = Clock.now() + 100_000_000
-        while Vtd.faultsCounted() < faults + 2, Clock.now() < settle { Scheduler.sleep(until: Clock.now() + 1_000_000) }
-        guard Vtd.faultsCounted() >= faults + 2 else {
+        while Iommus.faultsCounted() < faults + 2, Clock.now() < settle { Scheduler.sleep(until: Clock.now() + 1_000_000) }
+        guard Iommus.faultsCounted() >= faults + 2 else {
             console.write("  iommu:  faults recorded: ")
-            console.write(decimal: Vtd.faultsCounted() - faults)
+            console.write(decimal: Iommus.faultsCounted() - faults)
             console.write(" (expected 2)\n")
             panic("IOMMU self-test: faults")
         }
         before.expectUnchanged(console)
-        console.write("  iommu:  VT-d: edu's DMA through its domain; refused read only and unpinned (faults ")
+        console.write(Dmar.count > 0 ? "  iommu:  VT-d: " : "  iommu:  AMD-Vi: ")
+        console.write("edu's DMA through its domain; refused read only and unpinned (faults ")
         console.write("logged); blocked when its BTI went, claimed again; the unit bound again\n")
         #endif
     }
@@ -386,18 +387,21 @@ enum ProcessSelfTest {
                                                      to: process)
             let resource = try Processes.addHandle(Resources.root, rights: ResourceObject.defaultRights, to: process)
             let bootData = try Processes.addHandle(BootData.object, rights: BootData.rights, to: process)
-            var block = InlineArray<6, UInt64>(repeating: 0)
+            var block = InlineArray<7, UInt64>(repeating: 0)
             block[0] = UInt64(job) | UInt64(me) << 32
             block[1] = UInt64(root) | UInt64(codeHandle) << 32
             block[2] = codeSize
             block[3] = UInt64(resource)
             block[4] = UInt64(bootData)
             #if arch(x86_64)
-            block[5] = Dmar.count > 0 ? Dmar.units[0].registerBase : 0
+            if let unit = Iommus.firstUnit() {
+                block[5] = unit.base
+                block[6] = UInt64(unit.type)
+            }
             #endif
             var span = block.mutableSpan
             span.withUnsafeMutableBytes { raw in
-                startup.writeBytes(at: 0, from: UInt64(UInt(bitPattern: raw.baseAddress!)), count: 48)
+                startup.writeBytes(at: 0, from: UInt64(UInt(bitPattern: raw.baseAddress!)), count: 56)
             }
             codeVmo.release()
             startupVmo.release()

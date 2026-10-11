@@ -7,7 +7,8 @@ import PageTables
 /// and semantics in include/dma.h).
 ///
 /// An IOMMU object (type 23) is the stub (no translation: device
-/// addresses are physical) or a VT-d unit (K12a, Iommu/IntelIommu.swift).
+/// addresses are physical), a VT-d unit (K12a, Iommu/IntelIommu.swift) or
+/// an AMD-Vi one (K12b, Iommu/AmdIommu.swift).
 /// A BTI (24) carries croi's DMA properties (address width, window, memory
 /// type) and counts its live PMTs; it owns the quarantine list. On VT-d it
 /// holds its IOMMU and a domain: the device's own I/O address space, which
@@ -16,8 +17,9 @@ import PageTables
 /// to it instead. All PMT state changes happen under the BTI's lock.
 struct IommuObject: ~Copyable {
     var header = ObjectHeader(type: .iommu)
-    /// The VT-d unit (VtdUnit record), 0 for the stub.
+    /// The unit (VtdUnit or AmdviUnit record), 0 for the stub.
     var unit: UInt64 = 0
+    var kind: UInt8 = 0  // IommuKind's raw value
 
     /// ZX_DEFAULT_IOMMU_RIGHTS.
     static var defaultRights: Rights { Rights.basic.subtracting(.wait) }
@@ -26,7 +28,8 @@ struct IommuObject: ~Copyable {
 struct BtiObject: ~Copyable {
     var header = ObjectHeader(type: .bti)
     let btiId: UInt64
-    /// VT-d: the IOMMU object (a reference) and the device's domain.
+    /// Behind an IOMMU: its object (a reference) and the device's domain
+    /// (an IoDomain).
     var iommu: UInt64 = 0
     var domain: UInt64 = 0
     var properties = croi_bti_properties_t(address_bits: 64, memory_type: UInt32(CROI_BTI_MEMORY_COHERENT),
@@ -51,7 +54,7 @@ struct PmtObject: ~Copyable {
     let vmo: VmoPointer
     let offset: UInt64
     let size: UInt64
-    /// VT-d: the I/O virtual address of the range's first byte (0: stub).
+    /// Behind an IOMMU: the I/O virtual address of the range's first byte (0: stub).
     var iova: UInt64 = 0
     var state = State.live
     var next: UInt64 = 0
@@ -85,12 +88,21 @@ enum Dma {
     /// descriptor in).
     static func createIommu(type: UInt32, descriptor: RawSpan) throws(Status) -> ObjectPointer {
         var unit: UInt64 = 0
+        var kind: UInt8 = 0
         switch type {
         case UInt32(CROI_IOMMU_TYPE_STUB):
             guard descriptor.byteCount == 1 else { throw .invalidArgs }  // zx_iommu_desc_stub_t
         case UInt32(CROI_IOMMU_TYPE_INTEL):
             #if arch(x86_64)
             unit = try Vtd.create(descriptor)
+            kind = IommuKind.vtd.rawValue
+            #else
+            throw .notSupported
+            #endif
+        case UInt32(CROI_IOMMU_TYPE_AMD):
+            #if arch(x86_64)
+            unit = try Amdvi.create(descriptor)
+            kind = IommuKind.amd.rawValue
             #else
             throw .notSupported
             #endif
@@ -99,9 +111,9 @@ enum Dma {
         default:
             throw .invalidArgs
         }
-        guard let object = Objects.allocate(IommuObject(unit: unit)) else {
+        guard let object = Objects.allocate(IommuObject(unit: unit, kind: kind)) else {
             #if arch(x86_64)
-            if unit != 0 { Vtd.unbind(unit) }
+            if unit != 0 { Iommus.unbind(IommuKind(rawValue: kind)!, unit: unit) }
             #endif
             throw .noMemory
         }
@@ -110,27 +122,31 @@ enum Dma {
 
     static func destroyIommu(_ object: ObjectPointer) {
         #if arch(x86_64)
-        let unit = unsafe UnsafePointer<IommuObject>(bitPattern: UInt(object.address))!.pointee.unit
-        if unit != 0 { Vtd.unbind(unit) }
+        let iommu = unsafe UnsafePointer<IommuObject>(bitPattern: UInt(object.address))!
+        if unsafe iommu.pointee.unit != 0 {
+            unsafe Iommus.unbind(IommuKind(rawValue: iommu.pointee.kind)!, unit: iommu.pointee.unit)
+        }
         #endif
         Objects.free(object, as: IommuObject.self)
     }
 
-    /// bti_create: on VT-d, claims device `id` (its bus/device/function)
+    /// bti_create: behind an IOMMU, claims device `id` (bus/device/function)
     /// with a domain of its own; on the stub, a BTI with no translation,
     /// which the debuglog records as a trust decision.
     static func createBti(_ iommu: ObjectPointer, id: UInt64) throws(Status) -> ObjectPointer {
-        let unit = unsafe UnsafePointer<IommuObject>(bitPattern: UInt(iommu.address))!.pointee.unit
+        let record = unsafe UnsafePointer<IommuObject>(bitPattern: UInt(iommu.address))!
+        let unit = unsafe record.pointee.unit
         #if arch(x86_64)
         if unit != 0 {
             guard id <= 0xFFFF else { throw .outOfRange }
-            let domain = try Vtd.attach(VtdUnitPointer(address: unit), bdf: UInt16(id))
+            let kind = unsafe IommuKind(rawValue: record.pointee.kind)!
+            let domain = try Iommus.attach(kind, unit: unit, deviceId: UInt16(id))
             var bti = BtiObject(btiId: id)
             bti.iommu = iommu.address
             bti.domain = domain.address
-            bti.properties.address_bits = UInt32(VtdUnitPointer(address: unit).pointee.inputBits)
+            bti.properties.address_bits = UInt32(domain.pointee.inputBits)
             guard let object = Objects.allocate(bti) else {
-                Vtd.detach(domain)
+                Iommus.detach(domain)
                 throw .noMemory
             }
             iommu.retain()
@@ -155,7 +171,7 @@ enum Dma {
         if bti.pointee.domain != 0 {
             // The device is blocked first, so quarantined pages are safe
             // to give back: nothing can reach them any more.
-            Vtd.detach(VtdDomainPointer(address: bti.pointee.domain))
+            Iommus.detach(IoDomainPointer(address: bti.pointee.domain))
             var list = bti.pointee.quarantine
             while list != 0 {
                 let pmt = ObjectPointer(address: list)
@@ -263,9 +279,9 @@ enum Dma {
         #if arch(x86_64)
         if bti.pointee.domain != 0 {
             // I/O addresses from the window, each page mapped for the device.
-            let domain = VtdDomainPointer(address: bti.pointee.domain)
+            let domain = IoDomainPointer(address: bti.pointee.domain)
             do throws(Status) {
-                iova = try Vtd.reserve(domain, size: size, low: base, high: end)
+                iova = try IoDomains.reserve(domain, size: size, low: base, high: end)
             } catch {
                 unpinVmo()
                 throw error == .noMemory ? .outOfRange : error
@@ -274,10 +290,10 @@ enum Dma {
             while at < size {
                 do throws(Status) {
                     guard let phys = vmo.lookup(at: offset + at) else { throw .badState }
-                    try Vtd.map(domain, iova: iova + at, phys: phys, write: writable)
+                    try IoDomains.map(domain, iova: iova + at, phys: phys, write: writable)
                 } catch {
-                    Vtd.unmap(domain, iova: iova, size: at)
-                    Vtd.release(domain, iova: iova)
+                    IoDomains.unmap(domain, iova: iova, size: at)
+                    IoDomains.release(domain, iova: iova)
                     unpinVmo()
                     throw error
                 }
@@ -304,9 +320,9 @@ enum Dma {
             vmo.release()
             #if arch(x86_64)
             if iova != 0 {
-                let domain = VtdDomainPointer(address: bti.pointee.domain)
-                Vtd.unmap(domain, iova: iova, size: size)
-                Vtd.release(domain, iova: iova)
+                let domain = IoDomainPointer(address: bti.pointee.domain)
+                IoDomains.unmap(domain, iova: iova, size: size)
+                IoDomains.release(domain, iova: iova)
             }
             #endif
             unpinVmo()
@@ -376,13 +392,13 @@ enum Dma {
     }
 
     /// Unpins the VMO range and drops the PMT's reference to the VMO. On
-    /// VT-d the device loses the pages first (unmapped, IOTLB invalidated);
+    /// an IOMMU the device loses the pages first (unmapped, IOTLB invalidated);
     /// `domain` 0 when there is none or it is gone (the device blocked).
     private static func release(_ p: PmtPointer, domain: UInt64) {
         #if arch(x86_64)
         if domain != 0, p.pointee.iova != 0 {
-            Vtd.unmap(VtdDomainPointer(address: domain), iova: p.pointee.iova, size: p.pointee.size)
-            Vtd.release(VtdDomainPointer(address: domain), iova: p.pointee.iova)
+            IoDomains.unmap(IoDomainPointer(address: domain), iova: p.pointee.iova, size: p.pointee.size)
+            IoDomains.release(IoDomainPointer(address: domain), iova: p.pointee.iova)
         }
         #endif
         let vmo = p.pointee.vmo

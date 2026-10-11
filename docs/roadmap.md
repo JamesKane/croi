@@ -700,8 +700,15 @@ the SMC resource.
   255 stay NOT_SUPPORTED for MSI), ATS/device TLBs, scopes behind
   bridges, large pages in domains, the boot-time decision for devices no
   driver claims (pass-through today; Zircon blocks them).
-- **K12b and on:** AMD-Vi (this host's IOMMU, so it can be tried on
-  hardware here), SMMUv3 (QEMU's `iommu=smmuv3` is already on arm64's
+- **K12b: AMD-Vi.** **Done** (2026-10-11). croi's iommu_create type
+  (0x10000, croi_iommu_desc_amd_t: the IVHD's registers and IVMD unity
+  ranges), BTIs as VT-d's on a shared `IoDomain` layer; device table,
+  command buffer with completion-wait polling, event log with its MSI.
+  Tested on QEMU's amd-iommu (`boot-amd-iommu`). Not yet: interrupt
+  remapping, IVHD device scopes (a unit covers its segment), ATS, 5/6
+  levels, restarting the event log after an overflow. Unverified on
+  hardware (this host has an AMD IOMMU, but croi doesn't boot it here).
+- **K12c and on:** SMMUv3 (QEMU's `iommu=smmuv3` is already on arm64's
   command line; Fuchsia's reference code), the RISC-V IOMMU.
 
 ### After M3 (requirements 14–19 and the remaining extensions)

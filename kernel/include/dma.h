@@ -21,7 +21,14 @@
 //   reference to the BTI goes, the device is blocked (no DMA at all), not
 //   returned to pass-through. Faults are logged. Scopes: endpoints one hop
 //   from the host bridge; bridge and deeper scopes are NOT_SUPPORTED yet.
-// - ARM_SMMU: NOT_SUPPORTED yet (as are AMD-Vi and the RISC-V IOMMU).
+// - AMD (K12b, croi's type: Zircon has no AMD driver): croi_iommu_desc_amd_t
+//   for one IOMMU (an IVRS IVHD's register base, NOT_FOUND otherwise) and
+//   its unity ranges (IVMD: firmware's DMA, identity mapped for the
+//   devices they name). The unit covers its whole segment but itself; BTIs
+//   as INTEL's (bti_create's id is the device id, bus << 8 | device << 3 |
+//   function). Faults go to the event log (an MSI the kernel programs into
+//   the IOMMU's PCI function) and are logged.
+// - ARM_SMMU: NOT_SUPPORTED yet (as is the RISC-V IOMMU).
 //
 // bti_pin(bti | options << 32, vmo | addrs_count << 32, offset, size,
 // addrs, pmt out) pins [offset, offset+size) (page aligned) of the VMO and
@@ -51,6 +58,7 @@ enum : uint32_t {
   CROI_IOMMU_TYPE_STUB = 0,
   CROI_IOMMU_TYPE_INTEL = 1,     // VT-d (K12a)
   CROI_IOMMU_TYPE_ARM_SMMU = 2,  // NOT_SUPPORTED yet
+  CROI_IOMMU_TYPE_AMD = 0x10000, // AMD-Vi (K12b), croi's
   CROI_IOMMU_MAX_DESC_LEN = 4096,
 
   // bti_pin options.
@@ -121,3 +129,22 @@ typedef struct {
 static_assert(sizeof(croi_iommu_desc_intel_scope_t) == 8);
 static_assert(sizeof(croi_iommu_desc_intel_reserved_memory_t) == 24);
 static_assert(sizeof(croi_iommu_desc_intel_t) == 16);
+
+// croi's AMD-Vi descriptor (CROI_IOMMU_TYPE_AMD).
+typedef struct {
+  uint64_t base_addr;
+  uint64_t len;
+  uint16_t first_device;  // device ids (bus << 8 | device << 3 | function)
+  uint16_t last_device;   // the range is inclusive
+  uint8_t _reserved[4];
+} croi_iommu_desc_amd_unity_t;
+
+typedef struct {
+  uint64_t register_base;  // physical: an IVHD's IOMMU base address
+  uint16_t pci_segment;
+  uint16_t unity_bytes;    // croi_iommu_desc_amd_unity_t bytes that follow
+  uint8_t _reserved[4];
+} croi_iommu_desc_amd_t;
+
+static_assert(sizeof(croi_iommu_desc_amd_unity_t) == 24);
+static_assert(sizeof(croi_iommu_desc_amd_t) == 16);

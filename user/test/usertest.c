@@ -308,7 +308,8 @@ typedef struct {
   uint64_t code_size;
   uint32_t resource, padding;  // the root resource
   uint32_t bootdata, padding2;  // the boot data VMO (read only)
-  uint64_t drhd;                // amd64: the DMAR's first VT-d unit, or 0
+  uint64_t iommu_base;          // amd64: the first IOMMU's registers (DMAR or IVRS), or 0
+  uint32_t iommu_type, padding3;  // its iommu_create type
 } startup_t;
 
 #define CHILD_CODE 0x1000000ull
@@ -1885,7 +1886,11 @@ static int64_t dma(const startup_t *s) {
                  sys(CROI_SYS_IOMMU_CREATE, tracing, CROI_IOMMU_TYPE_STUB, (uint64_t)&desc, 1, (uint64_t)&iommu) ==
                      ERR_OUT_OF_RANGE &&
                  sys(CROI_SYS_IOMMU_CREATE, s->resource, CROI_IOMMU_TYPE_INTEL, (uint64_t)&desc, 1, (uint64_t)&iommu) ==
+#if defined(__x86_64__)
                      ERR_INVALID_ARGS &&  // shorter than zx_iommu_desc_intel_t
+#else
+                     ERR_NOT_SUPPORTED &&
+#endif
                  sys(CROI_SYS_IOMMU_CREATE, s->resource, 9, (uint64_t)&desc, 1, (uint64_t)&iommu) == ERR_INVALID_ARGS &&
                  sys(CROI_SYS_IOMMU_CREATE, s->resource, CROI_IOMMU_TYPE_STUB, 0, 0, (uint64_t)&iommu) ==
                      ERR_INVALID_ARGS &&
@@ -2002,10 +2007,11 @@ static int64_t dma(const startup_t *s) {
 }
 
 #if defined(__x86_64__)
-// Mode 18, K12a: VT-d with QEMU's intel-iommu (its DMAR covers the whole
-// segment; the kernel passes the unit's registers in the startup block,
-// where a driver would read the DMAR) and edu's DMA engine (00:10.0, a
-// 28-bit DMA mask). Through a pinned page and back; then to a read-only
+// Mode 18, K12a/b: VT-d with QEMU's intel-iommu (its DMAR covers the
+// whole segment) or AMD-Vi with its amd-iommu (the unit covers its
+// segment), whichever the kernel found (it passes the unit's registers and
+// type in the startup block, where a driver would read the DMAR or IVRS),
+// and edu's DMA engine (00:10.0, a 28-bit DMA mask). Through a pinned page and back; then to a read-only
 // IOVA and to an unpinned one, which the IOMMU refuses (the kernel checks
 // it counted the faults). 0x600E: no IOMMU or no edu, skipped.
 static int edu_dma(volatile uint8_t *regs, uint64_t src, uint64_t dst, uint32_t to_ram) {
@@ -2022,7 +2028,7 @@ static int edu_dma(volatile uint8_t *regs, uint64_t src, uint64_t dst, uint32_t 
 }
 
 static int64_t iommu_test(const startup_t *s) {
-  if (s->drhd == 0) return 0x600E;
+  if (s->iommu_base == 0) return 0x600E;
   volatile uint8_t *bus = 0;
   uint32_t bus_vmo = physical_vmo(s, ECAM, 32 * 0x8000, &bus);
   uint32_t cap = 0;
@@ -2034,18 +2040,23 @@ static int64_t iommu_test(const startup_t *s) {
   uint64_t bdf = edu_at >> 15 << 3;  // bus 0, function 0
   volatile uint8_t *edu = bus + edu_at;
 
-  // The unit: its registers must be the DMAR's; one object at a time.
-  croi_iommu_desc_intel_t desc = {.register_base = s->drhd, .pci_segment = 0, .whole_segment = true};
-  croi_iommu_desc_intel_t elsewhere = desc;
-  elsewhere.register_base += 0x10000;
+  // The unit: its registers must be the firmware's; one object at a time.
+  // Both descriptors are 16 bytes with the register base first.
+  croi_iommu_desc_intel_t intel = {.register_base = s->iommu_base, .pci_segment = 0, .whole_segment = true};
+  croi_iommu_desc_amd_t amd = {.register_base = s->iommu_base, .pci_segment = 0};
+  void *desc_bytes = s->iommu_type == CROI_IOMMU_TYPE_AMD ? (void *)&amd : (void *)&intel;
+  uint32_t type = s->iommu_type;
+  uint64_t desc[2];
+  __builtin_memcpy(desc, desc_bytes, sizeof desc);
+  uint64_t elsewhere[2] = {desc[0] + 0x10000, desc[1]};
   uint32_t iommu = 0, again = 0, bti = 0, bti2 = 0;
-  CHECK(400, sys(CROI_SYS_IOMMU_CREATE, s->resource, CROI_IOMMU_TYPE_INTEL, (uint64_t)&elsewhere, sizeof desc,
+  CHECK(400, sys(CROI_SYS_IOMMU_CREATE, s->resource, type, (uint64_t)&elsewhere, sizeof desc,
                  (uint64_t)&iommu) == ERR_NOT_FOUND &&
-                 sys(CROI_SYS_IOMMU_CREATE, s->resource, CROI_IOMMU_TYPE_INTEL, (uint64_t)&desc, sizeof desc + 8,
+                 sys(CROI_SYS_IOMMU_CREATE, s->resource, type, (uint64_t)&desc, sizeof desc + 8,
                      (uint64_t)&iommu) == ERR_INVALID_ARGS &&
-                 sys(CROI_SYS_IOMMU_CREATE, s->resource, CROI_IOMMU_TYPE_INTEL, (uint64_t)&desc, sizeof desc,
+                 sys(CROI_SYS_IOMMU_CREATE, s->resource, type, (uint64_t)&desc, sizeof desc,
                      (uint64_t)&iommu) == 0 &&
-                 sys(CROI_SYS_IOMMU_CREATE, s->resource, CROI_IOMMU_TYPE_INTEL, (uint64_t)&desc, sizeof desc,
+                 sys(CROI_SYS_IOMMU_CREATE, s->resource, type, (uint64_t)&desc, sizeof desc,
                      (uint64_t)&again) == ERR_ALREADY_BOUND);
   // A device per BTI; no trust-decision record (it is translated).
   CHECK(401, sys(CROI_SYS_BTI_CREATE, iommu, 0, 0x10000, (uint64_t)&bti, 0) == ERR_OUT_OF_RANGE &&
@@ -2095,7 +2106,7 @@ static int64_t iommu_test(const startup_t *s) {
                  sys(CROI_SYS_VMO_OP_RANGE, vmo, CROI_VMO_OP_DECOMMIT, 0, 3 * PAGE, 0) == 0 &&
                  sys(CROI_SYS_BTI_CREATE, iommu, 0, bdf, (uint64_t)&bti, 0) == 0 &&
                  sys(CROI_SYS_HANDLE_CLOSE, bti, 0, 0, 0, 0) == 0 && sys(CROI_SYS_HANDLE_CLOSE, iommu, 0, 0, 0, 0) == 0 &&
-                 sys(CROI_SYS_IOMMU_CREATE, s->resource, CROI_IOMMU_TYPE_INTEL, (uint64_t)&desc, sizeof desc,
+                 sys(CROI_SYS_IOMMU_CREATE, s->resource, type, (uint64_t)&desc, sizeof desc,
                      (uint64_t)&iommu) == 0 &&
                  sys(CROI_SYS_HANDLE_CLOSE, iommu, 0, 0, 0, 0) == 0);
   sys(CROI_SYS_HANDLE_CLOSE, vmo, 0, 0, 0, 0);

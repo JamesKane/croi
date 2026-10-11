@@ -289,7 +289,7 @@ struct VtdUnit: ~Copyable {
     /// Keeps a heap copy of the descriptor (scopes, reserved memory).
     func setDescriptor(_ descriptor: RawSpan) throws(Status) {
         guard let copy = unsafe heap.allocate(size: descriptor.byteCount) else { throw .noMemory }
-        unsafe descriptor.withUnsafeBytes { unsafe copy.copyMemory(from: $0.baseAddress!, byteCount: $0.count) }
+        descriptor.withUnsafeBytes { unsafe copy.copyMemory(from: $0.baseAddress!, byteCount: $0.count) }
         if pointee.descriptor != 0 { unsafe heap.free(UnsafeMutableRawPointer(bitPattern: UInt(pointee.descriptor))!) }
         pointee.descriptor = UInt64(UInt(bitPattern: copy))
         pointee.descriptorSize = descriptor.byteCount
@@ -379,13 +379,7 @@ struct VtdUnit: ~Copyable {
 extension Vtd {
     static let faultEvent: DeviceIrqs.KernelMsiHandler = { address in VtdUnitPointer(address: address).drainFaults() }
 
-    /// A zeroed page for tables (PMM, state mmu), or nil.
-    static func zeroedPage() -> UInt64? {
-        guard let phys = pmm.allocatePage(.mmu) else { return nil }
-        unsafe UnsafeMutableRawPointer(bitPattern: UInt(KernelLayout.physmap(phys)))!
-            .initializeMemory(as: UInt8.self, repeating: 0, count: Int(KernelLayout.pageSize))
-        return phys
-    }
+    static func zeroedPage() -> UInt64? { IoDomains.zeroedPage() }
 
     /// A 128-bit root or context entry, high half first so a walk never
     /// sees a present entry with a stale high half.
@@ -403,46 +397,13 @@ extension Vtd {
 
 // MARK: Domains
 
-/// A claimed device's translation (one per VT-d BTI): its second-level
-/// page tables and the I/O virtual addresses in use.
-struct VtdDomain: ~Copyable {
-    let unit: VtdUnitPointer
-    let domainId: UInt16
-    let bdf: UInt16
-    let root: UInt64  // physical
-    let lock = SpinLock()
-    /// Allocated IOVA ranges, sorted by base.
-    var used = UniqueArray<IovaRange>()
-    /// Table pages (freed with the domain).
-    var tables = UniqueArray<UInt64>()
-}
-
-struct IovaRange {
-    var base: UInt64
-    var size: UInt64
-}
-
-@safe struct VtdDomainPointer {
-    let address: UInt64
-
-    var pointee: VtdDomain {
-        unsafeAddress { unsafe UnsafePointer<VtdDomain>(bitPattern: UInt(address))! }
-        nonmutating unsafeMutableAddress { unsafe UnsafeMutablePointer<VtdDomain>(bitPattern: UInt(address))! }
-    }
-}
-
 extension Vtd {
     /// Claims device `bdf` behind `unit`: a domain of its own, the reserved
     /// memory its scopes name identity mapped, its context entry pointed
     /// at it. OUT_OF_RANGE if the unit's scopes don't cover it,
     /// ALREADY_BOUND if it is claimed.
-    static func attach(_ unit: VtdUnitPointer, bdf: UInt16) throws(Status) -> VtdDomainPointer {
+    static func attach(_ unit: VtdUnitPointer, bdf: UInt16) throws(Status) -> IoDomainPointer {
         guard covers(unit, bdf: bdf) else { throw .outOfRange }
-        guard let root = zeroedPage() else { throw .noMemory }
-        guard let raw = unsafe heap.allocate(size: MemoryLayout<VtdDomain>.size, alignment: 64) else {
-            pmm.free(root)
-            throw .noMemory
-        }
         let bus = Int(bdf >> 8), entry = Int(bdf & 0xFF)
         let id = try unit.pointee.lock.withLock { () throws(Status) -> UInt16 in
             // Claimed: present and translated (TT 00). Blocked devices (a
@@ -457,17 +418,17 @@ extension Vtd {
             }
             throw .noResources
         }
-        unsafe raw.bindMemory(to: VtdDomain.self, capacity: 1).initialize(to: VtdDomain(
-            unit: unit, domainId: id, bdf: bdf, root: root))
-        let domain = VtdDomainPointer(address: UInt64(UInt(bitPattern: raw)))
-        domain.pointee.tables.append(root)
-        unit.flushTables(root, KernelLayout.pageSize)
+        guard let domain = IoDomains.make(.vtd, unit: unit.address, id: id, deviceId: bdf, levels: unit.pointee.levels) else {
+            freeId(unit, id)
+            throw .noMemory
+        }
         do throws(Status) {
             try mapReservedMemory(domain)
         } catch {
             free(domain)
             throw error
         }
+        let root = domain.pointee.root
         let copy = unit.pointee.lock.withLock { unit.pointee.busTables[bus] } == 0 ? zeroedPage() : nil
         do throws(Status) { try unit.pointee.lock.withLock { () throws(Status) in
             var table = unit.pointee.busTables[bus]
@@ -497,9 +458,9 @@ extension Vtd {
 
     /// The device loses all DMA (a not-present entry), and the domain's
     /// tables go. Its pins must be gone (their PMTs unpinned) first.
-    static func detach(_ domain: VtdDomainPointer) {
-        let unit = domain.pointee.unit
-        let bus = Int(domain.pointee.bdf >> 8), entry = Int(domain.pointee.bdf & 0xFF)
+    static func detach(_ domain: IoDomainPointer) {
+        let unit = VtdUnitPointer(address: domain.pointee.unit)
+        let bus = Int(domain.pointee.deviceId >> 8), entry = Int(domain.pointee.deviceId & 0xFF)
         unit.pointee.lock.withLock {
             let table = unit.pointee.busTables[bus]
             store(table, entry: entry, low: 0, high: 0)
@@ -510,15 +471,15 @@ extension Vtd {
         free(domain)
     }
 
-    /// The domain's tables, id and record (no device points at them).
-    private static func free(_ domain: VtdDomainPointer) {
-        let unit = domain.pointee.unit
-        let id = Int(domain.pointee.domainId)
-        unit.pointee.lock.withLock { unit.pointee.domains[id / 64] &= ~(1 << UInt64(id % 64)) }
-        for i in 0..<domain.pointee.tables.count { pmm.free(domain.pointee.tables[i]) }
-        let raw = unsafe UnsafeMutablePointer<VtdDomain>(bitPattern: UInt(domain.address))!
-        unsafe raw.deinitialize(count: 1)
-        unsafe heap.free(UnsafeMutableRawPointer(raw))
+    private static func free(_ domain: IoDomainPointer) {
+        let unit = VtdUnitPointer(address: domain.pointee.unit)
+        let id = domain.pointee.domainId
+        IoDomains.free(domain)
+        freeId(unit, id)
+    }
+
+    private static func freeId(_ unit: VtdUnitPointer, _ id: UInt16) {
+        unit.pointee.lock.withLock { unit.pointee.domains[Int(id) / 64] &= ~(1 << UInt64(id % 64)) }
     }
 
     /// Whether the unit's descriptor puts `bdf` behind it: whole segment
@@ -545,113 +506,19 @@ extension Vtd {
 
     /// Identity maps every reserved-memory region whose scopes name the
     /// domain's device (RMRRs: firmware's DMA the device may still do).
-    private static func mapReservedMemory(_ domain: VtdDomainPointer) throws(Status) {
-        let unit = domain.pointee.unit
+    private static func mapReservedMemory(_ domain: IoDomainPointer) throws(Status) {
+        let unit = VtdUnitPointer(address: domain.pointee.unit)
         let base = unit.pointee.descriptor
         let header = unsafe UnsafeRawPointer(bitPattern: UInt(base))!.loadUnaligned(as: croi_iommu_desc_intel_t.self)
         var at = 16 + Int(header.scope_bytes)
         while at < unit.pointee.descriptorSize {
             let entry = unsafe UnsafeRawPointer(bitPattern: UInt(base) + UInt(at))!
                 .loadUnaligned(as: croi_iommu_desc_intel_reserved_memory_t.self)
-            if scopesInclude(base + UInt64(at) + 24, bytes: Int(entry.scope_bytes), bdf: domain.pointee.bdf) {
-                _ = try reserve(domain, at: entry.base_addr, size: entry.len)
-                var offset: UInt64 = 0
-                while offset < entry.len {
-                    try map(domain, iova: entry.base_addr + offset, phys: entry.base_addr + offset, write: true)
-                    offset += KernelLayout.pageSize
-                }
+            if scopesInclude(base + UInt64(at) + 24, bytes: Int(entry.scope_bytes), bdf: domain.pointee.deviceId) {
+                try IoDomains.identityMap(domain, entry.base_addr, entry.len)
             }
             at += 24 + Int(entry.scope_bytes)
         }
-    }
-
-    // MARK: IOVAs
-
-    /// `size` bytes of I/O virtual addresses inside [low, high), first fit
-    /// from 1 MiB (address 0 stays unmapped), or at `fixed`.
-    static func reserve(_ domain: VtdDomainPointer, at fixed: UInt64? = nil, size: UInt64,
-                        low: UInt64 = 0, high: UInt64 = .max) throws(Status) -> UInt64 {
-        let limit = min(high, 1 << domain.pointee.unit.pointee.inputBits)
-        return try domain.pointee.lock.withLock { () throws(Status) -> UInt64 in
-            var candidate = fixed ?? max(low, 0x10_0000)
-            var index = 0
-            while index < domain.pointee.used.count {
-                let r = domain.pointee.used[index]
-                if r.base + r.size <= candidate { index += 1; continue }
-                if candidate + size <= r.base { break }
-                guard fixed == nil else { throw .alreadyBound }
-                candidate = r.base + r.size
-                index += 1
-            }
-            guard candidate + size <= limit, candidate + size > candidate else { throw .noMemory }
-            domain.pointee.used.insert(IovaRange(base: candidate, size: size), at: index)
-            return candidate
-        }
-    }
-
-    static func release(_ domain: VtdDomainPointer, iova: UInt64) {
-        domain.pointee.lock.withLock {
-            for i in 0..<domain.pointee.used.count where domain.pointee.used[i].base == iova {
-                _ = domain.pointee.used.remove(at: i)
-                return
-            }
-        }
-    }
-
-    // MARK: Second-level tables
-
-    /// Maps one page (read, and write if asked). The caller invalidates
-    /// where needed (caching mode: after every map).
-    static func map(_ domain: VtdDomainPointer, iova: UInt64, phys: UInt64, write: Bool) throws(Status) {
-        let unit = domain.pointee.unit
-        try domain.pointee.lock.withLock { () throws(Status) in
-            var table = domain.pointee.root
-            for level in stride(from: unit.pointee.levels, to: 1, by: -1) {
-                let index = Int((iova >> UInt64(12 + 9 * (level - 1))) & 0x1FF)
-                let slot = unsafe UnsafeMutablePointer<UInt64>(bitPattern: UInt(KernelLayout.physmap(table)))! + index
-                if unsafe slot.pointee & 3 == 0 {
-                    guard let next = zeroedPage() else { throw .noMemory }
-                    domain.pointee.tables.append(next)
-                    unit.flushTables(next, KernelLayout.pageSize)
-                    unsafe slot.pointee = next | 3  // read, write: leaves decide
-                    unit.flushTables(table + UInt64(index) * 8, 8)
-                }
-                table = unsafe slot.pointee & 0x000F_FFFF_FFFF_F000
-            }
-            let index = Int((iova >> 12) & 0x1FF)
-            let slot = unsafe UnsafeMutablePointer<UInt64>(bitPattern: UInt(KernelLayout.physmap(table)))! + index
-            unsafe slot.pointee = phys | 1 | (write ? 2 : 0)
-            unit.flushTables(table + UInt64(index) * 8, 8)
-        }
-        if unit.pointee.cachingMode {
-            try unit.pointee.lock.withLock { () throws(Status) in try unit.invalidateIotlbLocked(domain: domain.pointee.domainId) }
-        }
-    }
-
-    /// Unmaps [iova, iova+size) and invalidates the domain's IOTLB: when it
-    /// returns, the device can't reach those pages.
-    static func unmap(_ domain: VtdDomainPointer, iova: UInt64, size: UInt64) {
-        let unit = domain.pointee.unit
-        domain.pointee.lock.withLock {
-            var at = iova
-            while at < iova + size {
-                var table = domain.pointee.root
-                var present = true
-                for level in stride(from: unit.pointee.levels, to: 1, by: -1) {
-                    let index = Int((at >> UInt64(12 + 9 * (level - 1))) & 0x1FF)
-                    let entry = unsafe UnsafePointer<UInt64>(bitPattern: UInt(KernelLayout.physmap(table)))![index]
-                    guard entry & 3 != 0 else { present = false; break }
-                    table = entry & 0x000F_FFFF_FFFF_F000
-                }
-                if present {
-                    let index = Int((at >> 12) & 0x1FF)
-                    unsafe UnsafeMutablePointer<UInt64>(bitPattern: UInt(KernelLayout.physmap(table)))![index] = 0
-                    unit.flushTables(table + UInt64(index) * 8, 8)
-                }
-                at += KernelLayout.pageSize
-            }
-        }
-        unit.pointee.lock.withLock { try? unit.invalidateIotlbLocked(domain: domain.pointee.domainId) }
     }
 }
 #endif

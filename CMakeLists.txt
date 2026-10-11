@@ -84,6 +84,13 @@ if(CROI_ARCH STREQUAL amd64)
             ${CROI_ARCH} ${CROI_ESP_DIR} ${CMAKE_BINARY_DIR}/qemu ${CROI_EDK2_DIR}
             -cpu max,-tsc-deadline)
   set_tests_properties(boot-smoke-apic-oneshot PROPERTIES TIMEOUT 120)
+
+  # AMD-Vi instead of VT-d (QEMU takes one IOMMU at a time): the IOMMU
+  # self-test's line, which a skipped test wouldn't print (K12b).
+  add_test(NAME boot-amd-iommu
+    COMMAND ${CROI_QEMU} --iommu amd --test "iommu:  AMD-Vi:"
+            ${CROI_ARCH} ${CROI_ESP_DIR} ${CMAKE_BINARY_DIR}/qemu-amd-iommu ${CROI_EDK2_DIR})
+  set_tests_properties(boot-amd-iommu PROPERTIES TIMEOUT 120)
 endif()
 
 if(CROI_ARCH STREQUAL rv64)

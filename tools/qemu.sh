@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Boot a croi EFI system partition under QEMU with edk2 firmware.
 #
-#   qemu.sh [--test <text>] [--exits] [--screendump <file.ppm>] [--registers-on <text>] <amd64|arm64|rv64> <esp-dir> <work-dir> <edk2-dir> [qemu args...]
+#   qemu.sh [--test <text>] [--exits] [--screendump <file.ppm>] [--registers-on <text>] [--iommu intel|amd] <amd64|arm64|rv64> <esp-dir> <work-dir> <edk2-dir> [qemu args...]
 #
 # The ESP directory is served as a virtual FAT drive. Writable firmware
 # variable stores are copied into <work-dir> on first use. With --test the
@@ -14,6 +14,7 @@
 # With --registers-on (test mode only), the first line containing that text
 # prints every CPU's PC and frame-pointer backtrace (qemu-monitor.py): where
 # each CPU is when a lockup is reported. Alternatives are separated by '|'.
+# --iommu picks amd64's IOMMU (default intel; QEMU takes one at a time).
 
 set -euo pipefail
 
@@ -21,12 +22,14 @@ expect=
 exits=
 screendump=
 registers_on=
+iommu=intel
 while [[ ${1:-} == --* ]]; do
   case $1 in
     --test) expect=${2:?--test needs the text to wait for}; shift 2 ;;
     --exits) exits=1; shift ;;
     --screendump) screendump=${2:?--screendump needs a file}; shift 2 ;;
     --registers-on) registers_on=${2:?--registers-on needs the text to wait for}; shift 2 ;;
+    --iommu) iommu=${2:?--iommu needs intel or amd}; shift 2 ;;
     *) echo "qemu.sh: unknown option $1" >&2; exit 2 ;;
   esac
 done
@@ -54,8 +57,14 @@ disk=(-drive "if=none,format=raw,file=fat:rw:$esp,id=esp" -device virtio-blk-pci
 case $arch in
   amd64)
     # edu (00:10.0): a PCI device with MSI (K9d) and DMA for the boot
-    # tests, behind QEMU's VT-d (K12a; before the other devices).
-    qemu=(qemu-system-x86_64 -machine q35 -cpu max -device intel-iommu,intremap=off -device edu,addr=0x10
+    # tests, behind QEMU's VT-d (K12a) or AMD-Vi (K12b), which must come
+    # before the other devices.
+    case $iommu in
+      intel) iommu_device=intel-iommu,intremap=off ;;
+      amd) iommu_device=amd-iommu,intremap=off,dma-remap=on ;;
+      *) echo "qemu.sh: --iommu takes intel or amd" >&2; exit 2 ;;
+    esac
+    qemu=(qemu-system-x86_64 -machine q35 -cpu max -device "$iommu_device" -device edu,addr=0x10
           -drive "if=pflash,format=raw,readonly=on,file=$edk2/ovmf/OVMF_CODE.fd"
           -drive "if=pflash,format=raw,file=$(vars "$edk2/ovmf/OVMF_VARS.fd" amd64-vars.fd)")
     ;;

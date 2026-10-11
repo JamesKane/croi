@@ -55,7 +55,9 @@ add_library(kernel-swift OBJECT
   Kernel/Object/InterruptObject.swift
   Kernel/Object/MsiObject.swift
   Kernel/Object/Dma.swift
+  Kernel/Iommu/IoDomain.swift
   Kernel/Iommu/IntelIommu.swift
+  Kernel/Iommu/AmdIommu.swift
   Kernel/Object/KernelMemory.swift
   Kernel/Object/Counter.swift
   Kernel/Object/Timeline.swift

@@ -203,6 +203,7 @@ func kernel_main_continue() -> Never {
         Timers.initialize(acpi)
         #if arch(x86_64)
         Dmar.initialize(acpi)
+        Ivrs.initialize(acpi)
         #endif
         unsafe UnsafePointer<PerCpu>(bitPattern: UInt(Smp.records[0]))!.pointee.interruptsReady
             .store(true, ordering: .releasing)
