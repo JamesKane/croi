@@ -20,7 +20,20 @@ enum : uint32_t {
   CROI_ADMISSION_NO_ELIGIBLE_CPU = 1,  // the CPU mask leaves no usable CPU
   CROI_ADMISSION_CPU_OVERLOADED = 2,   // every eligible CPU is full (reason word: cpu << 8 | 2)
   CROI_ADMISSION_ACCOUNT_EXHAUSTED = 3,
+
+  // object_set_profile options (croi's, K10c): with a deadline profile on
+  // a thread, its periods start on a display timeline's vblanks (ext 10);
+  // the timeline's handle (READ) is the fifth argument.
+  CROI_PROFILE_ALIGN_TIMELINE = 1u << 0,
 };
+
+// object_set_profile(target, profile, options, refusal, timeline) also
+// takes an interrupt, counter or display timeline as its target (WRITE
+// right; a deadline profile): the object then lends that deadline to each
+// thread it wakes directly (interrupt_wait, counter_wait): the thread runs
+// on it from its wakeup, with a period starting there, until it next
+// blocks (ext 5, as channel_call donation). No admission: the lent
+// deadline joins the thread's own as inheritance does.
 
 // zx_sched_deadline_params_t: ns. 50 µs <= capacity <= relative_deadline
 // <= period <= 10 s.

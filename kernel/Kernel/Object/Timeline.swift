@@ -27,6 +27,8 @@ struct TimelineObject: ~Copyable {
     var generation: UInt64 = 0
     /// The vblank the armed timer is for (0: none armed).
     var armedFor: UInt64 = 0
+    /// K10c: a deadline profile lent to the threads its waits wake.
+    var lend: Profile? = nil
 
     /// BASIC | READ | WRITE | SIGNAL (WRITE drives it; clients get READ).
     static var defaultRights: Rights { Rights.basic.union([.read, .write, .signal]) }

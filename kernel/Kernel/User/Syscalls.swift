@@ -517,6 +517,8 @@ enum TestHooks {
         case 2:
             Scheduler.bind(me, nil)
             return 0
+        case 3: return Int64(bitPattern: Scheduler.currentPeriod().start)     // K10c tests
+        case 4: return Int64(bitPattern: Scheduler.currentPeriod().deadline)
         default: return Int64(Status.invalidArgs.rawValue)
         }
     }

@@ -261,6 +261,20 @@ enum ProcessSelfTest {
         console.write("(advance wakes a waiter), rights\n")
     }
 
+    static func runDeadlineWakeups(_ console: Uart) {
+        let before = Counts()
+        let exitCode = runInProcess(mode: 16)
+        guard exitCode == 0x600D else {
+            console.write("  deadline wakeups: user program failed check ")
+            console.write(decimal: UInt64(bitPattern: exitCode))
+            console.write("\n")
+            panic("deadline wakeup self-test: user side")
+        }
+        before.expectUnchanged(console)
+        console.write("  deadline wakeups: a counter lends its deadline until the woken thread blocks; ")
+        console.write("periods aligned to vblanks\n")
+    }
+
     /// Live processes, address spaces and objects, to check nothing leaked.
     struct Counts {
         let processes = Processes.live.load(ordering: .relaxed)

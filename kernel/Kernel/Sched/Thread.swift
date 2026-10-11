@@ -92,6 +92,10 @@ struct Thread: ~Copyable {
     var extendedState: UInt64 = 0
     /// Per-thread PMU counters (Pmu.ThreadCounters on the heap), or 0.
     var pmu: UInt64 = 0
+    /// A deadline profile lent by the event that woke it (K10c, ext 5: an
+    /// interrupt, counter or timeline carrying a profile), until it next
+    /// blocks.
+    var lent: Profile? = nil
     /// Its WaitState, kept for its next wait (a thread is in one wait at a
     /// time), or 0 until it first waits.
     var waitState: UInt64 = 0

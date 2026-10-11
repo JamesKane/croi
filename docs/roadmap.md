@@ -574,7 +574,13 @@ if K10 splits (nothing else in M4 depends on it).
   runs only while something waits on the timeline or a frame-intent
   thread is aligned to it, so a static screen makes no wakeups (K10f).
   Budget: vblank (or synthetic tick) to the waiting thread running.
-- **K10c: wakeups that carry a deadline (ext 5, ext 10).** An interrupt
+- **K10c: wakeups that carry a deadline (ext 5, ext 10).** **Done**
+  (2026-10-10): `object_set_profile` on an interrupt, counter or timeline
+  (WRITE, a deadline profile) makes it lend that deadline to each thread
+  it wakes, from the wakeup until the thread next blocks (no admission:
+  it joins the thread's own as inheritance does); the
+  `CROI_PROFILE_ALIGN_TIMELINE` option with a timeline handle puts a
+  deadline thread's periods on its vblanks. An interrupt
   object, a timeline wait and a counter wait can name a scheduling
   context: the thread they wake runs on it at once, with its deadline,
   as `channel_call` donation does (ext 2). Frame intent (stored only

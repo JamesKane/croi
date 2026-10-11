@@ -783,6 +783,24 @@ syscalls 170-173 in User/CounterSyscalls.swift; Todhchai ext 1):
   page's vblank time; limit 100 µs): KVM median ~10 µs, p99 17-35 µs.
 - Boot test mode 15 (`ProcessSelfTest.runTimelines`).
 
+Deadline-carrying wakeups, K10c (Todhchai ext 5 and 10; profile.h):
+- `object_set_profile(target, profile, options, refusal, timeline)`: on an
+  interrupt, counter or timeline (WRITE; deadline profiles only, no
+  options) the object stores the profile (`lend`), and `Observers.notify`
+  / `InterruptObjects` wake through `Scheduler.wakeAll(queue, lending:)`:
+  the woken thread's `Thread.lent` joins its effective profile as an
+  inherited one (computeEffective), with a period starting at the
+  wakeup, and `block` drops it. Not admitted, as channel_call donation
+  isn't. A thread that sees the event before it blocks borrows nothing.
+- `CROI_PROFILE_ALIGN_TIMELINE` on a thread with a deadline profile
+  (BAD_STATE without one): its context keeps the timeline (a reference)
+  and its page address; `startPeriod`/`nextPeriod` read the page under
+  its seqlock (`vblankGrid`) and start periods on vblanks, only while
+  the thread runs on its own context's parameters. The current period is
+  re-aligned at once. `SchedContextRecord.intent` is still stored only.
+- Test hooks 3/4 (syscall 6) return the running thread's period start
+  and deadline. Boot test mode 16 (`ProcessSelfTest.runDeadlineWakeups`).
+
 Memory statistics (Todhchai's M3 resident-memory budget; task.h,
 resource.h, UserAspace.taskStats, Kernel/Object/KernelMemory.swift):
 - object_get_info(process, CROI_INFO_TASK_STATS = 12 | 1 << 28, or _V1 =

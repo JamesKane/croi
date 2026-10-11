@@ -80,13 +80,15 @@ struct WaitState {
 
     /// Marks the wait finished (by `index`, or canceled) and wakes the
     /// thread. Any context with the object lock held.
-    func finish(index: Int, canceled: Bool) {
+    /// `lending`: the waking object's profile (K10c, ext 5), lent to the
+    /// woken thread until it next blocks.
+    func finish(index: Int, canceled: Bool, lending: Profile? = nil) {
         Scheduler.locked {
             guard !pointee.done else { return }
             pointee.done = true
             pointee.canceled = canceled
             pointee.firedIndex = index
-            Scheduler.wakeAll(pointee.queue)
+            Scheduler.wakeAll(pointee.queue, lending: lending)
         }
     }
 }
@@ -113,7 +115,7 @@ enum Observers {
             }
             switch observer.pointee.kind {
             case .wait(let state, let index):
-                WaitStatePointer(address: state).finish(index: index, canceled: false)
+                WaitStatePointer(address: state).finish(index: index, canceled: false, lending: lend(of: object))
                 previous = observer
             case .port(let port, _, let packet, let options):
                 if let previous { previous.pointee.next = observer.pointee.next } else { object.header.observers = observer.pointee.next }
@@ -135,6 +137,16 @@ enum Observers {
         let pointer = ObjectPointer(address: port)
         Ports.enqueue(PortPointer(object: pointer), record)
         pointer.release()  // the observer's reference; the queue keeps the port alive
+    }
+
+    /// The profile an object lends the threads it wakes directly (K10c:
+    /// counters and timelines that carry one). Object lock held.
+    static func lend(of object: ObjectPointer) -> Profile? {
+        switch object.header.type {
+        case .counter: CounterPointer(object: object).pointee.lend
+        case .timeline: TimelinePointer(object: object).pointee.lend
+        default: nil
+        }
     }
 
     /// A counter value wait's packet: what was waited for, what the counter

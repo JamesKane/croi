@@ -311,6 +311,7 @@ private func runSelfTests(_ console: Uart) {
     ProcessSelfTest.runMemoryStats(console)
     ProcessSelfTest.runCounters(console)
     ProcessSelfTest.runTimelines(console)
+    ProcessSelfTest.runDeadlineWakeups(console)
     ProgramSelfTest.run(console)
     SelfTestDeadman.done.store(true, ordering: .relaxed)
 }

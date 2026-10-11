@@ -2182,6 +2182,115 @@ static int64_t timelines(const startup_t *s) {
   return 0x600D;
 }
 
+// Byte by byte, through volatile: a plain loop or `= {0}` becomes a memset
+// call, which this program doesn't link.
+static void zero_bytes(void *p, uint64_t n) {
+  for (volatile uint8_t *b = p; n--; b++) *b = 0;
+}
+
+// Mode 16 (K10c): deadline-carrying wakeups (ext 5) and frame-aligned
+// periods (ext 10).
+static int64_t deadline_profile(uint32_t resource, int64_t capacity, int64_t deadline, int64_t period,
+                                uint32_t *out) {
+  croi_profile_info_t info;
+  zero_bytes(&info, sizeof info);
+  info.flags = CROI_PROFILE_INFO_FLAG_DEADLINE;
+  info.deadline_params.capacity = capacity;
+  info.deadline_params.relative_deadline = deadline;
+  info.deadline_params.period = period;
+  return sys(CROI_SYS_PROFILE_CREATE, resource, 0, (uint64_t)&info, (uint64_t)out, 0);
+}
+
+typedef struct {
+  uint32_t handle;
+  volatile int64_t status;
+  volatile int64_t deadline_on_wake, period_start, deadline_after_block;
+} lent_waiter_t;
+
+static void lent_waiter(uint64_t arg) {
+  lent_waiter_t *w = (lent_waiter_t *)arg;
+  w->deadline_on_wake = sys(CROI_SYS_TEST_PROFILE, 0, 0, 0, 0, 0);  // fair before
+  w->status = sys(CROI_SYS_COUNTER_WAIT, w->handle, 1, ~0ull, 0, 0);
+  w->deadline_on_wake += 2 * sys(CROI_SYS_TEST_PROFILE, 0, 0, 0, 0, 0);  // 2: deadline now, fair before
+  w->period_start = sys(CROI_SYS_TEST_PROFILE, 3, 0, 0, 0, 0);
+  sleep_ns(1000000);
+  w->deadline_after_block = sys(CROI_SYS_TEST_PROFILE, 0, 0, 0, 0, 0);
+  sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
+}
+
+typedef struct {
+  volatile uint32_t go;
+  volatile uint32_t done;
+  volatile int64_t starts[4];
+} aligned_worker_t;
+
+static void aligned_worker(uint64_t arg) {
+  aligned_worker_t *w = (aligned_worker_t *)arg;
+  while (!w->go) sys(CROI_SYS_NANOSLEEP, 0, 0, 0, 0, 0);
+  for (int i = 0; i < 4; i++) {
+    w->starts[i] = sys(CROI_SYS_TEST_PROFILE, 3, 0, 0, 0, 0);
+    sleep_ns(3100000);  // wake into a new period
+  }
+  w->done = 1;
+  sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
+}
+
+static int64_t deadline_wakeups(const startup_t *s) {
+  uint32_t deadline = 0, fair = 0, counter = 0, weak = 0, t = 0, page_vmo = 0;
+  croi_profile_info_t info;
+  zero_bytes(&info, sizeof info);
+  info.flags = CROI_PROFILE_INFO_FLAG_PRIORITY;
+  info.priority = 20;
+  CHECK(380, deadline_profile(s->resource, 1000000, 4000000, 4000000, &deadline) == 0 &&
+                 sys(CROI_SYS_PROFILE_CREATE, s->resource, 0, (uint64_t)&info, (uint64_t)&fair, 0) == 0 &&
+                 sys(CROI_SYS_COUNTER_CREATE, 0, (uint64_t)&counter, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_HANDLE_DUPLICATE, counter, 1u << 2 | 1u << 14, (uint64_t)&weak, 0, 0) == 0);
+  // An event lends only a deadline, needs WRITE, and takes no options.
+  CHECK(381, sys(CROI_SYS_OBJECT_SET_PROFILE, counter, fair, 0, 0, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_OBJECT_SET_PROFILE, weak, deadline, 0, 0, 0) == ERR_ACCESS_DENIED_ &&
+                 sys(CROI_SYS_OBJECT_SET_PROFILE, counter, deadline, CROI_PROFILE_ALIGN_TIMELINE, 0, 0) ==
+                     ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_OBJECT_SET_PROFILE, counter, deadline, 0, 0, 0) == 0);
+  // A fair thread woken by the counter runs on its deadline, from the
+  // wakeup, until it blocks again.
+  lent_waiter_t w = {.handle = counter, .status = 1};
+  uint32_t worker = start_thread(s, lent_waiter, (uint64_t)&w);
+  sleep_ns(10000000);
+  uint64_t added = now_ns();
+  CHECK(382, w.status == 1 && sys(CROI_SYS_COUNTER_ADD, counter, 1, 0, 0, 0) == 0);
+  join_checked(worker);
+  CHECK(383, w.status == 0 && w.deadline_on_wake == 2 && (uint64_t)w.period_start >= added &&
+                 (uint64_t)w.period_start < now_ns());
+  CHECK(384, w.deadline_after_block == 0);
+  // Frame alignment: a deadline thread's periods start on vblanks.
+  CHECK(385, sys(CROI_SYS_TIMELINE_CREATE, s->resource, CROI_TIMELINE_SYNTHETIC, 2000000, (uint64_t)&t, 0) == 0 &&
+                 sys(CROI_SYS_TIMELINE_GET_PAGE, t, (uint64_t)&page_vmo, 0, 0, 0) == 0);
+  uint64_t at = 0;
+  CHECK(386, sys6(CROI_SYS_VMAR_MAP, s->vmar | (uint64_t)CROI_VM_PERM_READ << 32, 0, page_vmo, 0, PAGE,
+                  (uint64_t)&at) == 0);
+  volatile const croi_timeline_page_t *page = (volatile const croi_timeline_page_t *)at;
+  aligned_worker_t a;
+  zero_bytes(&a, sizeof a);
+  worker = start_thread(s, aligned_worker, (uint64_t)&a);
+  uint32_t refusal = 99;
+  // Without a deadline profile there is nothing to align.
+  CHECK(387, sys(CROI_SYS_OBJECT_SET_PROFILE, worker, fair, CROI_PROFILE_ALIGN_TIMELINE, (uint64_t)&refusal, t) ==
+                 ERR_BAD_STATE &&
+                 sys(CROI_SYS_OBJECT_SET_PROFILE, worker, deadline, CROI_PROFILE_ALIGN_TIMELINE, (uint64_t)&refusal,
+                     t) == 0 &&
+                 refusal == CROI_ADMISSION_ACCEPTED);
+  a.go = 1;
+  join_checked(worker);
+  for (int i = 0; i < 4; i++) {
+    uint64_t start = (uint64_t)a.starts[i];
+    CHECK(388, a.done && start >= page->base_time_ns && (start - page->base_time_ns) % page->period_ns == 0);
+  }
+  sys(CROI_SYS_VMAR_UNMAP, s->vmar, at, PAGE, 0, 0);
+  uint32_t handles[] = {deadline, fair, counter, weak, t, page_vmo};
+  for (int i = 0; i < 6; i++) sys(CROI_SYS_HANDLE_CLOSE, handles[i], 0, 0, 0, 0);
+  return 0x600D;
+}
+
 // Mode 4: something to sample. Three frames deep, spin for `ns`, with a
 // clock syscall every 64 iterations (so some samples land in the kernel
 // and must continue into these frames).
@@ -2226,6 +2335,7 @@ __attribute__((section(".text.start"))) [[noreturn]] void _start(uint64_t mode, 
             : mode == 13 ? memory_stats((const startup_t *)handle)
             : mode == 14 ? counters((const startup_t *)handle)
             : mode == 15 ? timelines((const startup_t *)handle)
+            : mode == 16 ? deadline_wakeups((const startup_t *)handle)
             : mode >= 0x400 ? child((uint32_t)mode, handle, vdso_base)
                         : objects());
 }

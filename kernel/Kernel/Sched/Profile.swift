@@ -194,6 +194,11 @@ struct SchedContextRecord {
     var overrunArgument: UInt64 = 0
     /// Ext 3: a port reporting overruns (a PacketSource), or 0.
     var overrunSource: UInt64 = 0
+    /// Ext 10 (K10c): a display timeline its periods start on (its page's
+    /// kernel address, read lock-free under the page's seqlock), and the
+    /// timeline object it holds a reference to; 0 for none.
+    var alignPage: UInt64 = 0
+    var alignTimeline: UInt64 = 0
     var next: SchedContextPointer?
 }
 
@@ -267,9 +272,11 @@ struct SchedContext: ~Copyable {
 
     deinit {
         let source = record.pointee.overrunSource
+        let timeline = record.pointee.alignTimeline
         Scheduler.destroyContext(record)
         Scheduler.publishPowerHints()
         if source != 0 { PacketSourcePointer(address: source).retire() }
+        if timeline != 0 { ObjectPointer(address: timeline).release() }
     }
 }
 

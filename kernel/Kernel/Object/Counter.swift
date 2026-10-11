@@ -9,6 +9,8 @@ import CKernel
 struct CounterObject: ~Copyable {
     var header = ObjectHeader(type: .counter)
     var value: Int64 = 0
+    /// K10c: a deadline profile lent to the threads its value waits wake.
+    var lend: Profile? = nil
 
     /// ZX_DEFAULT_COUNTER_RIGHTS.
     static var defaultRights: Rights { Rights.basic.union([.read, .write, .signal]) }

@@ -50,6 +50,9 @@ struct InterruptObject: ~Copyable {
     /// Ext 5: the scheduling context a woken waiter would run on. The hook
     /// for the handoff (the wait path wakes through `wake`); unused today.
     var context: UInt64 = 0
+    /// Ext 5 (K10c): a deadline profile the interrupt_wait thread runs on
+    /// from its wakeup until it next blocks (object_set_profile).
+    var lend: Profile? = nil
 
     /// ZX_DEFAULT_INTERRUPT_RIGHTS.
     static var defaultRights: Rights { Rights.basic.union([.read, .write, .signal]) }
@@ -236,7 +239,7 @@ enum InterruptObjects {
     private static func signal(_ interrupt: InterruptPointer) {
         Scheduler.locked {
             interrupt.pointee.signaled = true
-            Scheduler.wakeAll(interrupt.pointee.waiters)
+            Scheduler.wakeAll(interrupt.pointee.waiters, lending: interrupt.pointee.lend)
         }
     }
 

@@ -87,7 +87,8 @@ enum : uint64_t {
   CROI_SYS_DEBUGLOG_WRITE = 111,   // (log, options: CROI_LOG_LOCAL, text, length <= 216)
   CROI_SYS_DEBUGLOG_READ = 112,    // (log, options 0, croi_log_record_t *buffer, length) -> record size
   CROI_SYS_PROFILE_CREATE = 120,     // (resource, options 0, const croi_profile_info_t *, out)
-  CROI_SYS_OBJECT_SET_PROFILE = 121, // (thread, profile, options 0, uint32_t *refusal or 0)
+  CROI_SYS_OBJECT_SET_PROFILE = 121, // (thread | interrupt | counter | timeline, profile, options,
+                                     //  uint32_t *refusal or 0, timeline with ALIGN_TIMELINE)
   // Resources and IO ports (K9a): Zircon's calls, values in resource.h.
   CROI_SYS_RESOURCE_CREATE = 130,  // (parent | options << 32, base, size, name, name_size, uint32_t *out)
   CROI_SYS_IOPORTS_REQUEST = 131,  // (IOPORT resource, io_addr, len): amd64
