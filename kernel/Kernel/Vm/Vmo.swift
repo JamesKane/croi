@@ -875,13 +875,30 @@ struct Vmo: ~Copyable {
         guard record.pointee.parent == nil, !record.pointee.clone else { throw .notSupported }
         // A pager VMO's page would come back from the pager, not zero.
         guard record.pointee.pager == nil else { throw .notSupported }
-        let freed = try take(offset: offset, size: size)
-        var count: UInt64 = 0
-        for i in 0..<freed.count where freed[i] != 0 {
-            pmm.free(freed[i])
-            count += 1
+        let freed = try takePresent(offset: offset, size: size)
+        for i in 0..<freed.count { pmm.free(freed[i]) }
+        record.pointee.account?.uncharge(UInt64(freed.count) * KernelLayout.pageSize)
+    }
+
+    /// `take`, but only the pages present, found sparsely (K14i: decommit
+    /// of an UNBOUNDED VMO's range costs its pages, not its length).
+    func takePresent(offset: UInt64, size: UInt64) throws(VmError) -> UniqueArray<UInt64> {
+        try checkRange(offset, size)
+        guard case .anonymous = record.pointee.kind, record.pointee.parent == nil else { throw .notSupported }
+        var freed = UniqueArray<UInt64>()
+        try record.pointee.lock.withLock { () throws(VmError) in
+            guard !record.pinnedLocked(offset, size) else { throw .pinned }
+            let page = KernelLayout.pageSize
+            var at = Int(offset / page)
+            let end = Int((offset + size) / page)
+            while let (index, _) = record.pointee.pages.next(from: at, before: end) {
+                freed.append(record.pointee.pages.clear(index))
+                record.pointee.committedPages -= 1
+                at = index + 1
+            }
         }
-        record.pointee.account?.uncharge(count * KernelLayout.pageSize)
+        record.unmapEverywhere(offset, size)
+        return freed
     }
 
     /// vmo_set_size (K13h; `newSize` page aligned): a resizable anonymous
@@ -898,13 +915,19 @@ struct Vmo: ~Copyable {
             if newSize < old {
                 guard !record.pinnedLocked(newSize, old - newSize) else { throw .pinned }
                 record.pointee.size = newSize  // from here faults and copies past it fail
-                for i in Int(newSize / page)..<Int(old / page) {
-                    let phys = record.pointee.pages.clear(i)
-                    if phys != 0 {
-                        freed.append(phys)
-                        record.pointee.committedPages -= 1
+                // Only what is there (K14i: sparse).
+                var at = Int(newSize / page)
+                while let (index, _) = record.pointee.pages.next(from: at, before: Int(old / page)) {
+                    freed.append(record.pointee.pages.clear(index))
+                    record.pointee.committedPages -= 1
+                    at = index + 1
+                }
+                if record.pointee.pager != nil {
+                    at = Int(newSize / page)
+                    while let (index, _) = record.pointee.states.next(from: at, before: Int(old / page)) {
+                        _ = record.pointee.states.clear(index)
+                        at = index + 1
                     }
-                    if record.pointee.pager != nil { _ = record.pointee.states.clear(i) }
                 }
                 if record.pointee.pagerZeroFrom >= newSize { record.pointee.pagerZeroFrom = .max }
             } else if newSize > old {
@@ -952,15 +975,38 @@ struct Vmo: ~Copyable {
     func cacheOp(offset: UInt64, size: UInt64, _ op: UInt32) throws(VmError) {
         guard size > 0, offset <= self.size, size <= self.size - offset else { throw .invalidArgument }
         guard record.inPhysmap else { return }
+        forEachPage(offset, offset + size) { phys, at, length in
+            arch_cache_op(KernelLayout.physmap(phys) + at % KernelLayout.pageSize, length, op, VmoCache.line)
+        }
+    }
+
+    /// Calls `body(phys, at, length)` for each page of [offset, end) the
+    /// VMO has (its own; an alias's root's), clipped to the range, under
+    /// the lock of the VMO that has it. Anonymous VMOs are walked sparsely
+    /// (K14i), others page by page.
+    private func forEachPage(_ offset: UInt64, _ end: UInt64, _ body: (UInt64, UInt64, UInt64) -> Void) {
+        let (vmo, shift) = record.target
         let page = KernelLayout.pageSize
         var at = offset
-        while at < offset + size {
+        while at < end {
             let pageStart = at & ~(page - 1)
-            let length = min(offset + size, pageStart + page) - at
-            if let phys = record.lookup(at: pageStart) {
-                arch_cache_op(KernelLayout.physmap(phys) + (at - pageStart), length, op, VmoCache.line)
+            let index: Int? = vmo.pointee.lock.withLock { () -> Int? in
+                if case .anonymous = vmo.pointee.kind {
+                    guard let (next, phys) = vmo.pointee.pages.next(from: Int((pageStart + shift) / page),
+                                                                    before: Int((end + shift + page - 1) / page)) else {
+                        return nil
+                    }
+                    let start = max(at, UInt64(next) * page - shift)
+                    body(phys, start, min(end, UInt64(next) * page - shift + page) - start)
+                    return next
+                }
+                if let phys = vmo.ownLocked(at: pageStart + shift) {
+                    body(phys, at, min(end, pageStart + page) - at)
+                }
+                return Int((pageStart + shift) / page)
             }
-            at += length
+            guard let index else { return }
+            at = UInt64(index) * page - shift + page
         }
     }
 
@@ -971,16 +1017,9 @@ struct Vmo: ~Copyable {
     func syncInstructions(offset: UInt64, size: UInt64) throws(VmError) {
         guard size > 0, offset <= self.size, size <= self.size - offset else { throw .invalidArgument }
         guard record.inPhysmap else { return }
-        let page = KernelLayout.pageSize
         let dline = max(VmoCache.line, 16), iline = max(arch_icache_line(), 16)
-        var at = offset
-        while at < offset + size {
-            let pageStart = at & ~(page - 1)
-            let length = min(offset + size, pageStart + page) - at
-            if let phys = record.lookup(at: pageStart) {
-                arch_sync_icache(KernelLayout.physmap(phys) + (at - pageStart), length, dline, iline)
-            }
-            at += length
+        forEachPage(offset, offset + size) { phys, at, length in
+            arch_sync_icache(KernelLayout.physmap(phys) + at % KernelLayout.pageSize, length, dline, iline)
         }
         #if arch(riscv64)
         _ = arch_sbi_call(0x5246_4E43, 0, 0, ~0, 0)  // RFENCE: remote_fence_i, every hart
@@ -995,24 +1034,50 @@ struct Vmo: ~Copyable {
         guard offset <= self.size, size <= self.size - offset else { throw .invalidArgument }
         guard record.inPhysmap else { throw .denied(0) }
         let page = KernelLayout.pageSize
-        var at = offset
         let end = offset + size
+        // A plain anonymous VMO's absent pages already read as zero: its
+        // whole pages are decommitted (pinned ones zeroed in place), found
+        // sparsely (K14i), and only the partial pages at the ends zeroed.
+        if case .anonymous = record.pointee.kind, record.pointee.parent == nil, !record.pointee.clone,
+           record.pointee.pager == nil {
+            let head = min(end, (offset + page - 1) & ~(page - 1))
+            let tail = max(head, end & ~(page - 1))
+            zeroOwn(offset, head)
+            if head < tail {
+                if record.pointee.lock.withLock({ !record.pinnedLocked(head, tail - head) }) {
+                    try decommit(offset: head, size: tail - head)
+                } else {
+                    zeroOwn(head, tail)
+                }
+            }
+            zeroOwn(tail, end)
+            return
+        }
+        var at = offset
         while at < end {
             let pageStart = at & ~(page - 1)
             let length = min(end, pageStart + page) - at
-            if case .anonymous = record.pointee.kind, length == page, record.pointee.parent == nil,
-               !record.pointee.clone, record.pointee.pager == nil, !record.pointee.lock.withLock({ record.pinnedLocked(pageStart, page) }) {
-                try decommit(offset: pageStart, size: page)
-            } else if let phys = record.pointee.parent != nil || record.pointee.pager != nil
-                        ? record.commit(at: pageStart) : record.lookup(at: pageStart) {
-                let address = KernelLayout.physmap(phys) + (at - pageStart)
-                unsafe UnsafeMutableRawPointer(bitPattern: UInt(address))!
-                    .initializeMemory(as: UInt8.self, repeating: 0, count: Int(length))
-                if record.pointee.cache != .cached {
-                    arch_cache_op(address, length, CROI_CACHE_CLEAN_INVALIDATE, VmoCache.line)
-                }
-            }
+            // A child's or pager VMO's page is made its own first (a page
+            // that can't be is left, as before).
+            if record.pointee.parent != nil || record.pointee.pager != nil { _ = record.commit(at: pageStart) }
+            zeroOwn(at, at + length)
             at += length
+        }
+    }
+
+    /// The VMO's own committed bytes in [offset, end) zeroed in place
+    /// (sparsely for anonymous VMOs), each page under its lock, and cleaned
+    /// out of the cache for an uncached VMO so a device sees it. Absent
+    /// pages are left (K14i: the "untracked" zeroing past a stream size,
+    /// as Zircon's zero_range_untracked, minus its zero markers).
+    func zeroOwn(_ offset: UInt64, _ end: UInt64) {
+        guard offset < end else { return }
+        let uncached = record.pointee.cache != .cached
+        forEachPage(offset, end) { phys, at, length in
+            let address = KernelLayout.physmap(phys) + at % KernelLayout.pageSize
+            unsafe UnsafeMutableRawPointer(bitPattern: UInt(address))!
+                .initializeMemory(as: UInt8.self, repeating: 0, count: Int(length))
+            if uncached { arch_cache_op(address, length, CROI_CACHE_CLEAN_INVALIDATE, VmoCache.line) }
         }
     }
 
@@ -1172,6 +1237,27 @@ struct Vmo: ~Copyable {
 
 enum Vmos {
     static let live = Atomic<Int>(0)
+
+    /// The largest VMO (Zircon's VmObject::MAX_SIZE: 2^64 rounded down to
+    /// its page lists' 16-page nodes), and an UNBOUNDED one's size (K14i).
+    /// Every page round-up below it stays in range.
+    static var maxSize: UInt64 { 0xFFFF_FFFF_FFFF_0000 }
+
+    /// vmo_create's and pager_create_vmo's size (Zircon's
+    /// parse_create_syscall_flags): RESIZABLE with UNBOUNDED INVALID_ARGS;
+    /// UNBOUNDED `maxSize`, else `size` rounded up to a page (OUT_OF_RANGE
+    /// on overflow or past `maxSize`); OUT_OF_RANGE if the content size
+    /// would pass it.
+    static func createSize(_ size: UInt64, unbounded: Bool, resizable: Bool) throws(Status) -> UInt64 {
+        if resizable, unbounded { throw .invalidArgs }
+        if unbounded {
+            guard size <= maxSize else { throw .outOfRange }
+            return maxSize
+        }
+        let mask = KernelLayout.pageSize - 1
+        guard size <= UInt64.max - mask, (size + mask) & ~mask <= maxSize else { throw .outOfRange }
+        return (size + mask) & ~mask
+    }
     private static let traceIds = Atomic<UInt64>(0)
 
     static func nextTraceId() -> UInt64 {

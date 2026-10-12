@@ -4731,6 +4731,79 @@ static int64_t copy_race(const startup_t *s) {
   return 0;
 }
 
+// K14i: UNBOUNDED VMOs, Zircon's MAX_SIZE long with the requested size as
+// their content size. Range operations over all of one cost what is
+// present: each of these would take hours page by page.
+static int64_t unbounded(const startup_t *s) {
+  const uint64_t max = 0xFFFFFFFFFFFF0000ull, far = 1ull << 60;
+  uint32_t vmo = 0, bad = 0, child = 0, slice = 0, st = 0;
+  uint64_t size = 0, counts[2] = {0, 0}, mapped = 0, actual = 0;
+  croi_info_vmo_t v;
+  CHECK(663, sys(CROI_SYS_VMO_CREATE, max + 1, 0, (uint64_t)&bad, 0, 0) == ERR_OUT_OF_RANGE &&
+                 sys(CROI_SYS_VMO_CREATE, max + 1, CROI_VMO_CREATE_UNBOUNDED, (uint64_t)&bad, 0, 0) ==
+                     ERR_OUT_OF_RANGE &&
+                 sys(CROI_SYS_VMO_CREATE, 4 * PAGE + 100, CROI_VMO_CREATE_UNBOUNDED, (uint64_t)&vmo, 0, 0) == 0 &&
+                 sys(CROI_SYS_VMO_GET_SIZE, vmo, (uint64_t)&size, 0, 0, 0) == 0 && size == max &&
+                 sys(CROI_SYS_VMO_GET_STREAM_SIZE, vmo, (uint64_t)&size, 0, 0, 0) == 0 && size == 4 * PAGE + 100 &&
+                 get_info(vmo, CROI_INFO_VMO, &v, sizeof v, counts) == 0 && v.size_bytes == max &&
+                 v.committed_bytes == 0 && sys(CROI_SYS_VMO_SET_SIZE, vmo, PAGE, 0, 0, 0) == ERR_UNAVAILABLE);
+  // A page far out: written, read, mapped, a child's and a slice's.
+  CHECK(664, vmo_put(vmo, far, 'U') && vmo_byte(vmo, far) == 'U' && committed_of(vmo, 0) == PAGE &&
+                 sys6(CROI_SYS_VMAR_MAP, s->vmar | (uint64_t)CROI_VM_PERM_READ << 32, 0, vmo, far - PAGE, 2 * PAGE,
+                      (uint64_t)&mapped) == 0 &&
+                 *(volatile uint8_t *)(mapped + PAGE) == 'U' &&
+                 sys(CROI_SYS_VMAR_UNMAP, s->vmar, mapped, 2 * PAGE, 0, 0) == 0 &&
+                 vmo_child(vmo, CROI_VMO_CHILD_SNAPSHOT_AT_LEAST_ON_WRITE, far, PAGE, &child) == 0 &&
+                 vmo_byte(child, 0) == 'U' && vmo_child(vmo, CROI_VMO_CHILD_SLICE, far - PAGE, 2 * PAGE, &slice) == 0 &&
+                 vmo_byte(slice, PAGE) == 'U');
+  sys(CROI_SYS_HANDLE_CLOSE, child, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, slice, 0, 0, 0, 0);
+  // The whole VMO at once: cache clean, ZERO, DECOMMIT.
+  CHECK(665, vmo_put(vmo, max - 1, 'Z') &&
+                 sys6(CROI_SYS_VMO_OP_RANGE, vmo, CROI_VMO_OP_CACHE_CLEAN, 0, max, 0, 0) == 0 &&
+                 sys6(CROI_SYS_VMO_OP_RANGE, vmo, CROI_VMO_OP_ZERO, 1, max - 2, 0, 0) == 0 &&
+                 vmo_byte(vmo, far) == 0 && vmo_byte(vmo, max - 1) == 'Z' && committed_of(vmo, 0) == 2 * PAGE &&
+                 sys6(CROI_SYS_VMO_OP_RANGE, vmo, CROI_VMO_OP_DECOMMIT, 0, max, 0, 0) == 0 &&
+                 committed_of(vmo, 0) == 0);
+  // A stream writes far out (the gap from the content size zeroed), and
+  // the content size cut back zeroes everything past it.
+  croi_iovec_t hello = {(void *)"hello", 5};
+  CHECK(666, sys(CROI_SYS_STREAM_CREATE, CROI_STREAM_MODE_READ | CROI_STREAM_MODE_WRITE, vmo, 0, (uint64_t)&st, 0) == 0 &&
+                 sys6(CROI_SYS_STREAM_WRITEV_AT, st, 0, far, (uint64_t)&hello, 1, (uint64_t)&actual) == 0 &&
+                 actual == 5 && sys(CROI_SYS_VMO_GET_STREAM_SIZE, vmo, (uint64_t)&size, 0, 0, 0) == 0 &&
+                 size == far + 5 && vmo_byte(vmo, far + 4) == 'o' &&
+                 sys(CROI_SYS_VMO_SET_STREAM_SIZE, vmo, 10, 0, 0, 0) == 0 && vmo_byte(vmo, far + 4) == 0);
+  sys(CROI_SYS_HANDLE_CLOSE, st, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, vmo, 0, 0, 0, 0);
+  // A pager VMO: refusals, sizes, a page supplied far out, dirty ranges
+  // and writeback over the whole VMO, detach.
+  uint32_t pg = 0, port = 0, aux = 0;
+  croi_vmo_dirty_range_t ranges[4];
+  CHECK(667, sys(CROI_SYS_PAGER_CREATE, 0, (uint64_t)&pg, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_PORT_CREATE, 0, (uint64_t)&port, 0, 0, 0) == 0 &&
+                 sys6(CROI_SYS_PAGER_CREATE_VMO, pg, CROI_VMO_UNBOUNDED, port, 94, max + 1, (uint64_t)&bad) ==
+                     ERR_OUT_OF_RANGE &&
+                 sys6(CROI_SYS_PAGER_CREATE_VMO, pg, CROI_VMO_UNBOUNDED, port, 94, 100, (uint64_t)&vmo) == 0 &&
+                 sys(CROI_SYS_VMO_GET_SIZE, vmo, (uint64_t)&size, 0, 0, 0) == 0 && size == max &&
+                 sys(CROI_SYS_VMO_GET_STREAM_SIZE, vmo, (uint64_t)&size, 0, 0, 0) == 0 && size == 100 &&
+                 sys(CROI_SYS_VMO_CREATE, PAGE, 0, (uint64_t)&aux, 0, 0) == 0 && vmo_put(aux, 0, 'P') &&
+                 sys6(CROI_SYS_PAGER_SUPPLY_PAGES, pg, vmo, far, PAGE, aux, 0) == 0 && vmo_byte(vmo, far) == 'P' &&
+                 sys6(CROI_SYS_PAGER_QUERY_DIRTY_RANGES, pg | (uint64_t)vmo << 32, 0, max, (uint64_t)ranges,
+                      sizeof ranges, (uint64_t)counts) == 0 && counts[0] == 0 && counts[1] == 0);
+  CHECK(668, vmo_put(vmo, far, 'W') &&
+                 sys6(CROI_SYS_PAGER_QUERY_DIRTY_RANGES, pg | (uint64_t)vmo << 32, 0, max, (uint64_t)ranges,
+                      sizeof ranges, (uint64_t)counts) == 0 && counts[0] == 1 && ranges[0].offset == far &&
+                 ranges[0].length == PAGE &&
+                 sys6(CROI_SYS_PAGER_OP_RANGE, pg, CROI_PAGER_OP_WRITEBACK_BEGIN, vmo, 0, max, 0) == 0 &&
+                 sys6(CROI_SYS_PAGER_OP_RANGE, pg, CROI_PAGER_OP_WRITEBACK_END, vmo, 0, max, 0) == 0 &&
+                 sys6(CROI_SYS_PAGER_QUERY_DIRTY_RANGES, pg | (uint64_t)vmo << 32, 0, max, (uint64_t)ranges,
+                      sizeof ranges, (uint64_t)counts) == 0 && counts[0] == 0 &&
+                 sys(CROI_SYS_PAGER_DETACH_VMO, pg, vmo, 0, 0, 0) == 0 && committed_of(vmo, 0) == 0);
+  uint32_t handles[] = {vmo, aux, port, pg};
+  for (int i = 0; i < 4; i++) sys(CROI_SYS_HANDLE_CLOSE, handles[i], 0, 0, 0, 0);
+  return 0;
+}
+
 // K11b: the kernel's CPRNG.
 static int64_t cprng_checks(void) {
   uint8_t a[256], b[256];
@@ -4845,6 +4918,8 @@ static int64_t extensions(const startup_t *s) {
   if (kinds != 0) return kinds;
   int64_t raced = copy_race(s);
   if (raced != 0) return raced;
+  int64_t unbound = unbounded(s);
+  if (unbound != 0) return unbound;
   int64_t fifos = fifos_and_exec(s);
   if (fifos != 0) return fifos;
   int64_t socks = sockets(s);

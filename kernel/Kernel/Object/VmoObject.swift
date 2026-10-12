@@ -37,27 +37,27 @@ struct VmoObject: ~Copyable {
     }
 
     /// vmo_create: anonymous memory, the size rounded up to a page
-    /// (Zircon's RoundSize: OUT_OF_RANGE if that overflows); an unaligned
-    /// size is the content size. RESIZABLE (K13h): vmo_set_size may change
-    /// it, and its handle gets RESIZE. UNBOUNDED: NOT_SUPPORTED (with
-    /// RESIZABLE INVALID_ARGS, first). DISCARDABLE (K14a, with or without
-    /// RESIZABLE): reclaimable while unlocked (Reclaim).
+    /// (Zircon's RoundSize: OUT_OF_RANGE if that overflows, or passes
+    /// `Vmos.maxSize`); an unaligned size is the content size. RESIZABLE
+    /// (K13h): vmo_set_size may change it, and its handle gets RESIZE.
+    /// DISCARDABLE (K14a, with or without RESIZABLE): reclaimable while
+    /// unlocked (Reclaim). UNBOUNDED (K14i; with RESIZABLE INVALID_ARGS,
+    /// first): the VMO is `Vmos.maxSize` and `size` is its content size.
+    /// Zircon's order (parse_create_syscall_flags): RESIZABLE with
+    /// UNBOUNDED, the size, then unknown options.
     static func create(size: UInt64, options: UInt64 = 0) throws(Status) -> (ObjectPointer, Rights) {
         let resizable = UInt64(CROI_VMO_CREATE_RESIZABLE), unbounded = UInt64(CROI_VMO_CREATE_UNBOUNDED)
         let discardable: UInt64 = 1 << 2
-        if options & resizable != 0, options & unbounded != 0 { throw .invalidArgs }
+        let vmoSize = try Vmos.createSize(size, unbounded: options & unbounded != 0, resizable: options & resizable != 0)
         guard options & ~(resizable | unbounded | discardable) == 0 else { throw .invalidArgs }
-        let pageMask = KernelLayout.pageSize - 1
-        guard size <= UInt64.max - pageMask else { throw .outOfRange }
-        if options & unbounded != 0 { throw .notSupported }
         let vmo: Vmo
         do throws(VmError) {
-            vmo = try Vmo(anonymous: (size + pageMask) & ~pageMask)
+            vmo = try Vmo(anonymous: vmoSize)
         } catch {
             throw error == .invalidArgument ? .invalidArgs : .noMemory
         }
         vmo.record.pointee.resizable = options & resizable != 0
-        if size & pageMask != 0 { vmo.record.pointee.streamSize = size }
+        if size != vmoSize { vmo.record.pointee.streamSize = size }
         if options & discardable != 0 {
             vmo.record.pointee.discardable = true
             Reclaim.register(vmo.record)

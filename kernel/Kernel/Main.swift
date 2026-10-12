@@ -781,8 +781,9 @@ private enum OwnedTimerProbe {
     nonisolated(unsafe) static var nodes: UInt64 = 0
     nonisolated(unsafe) static var firedAt: UInt64 = 0
     nonisolated(unsafe) static var fires: UInt64 = 0
+    /// 1 where a cancel won (the callback must then never run).
+    nonisolated(unsafe) static var won: UInt64 = 0
     nonisolated(unsafe) static var armedOn = 0
-    static let remoteCancels = Atomic<Int>(0)
 
     static func node(_ i: Int) -> TimerNodePointer {
         unsafe TimerNodePointer(UnsafeMutablePointer<TimerNode>(bitPattern: UInt(nodes))! + i)
@@ -799,7 +800,7 @@ private enum OwnedTimerProbe {
 
     /// From another CPU: cancels node `i` where it was armed.
     static let cancelRemotely: Ipi.Function = { i in
-        if Timers.cancel(node(Int(i)), on: armedOn) { remoteCancels.add(1, ordering: .relaxed) }
+        if Timers.cancel(node(Int(i)), on: armedOn) { unsafe slot(won, Int(i)).pointee = 1 }
     }
 
     static func allocate(_ size: Int) -> UInt64 {
@@ -814,12 +815,16 @@ private enum OwnedTimerProbe {
 
     /// 200 nodes on this CPU (its slots are 32) with mixed deadlines and
     /// slack; every seventh cancelled here, every eleventh from another
-    /// CPU. The rest fire once each, none early; the cancelled never.
+    /// CPU. A cancel that wins means the callback never runs; one that
+    /// loses (on this CPU) means it already ran, once: which happens is
+    /// timing (a loaded TCG host fires some first), so it isn't asserted.
+    /// The rest fire once each, none early.
     static func run(others: Int) {
         let ms: UInt64 = 1_000_000
         nodes = allocate(count * MemoryLayout<TimerNode>.stride)
         firedAt = allocate(count * 8)
         fires = allocate(count * 8)
+        won = allocate(count * 8)
         for i in 0..<count { node(i).pointee = TimerNode() }
         armedOn = Int(Cpu.current)
         let start = Clock.now()
@@ -828,23 +833,33 @@ private enum OwnedTimerProbe {
         for i in 0..<count {
             Timers.arm(node(i), deadline: deadline(i), slack: UInt64(i % 5) * 200_000, record, UInt64(i))
         }
-        var remoteExpected = 0
         for i in 0..<count {
             if i % 7 == 0 {
-                guard Timers.cancel(node(i), on: armedOn), !Timers.cancel(node(i), on: armedOn) else {
+                let first = Timers.cancel(node(i), on: armedOn)
+                guard !Timers.cancel(node(i), on: armedOn), first || (unsafe slot(fires, i).pointee) == 1 else {
                     panic("timer self-test: cancelling an owned node")
                 }
+                if first { unsafe slot(won, i).pointee = 1 }
             } else if remote(i) {
                 Ipi.call(onCpu: armedOn == 0 ? 1 : 0, cancelRemotely, UInt64(i))
-                remoteExpected += 1
             }
         }
-        guard remoteCancels.load(ordering: .relaxed) == remoteExpected else {
-            panic("timer self-test: a remote cancel missed")
+        // Everything not cancelled fires: wait for it (up to 5 s: a loaded
+        // host can run the timer interrupt late, never early).
+        while Clock.now() < start + 5_000 * ms {
+            var pending = false
+            for i in 0..<count where (unsafe slot(won, i).pointee) == 0 && (unsafe slot(fires, i).pointee) == 0 {
+                pending = true
+            }
+            if !pending { break }
+            arch_spin_pause()
         }
         while Clock.now() < start + 30 * ms { arch_spin_pause() }
+        var wins = 0
+        for i in 0..<count where (unsafe slot(won, i).pointee) == 1 { wins += 1 }
+        guard wins > 0 else { panic("timer self-test: no cancel ever won") }  // all 29 losing isn't timing
         for i in 0..<count {
-            let cancelled = i % 7 == 0 || remote(i)
+            let cancelled = (unsafe slot(won, i).pointee) == 1
             let fired = unsafe slot(fires, i).pointee
             guard cancelled ? fired == 0 : fired == 1 else { panic("timer self-test: an owned node fired wrongly") }
             guard cancelled || (unsafe slot(firedAt, i).pointee) >= deadline(i) else {
@@ -855,6 +870,7 @@ private enum OwnedTimerProbe {
         free(nodes)
         free(firedAt)
         free(fires)
+        free(won)
     }
 }
 

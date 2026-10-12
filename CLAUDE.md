@@ -1266,6 +1266,22 @@ The other child kinds, K14g (Vmo.swift `Vmo.snapshot`, `init(sliceOf:)`,
   decommit could hand it a freed, reused page).
 - Mode 17's `child_kinds` (checks 650-660).
 
+UNBOUNDED VMOs, K14i (`Vmos.maxSize`, `Vmos.createSize`; Zircon's
+parse_create_syscall_flags): vmo_create and pager_create_vmo with
+UNBOUNDED make a VMO of 0xFFFF_FFFF_FFFF_0000 bytes (Zircon's MAX_SIZE:
+every page round-up below it stays in range) whose content size is the
+size given (OUT_OF_RANGE past MAX_SIZE; RESIZABLE with it INVALID_ARGS);
+bounded sizes past MAX_SIZE are OUT_OF_RANGE too. Range operations cost
+what is present, not the range: `PageList.next(from:before:)` skips empty
+subtrees, used by decommit (`takePresent`), `zero` (a plain VMO's middle
+decommitted, the ends zeroed in place) and `zeroOwn`, cache ops and
+instruction sync (`forEachPage`), resize, pager detach, writeback
+(`forEachStateLocked`), dirty ranges, and ALWAYS_NEED's swaps back.
+vmo_set_stream_size zeroes up to the new size's page end and, past it,
+only what is committed (Zircon's untracked zeroing, without zero
+markers). Still per page: COMMIT, PREFETCH, ALWAYS_NEED's paging in, a
+pager VMO's ZERO. Mode 17's `unbounded` (checks 663-668).
+
 Copies between user memory and VMO pages, K14h (Vm/Vmo.swift
 `VmoUserCopy`; vmo_read/write, streams, process_read/write_memory): a
 page is read or written only under the lock of the VMO that has it

@@ -32,15 +32,14 @@ extension Syscalls {
             options &= ~UInt32(CROI_VMO_TRAP_DIRTY)
             let resizable = UInt32(CROI_VMO_RESIZABLE), unbounded = UInt32(CROI_VMO_UNBOUNDED)
             let discardable = UInt32(CROI_VMO_DISCARDABLE)
-            if options & resizable != 0, options & unbounded != 0 { throw .invalidArgs }
+            // K13h: resizable ones; K14i: unbounded ones (Vmos.createSize).
+            let vmoSize = try Vmos.createSize(a[4], unbounded: options & unbounded != 0,
+                                              resizable: options & resizable != 0)
             guard options & ~(resizable | unbounded | discardable) == 0 else { throw .invalidArgs }
-            guard a[4] <= UInt64.max - (page - 1) else { throw .outOfRange }
             if options & discardable != 0 { throw .invalidArgs }
-            // K13h: resizable ones now; still none without bounds.
-            if options & unbounded != 0 { throw .notSupported }
             try check(a[5], MemoryLayout<UInt32>.size)
-            let vmo = try Pagers.createVmo(pager.object, port: port.object, key: a[3], size: a[4], trapDirty: trapDirty,
-                                           resizable: options & resizable != 0)
+            let vmo = try Pagers.createVmo(pager.object, port: port.object, key: a[3], size: a[4], vmoSize: vmoSize,
+                                           trapDirty: trapDirty, resizable: options & resizable != 0)
             let out: UInt32
             do throws(Status) {
                 out = try table.add(vmo, rights: options & resizable != 0 ? VmoObject.defaultRights | .resize : VmoObject.defaultRights)

@@ -85,10 +85,19 @@ matches the pinned tree where upstream docs or expectations say otherwise).
   the child's parent limit permanently. Kind: deliberate (simplification).
   Impact: low; within at-least-on-write semantics. Fix: a per-child parent
   limit clamped at shrink.
-- **UNBOUNDED VMOs** — NOT_SUPPORTED in vmo_create and pager_create_vmo.
-  Kind: not yet. Impact: matters if Fuchsia filesystem code (which uses
-  unbounded pager VMOs) is ported; moderate work (near-2^64 sizes, an
-  overflow audit).
+- **Untracked zeroing past a stream size** (K14i) — vmo_set_stream_size
+  zeroes up to the new size's page end as Zircon does; past it Zircon
+  zeroes "untracked" with zero markers, croi decommits a plain VMO's pages
+  and zeroes a pager VMO's or a child's committed pages in place, so their
+  absent pages there still read as the pager's or the parent's. Kind:
+  deliberate (no zero intervals). Impact: vmo_read past the stream size of
+  a pager VMO or a child.
+- **Per-page range operations** (K14i) — decommit, ZERO, cache ops, page
+  states and dirty ranges are sparse; COMMIT, PREFETCH, ALWAYS_NEED and a
+  pager VMO's ZERO still touch every page of their range (Zircon's do the
+  same work, but its zero intervals make ZERO cheap). Kind: not yet.
+  Impact: such an operation over most of an UNBOUNDED VMO runs until
+  memory or the pager gives out.
 - **K11a children copy on first touch** — a SNAPSHOT_AT_LEAST_ON_WRITE
   child copies a parent page at its first read or write (allowed by "at
   least on write"; no hidden nodes); DECOMMIT on a child is NOT_SUPPORTED

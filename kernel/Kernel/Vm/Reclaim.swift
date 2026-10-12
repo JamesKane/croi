@@ -301,6 +301,7 @@ enum Reclaim {
         let end = min((start + size + page - 1) & ~(page - 1), target.pointee.size)
         guard first < end else { return }
         if always { try? Pagers.ensureRange(target, first, end - first) }
+        var borrowed = UniqueArray<UInt64>()  // K14f: lent pages to swap back
         target.pointee.lock.withLock {
             target.pointee.pages.forEach { index, phys in
                 let at = UInt64(index) * page
@@ -308,19 +309,15 @@ enum Reclaim {
                 if always {
                     unsafe record.pointee.reclaimFlags |= alwaysNeed
                     unsafe record.pointee.reclaimAge = 0
+                    if pmm.isLoaned(phys) { borrowed.append(at) }
                 } else if target.dirtLocked(at) == 0, !target.pinnedLocked(at, page) {
                     unsafe record.pointee.reclaimFlags |= dontNeed
                 }
             }
         }
         // K14f: an ALWAYS_NEED page isn't left on a lent one (Zircon's).
-        if always {
-            var at = first
-            while at < end {
-                Loans.unborrow(target, at)
-                at += page
-            }
-        }
+        // Only the borrowed ones (K14i: not every page of the range).
+        for i in 0..<borrowed.count { Loans.unborrow(target, borrowed[i]) }
     }
 
     // MARK: Discardable VMOs

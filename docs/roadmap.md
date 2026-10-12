@@ -842,6 +842,14 @@ THREAD, VMO, maps, handle table) and the NAME property.
   ALWAYS_NEED) and their eviction when a lender wants its page. On by
   default (`croi.ppb.loan=off`). Requirement 3's pool no longer holds
   memory idle.
+- **K14i: UNBOUNDED VMOs.** **Done** (2026-10-12): vmo_create and
+  pager_create_vmo make a VMO of Zircon's MAX_SIZE (2^64 - 64 KiB) whose
+  content size is the size asked for; sizes past MAX_SIZE are
+  OUT_OF_RANGE. Range operations walk only present pages (`PageList.next`:
+  decommit, ZERO, cache ops, resize, detach, writeback, dirty ranges,
+  hints), and the stream size zeroes past its new end untracked. Fixed on
+  the way: the time self-test's owned-timer probe assumed it could cancel
+  before a 2 ms deadline (a loaded TCG host fired some first).
 - **K14h: VMO copies under the page's lock.** **Done** (2026-10-12):
   vmo_read/write, streams and process_read/write_memory copied a page
   after dropping its VMO's lock, so a concurrent decommit or eviction
@@ -921,8 +929,8 @@ from Zircon, see docs/zircon-divergences.md.
   governor and the frequency floor: KP, which needs the power service).
 
 **Zircon pieces not yet in croi**
-- VM (eviction and reclaim came in K14a, the other child kinds in K14g):
-  UNBOUNDED VMOs.
+- VM: done (eviction and reclaim in K14a, the other child kinds in
+  K14g, UNBOUNDED VMOs in K14i); zero intervals remain.
 - IOB, restricted mode, membarrier, the ktrace/sampler syscalls (croi has
   its own).
 

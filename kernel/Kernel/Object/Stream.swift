@@ -80,7 +80,20 @@ enum Streams {
         defer { sizeLock.unlock() }
         let old = streamSize(vmo)
         let from = min(old, size)
-        try zero(vmo, from, vmo.pointee.size - from)
+        // Zircon's: zeroed up to the new size's page end (a pager VMO's
+        // pages requested and dirtied), and past it only what is committed
+        // ("untracked": the rest of an UNBOUNDED VMO, K14i, is no loop).
+        let aligned = (size + KernelLayout.pageSize - 1) & ~(KernelLayout.pageSize - 1)
+        if aligned > from { try zero(vmo, from, aligned - from) }
+        let rest = max(aligned, from)
+        let (pages, _) = vmo.target
+        if rest < vmo.pointee.size {
+            if pages.pointee.pager == nil, !pages.pointee.readsFromPager, pages.pointee.parent == nil, !pages.pointee.clone {
+                try zero(vmo, rest, vmo.pointee.size - rest)  // absent reads zero: decommitted, sparsely
+            } else {
+                try? Vmo.withBorrowed(vmo) { (v: borrowing Vmo) throws(VmError) in v.zeroOwn(rest, vmo.pointee.size) }
+            }
+        }
         vmo.pointee.lock.withLock { vmo.pointee.streamSize = size }
     }
 

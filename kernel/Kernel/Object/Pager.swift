@@ -140,6 +140,19 @@ extension VmoPointer {
         pointee.states.lookup(Int(offset / KernelLayout.pageSize))
     }
 
+    /// Calls `body(offset, state)` for each page of [offset, end) not
+    /// clean, found sparsely (K14i). VMO lock held; `body` may change the
+    /// state of the page it is given.
+    func forEachStateLocked(_ offset: UInt64, _ end: UInt64, _ body: (UInt64, UInt64) -> Void) {
+        let page = KernelLayout.pageSize
+        var i = Int(offset / page)
+        let last = Int((end + page - 1) / page)
+        while let (index, state) = pointee.states.next(from: i, before: last) {
+            body(UInt64(index) * page, state)
+            i = index + 1
+        }
+    }
+
     func setDirtLocked(_ offset: UInt64, _ state: UInt64) {
         let index = Int(offset / KernelLayout.pageSize)
         if state == 0 {
@@ -192,12 +205,11 @@ enum Pagers {
 
     /// pager_create_vmo's VMO: `size` (rounded to pages) bytes from `pager`,
     /// requests to `port` with `key`. The port reference is the source's.
-    static func createVmo(_ pager: ObjectPointer, port: ObjectPointer, key: UInt64, size: UInt64,
+    static func createVmo(_ pager: ObjectPointer, port: ObjectPointer, key: UInt64, size: UInt64, vmoSize: UInt64,
                           trapDirty: Bool, resizable: Bool = false) throws(Status) -> ObjectPointer {
-        let pageMask = KernelLayout.pageSize - 1
         let vmo: Vmo
         do throws(VmError) {
-            vmo = try Vmo(anonymous: (size + pageMask) & ~pageMask)
+            vmo = try Vmo(anonymous: vmoSize)
         } catch {
             throw error == .invalidArgument ? .invalidArgs : .noMemory
         }
@@ -219,7 +231,7 @@ enum Pagers {
         vmo.record.pointee.pager = source
         vmo.record.pointee.resizable = resizable
         vmo.record.pointee.states = PageList(pages: vmo.record.pointee.pageCount)
-        if size & pageMask != 0 { vmo.record.pointee.streamSize = size }
+        if size != vmoSize { vmo.record.pointee.streamSize = size }  // unaligned, or UNBOUNDED (K14i)
         Reclaim.register(vmo.record)  // K14a: its clean pages may be evicted
         return try VmoObject.wrap(vmo.record)
     }
@@ -483,10 +495,12 @@ enum Pagers {
         var dropped = UniqueArray<UInt64>()
         vmo.pointee.lock.withLock {
             let page = KernelLayout.pageSize
-            for i in 0..<vmo.pointee.pageCount {
-                let at = UInt64(i) * page
-                guard vmo.pointee.pages.lookup(i) != 0, vmo.dirtLocked(at) == 0, !vmo.pinnedLocked(at, page) else { continue }
-                dropped.append(vmo.pointee.pages.clear(i))
+            var i = 0
+            while let (index, _) = vmo.pointee.pages.next(from: i, before: vmo.pointee.pageCount) {  // sparse (K14i)
+                i = index + 1
+                let at = UInt64(index) * page
+                guard vmo.dirtLocked(at) == 0, !vmo.pinnedLocked(at, page) else { continue }
+                dropped.append(vmo.pointee.pages.clear(index))
                 vmo.pointee.committedPages -= 1
             }
         }
@@ -638,12 +652,8 @@ enum Pagers {
         guard !zeroRange, length > 0 else { return }
         let page = KernelLayout.pageSize
         vmo.pointee.lock.withLock {
-            var at = offset
-            while at < offset + length {
-                if vmo.dirtLocked(at) == PageDirt.dirty, !vmo.pinnedLocked(at, page) {
-                    vmo.setDirtLocked(at, PageDirt.awaitingClean)
-                }
-                at += page
+            vmo.forEachStateLocked(offset, offset + length) { at, state in
+                if state == PageDirt.dirty, !vmo.pinnedLocked(at, page) { vmo.setDirtLocked(at, PageDirt.awaitingClean) }
             }
         }
         vmo.unmapEverywhere(offset, length)
@@ -651,12 +661,9 @@ enum Pagers {
 
     /// WRITEBACK_END: pages still awaiting clean are clean.
     static func writebackEnd(_ vmo: VmoPointer, offset: UInt64, length: UInt64) {
-        let page = KernelLayout.pageSize
         vmo.pointee.lock.withLock {
-            var at = offset
-            while at < offset + length {
-                if vmo.dirtLocked(at) == PageDirt.awaitingClean { vmo.setDirtLocked(at, 0) }
-                at += page
+            vmo.forEachStateLocked(offset, offset + length) { at, state in
+                if state == PageDirt.awaitingClean { vmo.setDirtLocked(at, 0) }
             }
             // Grown zeros written back (K13h): from now on the pager's.
             let zeroFrom = vmo.pointee.pagerZeroFrom
@@ -671,20 +678,36 @@ enum Pagers {
     static func dirtyRanges(_ vmo: VmoPointer, offset: UInt64, end: UInt64) -> UniqueArray<PageRange> {
         let page = KernelLayout.pageSize
         var ranges = UniqueArray<PageRange>()
+        // Pages not clean (`states` holds only those) and, where the VMO
+        // grew (K13h), the pages never written there, in offset order;
+        // both found sparsely (K14i: an UNBOUNDED VMO's range is huge).
+        func add(_ ranges: inout UniqueArray<PageRange>, _ at: UInt64, _ length: UInt64, zero: Bool) {
+            if ranges.count > 0, ranges[ranges.count - 1].end == at, ranges[ranges.count - 1].zero == zero {
+                ranges[ranges.count - 1].end = at + length
+            } else {
+                ranges.append(PageRange(offset: at, end: at + length, dirty: true, zero: zero))
+            }
+        }
         vmo.pointee.lock.withLock {
-            var at = offset
-            while at < end {
-                let present = vmo.pointee.pages.lookup(Int(at / page)) != 0
-                let state = present ? vmo.dirtLocked(at) : 0
-                let zero = !present && at >= vmo.pointee.pagerZeroFrom  // grown, never written (K13h)
-                if state != 0 || zero {
-                    if ranges.count > 0, ranges[ranges.count - 1].end == at, ranges[ranges.count - 1].zero == zero {
-                        ranges[ranges.count - 1].end = at + page
-                    } else {
-                        ranges.append(PageRange(offset: at, end: at + page, dirty: true, zero: zero))
-                    }
+            let last = Int((end + page - 1) / page)
+            var dirty = Int(offset / page)
+            var gap = Int(max(offset, vmo.pointee.pagerZeroFrom) / page)  // the next grown page not yet considered
+            let grown = vmo.pointee.pagerZeroFrom < end
+            while true {
+                let nextDirty = vmo.pointee.states.next(from: dirty, before: last)
+                let dirtyAt = nextDirty.map { $0.index } ?? last
+                if grown, gap < dirtyAt {
+                    // Grown pages before the next dirty one: the absent ones are zeros.
+                    let present = vmo.pointee.pages.next(from: gap, before: dirtyAt)
+                    let gapEnd = present.map { $0.index } ?? dirtyAt
+                    if gapEnd > gap { add(&ranges, UInt64(gap) * page, UInt64(gapEnd - gap) * page, zero: true) }
+                    gap = present.map { $0.index + 1 } ?? dirtyAt
+                    continue
                 }
-                at += page
+                guard let (index, _) = nextDirty else { break }
+                if vmo.pointee.pages.lookup(index) != 0 { add(&ranges, UInt64(index) * page, page, zero: false) }
+                dirty = index + 1
+                gap = max(gap, dirty)
             }
         }
         return ranges

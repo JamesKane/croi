@@ -84,6 +84,13 @@ struct PageList: ~Copyable {
         Self.walk(root, level: 0, levels: levels, base: 0, body)
     }
 
+    /// The first entry at or after `first` and before `end`, skipping
+    /// empty subtrees (K14i: range operations on an UNBOUNDED VMO cost
+    /// what is present, not the range's size).
+    func next(from first: Int, before end: Int) -> (index: Int, value: UInt64)? {
+        Self.next(root, level: 0, levels: levels, base: 0, first, end)
+    }
+
     /// How many pages in [first, end) are committed (skips empty subtrees).
     func count(from first: Int, to end: Int) -> Int {
         Self.count(root, level: 0, levels: levels, base: 0, first, end)
@@ -103,6 +110,23 @@ struct PageList: ~Copyable {
             guard entry != 0 else { continue }
             if level == levels - 1 { body(base + i, entry) } else { walk(entry, level: level + 1, levels: levels, base: base + i * span, body) }
         }
+    }
+
+    private static func next(_ node: UInt64, level: Int, levels: Int, base: Int, _ first: Int,
+                             _ end: Int) -> (index: Int, value: UInt64)? {
+        guard node != 0 else { return nil }
+        let span = power(levels - 1 - level)
+        let from = first > base ? (first - base) / span : 0
+        guard from < fanout else { return nil }
+        for i in from..<fanout {
+            let start = base + i * span
+            guard start < end else { return nil }
+            let entry = slotAt(node, i).pointee
+            guard entry != 0 else { continue }
+            if level == levels - 1 { return (start, entry) }
+            if let found = next(entry, level: level + 1, levels: levels, base: start, first, end) { return found }
+        }
+        return nil
     }
 
     private static func count(_ node: UInt64, level: Int, levels: Int, base: Int, _ first: Int, _ end: Int) -> Int {
