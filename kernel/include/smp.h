@@ -54,6 +54,10 @@ void arch_ap_prepare_trampoline(void *_Nonnull dest, uint64_t dest_phys, uint64_
                                 const croi_ap_startup_t *_Nonnull block);
 uint64_t arch_rdmsr(uint32_t msr);
 void arch_wrmsr(uint32_t msr, uint64_t value);
+// Assembly (arch/amd64/cpu.S). Clears bit 0 of *word in one instruction
+// (btr) and returns what it was: KVM's PV EOI word, which the hypervisor
+// may clear between a separate test and clear (K14n).
+uint32_t arch_test_and_clear_bit0(uint32_t *_Nonnull word);
 #endif
 
 #if defined(__riscv)

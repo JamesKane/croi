@@ -251,6 +251,97 @@ enum Bench {
         for (pc, count) in counts.prefix(40) { print("m2: ipc samples:   \(count) \(String(pc, radix: 16))") }
     }
 
+    // MARK: Timed wake profile (m2.wake_profile=1)
+
+    /// Todhchai's executor (K14n): fair worker threads waiting on one port
+    /// with the soonest delayed job's deadline, which time out together.
+    nonisolated(unsafe) static var sleepPort: UInt32 = 0
+    nonisolated(unsafe) static var sleepBase: UInt64 = 0
+    nonisolated(unsafe) static var sleepRounds: UInt64 = 0
+    static var sleepGap: UInt64 { 5_000_000 }
+
+    static let sleeper: Sys.ThreadEntry = { index, _ in
+        var packet = croi_port_packet_t()
+        for round in 0..<sleepRounds {
+            let deadline = sleepBase + (round + 1) * sleepGap
+            _ = Sys.call(CROI_SYS_PORT_WAIT, UInt64(sleepPort), deadline, Sys.address(&packet))
+            let late = Sys.now() &- deadline
+            Tracing.mark(30 + index, round << 32 | min(late, 0xFFFF_FFFF))
+        }
+        Sys.exitThread()
+    }
+
+    /// One fair thread, then four, timing out on a port every 5 ms: each
+    /// wake's lateness (deadline to the thread back in user space, by the
+    /// vDSO clock) and, from the trace, its split into the timer interrupt
+    /// arriving late and the kernel's way from that interrupt back to user
+    /// space. Printed, not budgets.
+    static func wakeProfile(resource: UInt32) throws(Failure) {
+        Tracing.resource = resource
+        for threads in [UInt64(1), 4] {
+            try Sys.check("creating a port", Sys.call(CROI_SYS_PORT_CREATE, 0, Sys.address(&sleepPort)))
+            sleepRounds = 100
+            sleepBase = Sys.now() + 2_000_000
+            try Tracing.start(UInt32(CROI_TRACE_MARK | CROI_TRACE_IRQ | CROI_TRACE_SCHED), pages: 256)
+            var workers: [UInt32] = []
+            for i in 0..<threads { workers.append(try Sys.spawn(sleeper, i)) }
+            for worker in workers {
+                var observed: UInt32 = 0
+                _ = Sys.call(CROI_SYS_OBJECT_WAIT_ONE, UInt64(worker), UInt64(CROI_SIGNAL_TASK_TERMINATED), .max,
+                             Sys.address(&observed))
+                Sys.close(worker)
+            }
+            Tracing.stop()
+            Sys.close(sleepPort)
+            let (records, frequency) = try Tracing.records()
+            var late: [UInt64] = [], irqLate: [UInt64] = [], path: [UInt64] = []
+            var first: [UInt64] = Array(repeating: .max, count: Int(sleepRounds))
+            var last: [UInt64] = Array(repeating: 0, count: Int(sleepRounds))
+            for (i, mark) in records.enumerated() where mark.kind == UInt16(CROI_TK_MARK) && mark.a >= 30 && mark.a < 30 + threads {
+                let round = Int(mark.b >> 32), lateness = mark.b & 0xFFFF_FFFF
+                late.append(lateness)
+                first[round] = min(first[round], lateness)
+                last[round] = max(last[round], lateness)
+                // The interrupt that woke it: the last IRQ_ENTER on its CPU before.
+                var j = i
+                while j > 0 {
+                    j -= 1
+                    let r = records[j]
+                    if r.cpu == mark.cpu, r.kind == UInt16(CROI_TK_IRQ_ENTER) {
+                        let since = Tracing.ns(mark.time &- r.time, frequency)
+                        path.append(since)
+                        irqLate.append(lateness > since ? lateness - since : 0)
+                        break
+                    }
+                    if r.cpu != mark.cpu { break }  // rings are per CPU, in order: none before on this one
+                }
+            }
+            // A few wakes in full: every CPU's records from the deadline to
+            // the thread's mark.
+            var shown = 0
+            for mark in records where mark.kind == UInt16(CROI_TK_MARK) && mark.a == 30 && shown < 3 && (mark.b & 0xFFFF_FFFF) > 150_000 {
+                shown += 1
+                let lateness = mark.b & 0xFFFF_FFFF
+                let ticks = lateness * frequency / 1_000_000_000
+                let from = mark.time &- ticks
+                print("m2: wake profile:   round \(mark.b >> 32), \(lateness) ns late, on CPU \(mark.cpu):")
+                var window: [croi_trace_record_t] = []
+                for r in records where r.time >= from && r.time <= mark.time { window.append(r) }
+                window.sort { $0.time < $1.time }
+                for r in window {
+                    print("m2: wake profile:     +\(Tracing.ns(r.time &- from, frequency)) ns cpu \(r.cpu) kind \(r.kind) a \(r.a) b \(r.b) thread \(r.thread)")
+                }
+            }
+            func median(_ values: [UInt64]) -> UInt64 { values.isEmpty ? 0 : values.sorted()[values.count / 2] }
+            func p99(_ values: [UInt64]) -> UInt64 { values.isEmpty ? 0 : values.sorted()[values.count * 99 / 100] }
+            print("m2: wake profile, \(threads) fair thread(s) timing out on a port every 5 ms: late median \(median(late)) ns, p99 \(p99(late)) ns")
+            print("m2: wake profile:   interrupt late median \(median(irqLate)) ns, p99 \(p99(irqLate)) ns; interrupt to user median \(median(path)) ns, p99 \(p99(path)) ns (\(path.count) found)")
+            if threads > 1 {
+                print("m2: wake profile:   first of the \(threads) median \(median(first)) ns, last median \(median(last)) ns")
+            }
+        }
+    }
+
     // MARK: Port wake from another core
 
     nonisolated(unsafe) static var wakeEvent: UInt32 = 0

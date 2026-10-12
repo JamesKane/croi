@@ -35,6 +35,17 @@ arch_interrupts_enabled:
     ret
 .size arch_interrupts_enabled, . - arch_interrupts_enabled
 
+// uint32_t arch_test_and_clear_bit0(uint32_t *word=rdi): one btr, so the
+// test and the clear can't be split by a VM exit (KVM's PV EOI contract).
+.globl arch_test_and_clear_bit0
+.type arch_test_and_clear_bit0, @function
+arch_test_and_clear_bit0:
+    xor     %eax, %eax
+    btrl    $0, (%rdi)
+    setc    %al
+    ret
+.size arch_test_and_clear_bit0, . - arch_test_and_clear_bit0
+
 // void arch_spin_pause(void)
 .globl arch_spin_pause
 .type arch_spin_pause, @function

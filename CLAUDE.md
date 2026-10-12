@@ -581,6 +581,23 @@ include/profile.h):
   at 10 kHz over 300,000 calls and prints the top ones (kernel ones as
   image offsets with bit 63 set; samples land where interrupts come back
   on, so masked stretches show at their end).
+- `m2.wake_profile=1` (K14n): one fair thread, then four, timing out on a
+  port every 5 ms (Todhchai's executor), printed as lateness (deadline to
+  user space by the vDSO clock) split into the timer interrupt arriving
+  late and the kernel's interrupt-to-user path, plus a few wakes' records.
+- Timed wakes under KVM (K14n): every VM exit cost ~4-5 us on this host.
+  `LocalApic.endOfInterrupt` uses KVM's PV EOI where offered (per-CPU
+  words in one page, MSR 0x4B564D04; `croi.pv_eoi=off`), testing and
+  clearing the bit in one instruction (`arch_test_and_clear_bit0`, btr):
+  KVM may clear it at the exit it takes for a newly pending interrupt, and
+  a separate test and clear skipped the needed EOI write, leaving the
+  vector in service (half the full KVM boots hung). An x86 timer interrupt
+  no longer disarms the spent TSC deadline. Under a hypervisor the timer
+  hardware is armed early by `Timers.wakeLead` (a running average of how
+  late interrupts came after the armed time, capped at 50 us;
+  `croi.timer_lead=off`) and the interrupt waits out the rest, so timers
+  still never run early. A fair thread's 5 ms port_wait timeout: ~3-6 us
+  late (median), from 15-40.
 - Hot-path notes from the budget work: `Scheduler.locked` drops the lock
   through `cancelTimeout` (one round trip); `Timers.arm` writes the
   hardware only for a sooner timer and `cancel` leaves it armed (the

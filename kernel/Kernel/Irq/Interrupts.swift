@@ -146,6 +146,11 @@ enum LocalApic {
     static var spuriousVector: UInt32 { 0xFF }
 
     nonisolated(unsafe) private(set) static var x2apic = false
+    /// KVM's paravirtual EOI (K14n): a page of per-CPU words (64 bytes
+    /// apart) KVM sets bit 0 of when the interrupt it injected needs no EOI
+    /// write; clearing it instead saves a VM exit per interrupt (~5 us on
+    /// this host). 0: not under KVM, or `croi.pv_eoi=off`.
+    nonisolated(unsafe) private static var pvEoiPage: UInt64 = 0
     /// Virtual address of the xAPIC registers (xAPIC mode only).
     nonisolated(unsafe) private static var mmio: UInt64 = 0
 
@@ -183,11 +188,41 @@ enum LocalApic {
                 return false
             }
         }
+        if kvmPvEoi, !BootOptions.has("croi.pv_eoi=off"), let page = pmm.allocatePage(.wired) {
+            unsafe UnsafeMutableRawPointer(bitPattern: UInt(KernelLayout.physmap(page)))!
+                .initializeMemory(as: UInt8.self, repeating: 0, count: Int(KernelLayout.pageSize))
+            pvEoiPage = page
+        }
         initializeThisCpu()
         return true
     }
 
+    /// Whether KVM offers PV EOI (KVMKVMKVM leaf, KVM_FEATURE_PV_EOI).
+    private static var kvmPvEoi: Bool {
+        var regs = InlineArray<4, UInt32>(repeating: 0)
+        var span = regs.mutableSpan
+        span.withUnsafeMutableBufferPointer { unsafe arch_cpuid(1, 0, $0.baseAddress!) }
+        guard regs[2] & (1 << 31) != 0 else { return false }
+        span = regs.mutableSpan
+        span.withUnsafeMutableBufferPointer { unsafe arch_cpuid(0x4000_0000, 0, $0.baseAddress!) }
+        guard regs[1] == 0x4B4D_564B, regs[2] == 0x564B_4D56, regs[3] == 0x0000_004D, regs[0] >= 0x4000_0001 else {
+            return false
+        }
+        span = regs.mutableSpan
+        span.withUnsafeMutableBufferPointer { unsafe arch_cpuid(0x4000_0001, 0, $0.baseAddress!) }
+        return regs[0] & (1 << 6) != 0
+    }
+
+    /// This CPU's PV EOI word, if any.
+    private static var pvEoiWord: UnsafeMutablePointer<UInt32>? {
+        guard pvEoiPage != 0 else { return nil }
+        return unsafe UnsafeMutablePointer<UInt32>(bitPattern: UInt(KernelLayout.physmap(pvEoiPage) + UInt64(Cpu.current) * 64))
+    }
+
     static func initializeThisCpu() {
+        if pvEoiPage != 0 {
+            arch_wrmsr(0x4B56_4D04, pvEoiPage + UInt64(Cpu.current) * 64 | 1)  // MSR_KVM_PV_EOI_EN
+        }
         if x2apic {
             arch_wrmsr(apicBaseMsr, arch_rdmsr(apicBaseMsr) | (1 << 11) | (1 << 10))  // EN | EXTD
         }
@@ -199,7 +234,15 @@ enum LocalApic {
         write(svr, (1 << 8) | spuriousVector)  // APIC software enable
     }
 
-    static func endOfInterrupt() { write(eoi, 0) }
+    static func endOfInterrupt() {
+        // KVM said it needs none. Tested and cleared in one instruction:
+        // KVM may clear the bit itself at any VM exit (another interrupt
+        // pending: then the write is needed), and a separate test and clear
+        // skipped that write, leaving the vector in service for good (half
+        // the full KVM boots hung).
+        if let word = unsafe pvEoiWord, unsafe arch_test_and_clear_bit0(word) != 0 { return }
+        write(eoi, 0)
+    }
 
     static func clearErrors() {
         write(esr, 0)  // xAPIC: a write latches the current errors

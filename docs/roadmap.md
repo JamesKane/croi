@@ -842,6 +842,18 @@ THREAD, VMO, maps, handle table) and the NAME property.
   ALWAYS_NEED) and their eviction when a lender wants its page. On by
   default (`croi.ppb.loan=off`). Requirement 3's pool no longer holds
   memory idle.
+- **K14n: timed wakes under KVM.** **Done** (2026-10-12), from Todhchai's
+  report (a 5 ms Task.sleep 20-60 us late; their executor's workers time
+  out on one port). m2's wake profile split it: the timer interrupt ~14-20
+  us late (KVM waking a halted vCPU) and ~10-20 us from it to user space,
+  mostly VM exits at ~4-5 us each. KVM PV EOI (atomic test-and-clear;
+  a split one hung half the boots), no disarm of a spent x86 deadline,
+  and a learned timer lead under hypervisors: a fair thread's timeout ~3-6
+  us late (median) from 15-40, four together 11-13 us from ~20. Bench vs
+  1f0ade5: timeline.wake_median 10.6 -> 4.8 us, edf.worst_wake -36%,
+  timer.wake_error_p99 -18%, port wake -12%, irq wait -10%. Left for
+  Todhchai: one timer sleeper instead of a herd (each extra wake migrates
+  by IPI, ~2.6 us).
 - **K14m: channel_call, part 2.** **Done** (2026-10-12): out-pointer
   checks inside the mapping a thread's last check found skip the address
   space's lock while its `mapGeneration` holds (three checks per call

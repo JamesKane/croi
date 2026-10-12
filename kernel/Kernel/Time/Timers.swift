@@ -112,6 +112,7 @@ enum Timers {
     static func initialize(_ acpi: AcpiTables) {
         #if arch(x86_64)
         deadlineMode = cpuid(1)[2] & (1 << 24) != 0  // ECX: TSC-deadline
+        leadEnabled = cpuid(1)[2] & (1 << 31) != 0 && !BootOptions.has("croi.timer_lead=off")  // a hypervisor
         alwaysRunning = cpuid(6)[0] & (1 << 2) != 0  // EAX: ARAT
         #elseif arch(arm64)
         if let gtdt = acpi.table("GTDT") {
@@ -324,12 +325,29 @@ enum Timers {
     /// The most a timer interrupt waits for a deadline it came before.
     static var earlyTolerance: UInt64 { 1_000_000 }
 
+    /// Under a hypervisor (K14n, amd64; `croi.timer_lead=off`): a timer
+    /// interrupt reaches a halted vCPU ~10-20 us after the hardware fires
+    /// (KVM here), so the hardware is armed that much earlier and the
+    /// interrupt waits out the rest (timers still never run early).
+    /// `wakeDelay` is a running average (1/8) of how late interrupts came
+    /// after the time the hardware was armed for, outliers clamped;
+    /// `wakeLead` follows it, capped. Shared; racy updates are fine.
+    nonisolated(unsafe) private static var leadEnabled = false
+    nonisolated(unsafe) private(set) static var wakeLead: UInt64 = 0
+    nonisolated(unsafe) private static var wakeDelay: UInt64 = 0
+    static var maxWakeLead: UInt64 { 50_000 }
+
     /// The timer interrupt (interrupts masked).
     static func handleInterrupt() {
         let queue = self.queue
         queue.pointee.interrupts += 1
         queue.pointee.programmed = .max
         var now = Clock.now()
+        if leadEnabled, queue.pointee.hardwareTarget != 0, now > queue.pointee.hardwareTarget {
+            let delay = min(now - queue.pointee.hardwareTarget, 2 * maxWakeLead)
+            wakeDelay = wakeDelay - wakeDelay / 8 + delay / 8
+            wakeLead = min(wakeDelay, maxWakeLead)
+        }
         // An interrupt before the hardware's own target teaches the lead:
         // in ppm of the distance it was armed for (ten ms or more, and
         // under 1%, so a stale or odd reading can't teach nonsense).
@@ -372,8 +390,13 @@ enum Timers {
         }
         program()
         // Nothing left: the arm64 virtual timer and the SBI timer stay
-        // pending until told otherwise.
+        // pending until told otherwise. An x86 TSC deadline or one-shot APIC
+        // timer that fired is spent already (a write was a VM exit, ~4 us
+        // under KVM, K14n); one left armed for a cancelled timer is settled
+        // on idle entry.
+        #if !arch(x86_64)
         if queue.pointee.programmed == .max { disarmHardware() }
+        #endif
     }
 
     /// The first timer due by `now` (lock held). One is due only if its
@@ -487,7 +510,10 @@ enum Timers {
         // wait 146 years out took a contended lock from 0.3 ms to 5.6 s,
         // Todhchai's pthread test). Reaching the cap, the interrupt finds
         // nothing due and arms for what is left: one wakeup per cap.
-        let ns = min(requested &+ extra < requested ? .max : requested + extra, nowNs + Self.maxDistance)
+        var ns = min(requested &+ extra < requested ? .max : requested + extra, nowNs + Self.maxDistance)
+        // Under a hypervisor, early by the learned delivery delay (never
+        // before now; the interrupt waits for the deadline).
+        if leadEnabled { ns = max(nowNs, ns - min(wakeLead, ns > nowNs ? ns - nowNs : 0)) }
         queue.pointee.hardwareTarget = ns
         queue.pointee.hardwareArmedAt = nowNs
         let counter = max(Clock.counter(atNanoseconds: ns), now + 1)
