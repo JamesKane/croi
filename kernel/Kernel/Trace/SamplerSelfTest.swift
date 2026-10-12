@@ -42,6 +42,10 @@ enum SamplerSelfTest {
         guard kernel.samples >= 20, kernel.withFrames * 10 >= kernel.samples * 9, kernel.malformed == 0,
               kernel.foreign == 0 else {
             report(console, "kernel", kernel)
+            // Each CPU's timers and what its hardware is armed for: a dead
+            // timer or a stalled vCPU (seen once under heavy host load,
+            // 0 samples in the spinner's 80 ms; roadmap).
+            Scheduler.dump(to: console)
             panic("sampler self-test: kernel samples")
         }
         guard idle == 0, armedIdle == 0 else { panic("sampler self-test: an idle CPU was sampled or ticking") }
@@ -217,6 +221,12 @@ enum SamplerSelfTest {
         console.write(decimal: UInt64(c.malformed))
         console.write(", foreign ")
         console.write(decimal: UInt64(c.foreign))
+        // Why there were none, if so: ticks that lapsed (idle, or no
+        // interrupt frame) end a CPU's sampling until its next switch.
+        console.write(", lapses ")
+        console.write(decimal: Sampler.lapses.load(ordering: .relaxed))
+        console.write(", arm failures ")
+        console.write(decimal: Sampler.armFailures.load(ordering: .relaxed))
         console.write("\n")
     }
 

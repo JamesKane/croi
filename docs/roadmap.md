@@ -911,9 +911,13 @@ THREAD, VMO, maps, handle table) and the NAME property.
   - Open: once, under heavy parallel load (four TCG boots plus KVM boots),
     amd64's boot-amd-iommu-xt panicked in the sampler self-test with no
     kernel samples at all in the spinner's 80 ms (0 of 0, nothing
-    foreign), not reproduced in 5 quiet runs. A stalled vCPU for 80 ms, or
-    a sampling timer not armed on some switch path: look before
-    loosening the check.
+    foreign), not reproduced in 5 quiet runs nor in 24 boots eight at a
+    time. Ruled out by reading: the spinner is pinned (affinity), the ring
+    can't fill (SAMPLE only, 32 pages), a past deadline still arms the
+    LAPIC one-shot (count >= 1), stale generations and direct switches
+    re-arm correctly. A failure now also prints the sampler's lapses and
+    arm failures and Scheduler.dump (each CPU's timers and hardware), to
+    tell a dead timer from a stalled vCPU next time.
   - left, as Zircon does or unverified: NMI/#MC still choose GS from the
     saved CS (no paranoid entry; NMIs are fatal); REMAP_IRQ resources
     checked against the ISA number; iommu_create's reserved ranges
