@@ -824,6 +824,22 @@ func vmStatus<R: ~Copyable>(_ body: () throws(VmError) -> R) throws(Status) -> R
     }
 }
 
+extension Processes {
+    /// The scheduler thread of thread object `object`, pinned (review fix:
+    /// it was read under the object's lock and used after, while the thread
+    /// could exit and be freed); nil if it isn't running. The caller calls
+    /// `Scheduler.unpin`.
+    static func pinnedThread(_ object: ObjectPointer) -> ThreadPointer? {
+        object.header.lock.withLock { () -> ThreadPointer? in
+            let address = ThreadObjectPointer(object: object).pointee.thread
+            guard address != 0 else { return nil }
+            let thread = ThreadPointer(address: address)
+            Scheduler.pin(thread)  // object -> scheduler: the documented order
+            return thread
+        }
+    }
+}
+
 extension VmError {
     /// The Zircon status a syscall reports for it.
     var status: Status {

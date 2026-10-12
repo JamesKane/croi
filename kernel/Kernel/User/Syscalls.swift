@@ -144,6 +144,7 @@ enum UserTraps {
         Scheduler.setAspace(aspace)
         let top = Scheduler.current.pointee.stack.top
         Scheduler.setKernelStack(top)
+        Scheduler.current.pointee.enteredUser = true
         arch_enter_user(pc, sp, arg0, arg1, arg2, top)
     }
 }
@@ -361,7 +362,8 @@ enum Syscalls {
             try put(mapped, a[4])
         case 50:  // trace_configure
             switch a[1] {
-            case 0: try TraceControl.start(table, handle, categories: UInt32(truncatingIfNeeded: a[2]), pages: Int(a[3]),
+            case 0: try TraceControl.start(table, handle, categories: UInt32(truncatingIfNeeded: a[2]),
+                                           pages: Int(clamping: a[3]),  // review fix: Int(a[3]) trapped past 2^63
                                            mode: UInt32(truncatingIfNeeded: a[4]), sampleHz: a[5])
             case 1: try TraceControl.stop(table, handle)
             case 2: try TraceControl.rewind(table, handle)

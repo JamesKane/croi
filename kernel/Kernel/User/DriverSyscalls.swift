@@ -170,7 +170,9 @@ extension Syscalls {
         let holder = VmoPointer(address: UnsafeVmoObject(ref.object).vmo)
         // K14g: an alias's pages are its root's, from its offset there.
         let (record, shift) = holder.target
-        let at = offset + shift
+        // Past 2^64 is past any VMO (review fix: the sum trapped).
+        let (at, wrapped) = offset.addingReportingOverflow(shift)
+        guard !wrapped else { throw .outOfRange }
         let page = KernelLayout.pageSize
         func need(_ right: Rights) throws(Status) {
             guard rights.contains(right) else { throw .accessDenied }

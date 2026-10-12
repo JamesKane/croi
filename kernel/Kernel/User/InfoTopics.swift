@@ -217,6 +217,7 @@ extension Syscalls {
     /// Why a blocked user thread waits, from the syscall it is in (a page
     /// fault waits for a pager). Racy: a snapshot.
     private static func blockedState(_ thread: ThreadPointer) -> UInt32 {
+        guard thread.pointee.enteredUser else { return UInt32(CROI_THREAD_STATE_BLOCKED) }  // parked before its first entry
         let user = unsafe UserTraps.userFrame(of: thread)
         guard unsafe ExceptionFrame.isSyscall(user.pointee) else { return UInt32(CROI_THREAD_STATE_BLOCKED_PAGER) }
         switch unsafe ExceptionFrame.syscallNumber(user.pointee) {

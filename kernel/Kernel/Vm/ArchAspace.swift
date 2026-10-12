@@ -132,8 +132,15 @@ struct ArchAspace {
     /// are only partly covered. Holes are fine.
     func unmap(virt: UInt64, size: UInt64) throws(VmError) {
         try checkRange(virt, size)
-        defer { flushOthers(virt, size) }
-        try update(table: root(virt), level: 0, start: virt, end: virt + size, .unmap)
+        // Emptied tables are freed only after every CPU has flushed (review
+        // fix: another CPU's walk cache could still reach a table already
+        // reused as someone's page).
+        var freed: UInt64 = 0
+        defer {
+            flushOthers(virt, size)
+            freeTables(freed)
+        }
+        try update(table: root(virt), level: 0, start: virt, end: virt + size, .unmap, freed: &freed)
     }
 
     /// Changes the attributes of everything mapped in [virt, virt+size),
@@ -141,7 +148,8 @@ struct ArchAspace {
     func protect(virt: UInt64, size: UInt64, _ attributes: MapAttributes) throws(VmError) {
         try checkRange(virt, size)
         defer { flushOthers(virt, size) }
-        try update(table: root(virt), level: 0, start: virt, end: virt + size, .protect(attributes))
+        var none: UInt64 = 0  // protect empties no table
+        try update(table: root(virt), level: 0, start: virt, end: virt + size, .protect(attributes), freed: &none)
     }
 
     /// The remote half of a change this CPU has already invalidated
@@ -170,7 +178,11 @@ struct ArchAspace {
     }
 
     /// Applies `operation` to [start, end) within `table` (a table at `level`).
-    private func update(table: UInt64, level: Int, start: UInt64, end: UInt64, _ operation: Operation) throws(VmError) {
+    /// Tables an unmap empties are chained onto `freed` (through their
+    /// first entry: a page address, never a present entry) for
+    /// `freeTables` after the shootdown.
+    private func update(table: UInt64, level: Int, start: UInt64, end: UInt64, _ operation: Operation,
+                        freed: inout UInt64) throws(VmError) {
         let size = Format.pageSize(level: level)
         var virt = start
         while virt < end {
@@ -182,11 +194,12 @@ struct ArchAspace {
 
             if Format.isTable(entry, level: level) {
                 let child = Format.address(entry)
-                try update(table: child, level: level + 1, start: virt, end: chunkEnd, operation)
+                try update(table: child, level: level + 1, start: virt, end: chunkEnd, operation, freed: &freed)
                 if case .unmap = operation, !(level == 0 && pinsTopLevel), unsafe isEmpty(child) {
                     unsafe slot.pointee = 0
                     arch_tlb_invalidate_page(entryBase)  // drops walk-cache entries too
-                    pmm.free(child)
+                    unsafe entries(child).pointee = freed
+                    freed = child
                 }
             } else if Format.isPresent(entry) {
                 if virt == entryBase, chunkEnd &- entryBase == size {
@@ -201,7 +214,7 @@ struct ArchAspace {
                     }
                 } else {
                     let child = unsafe try split(slot, level: level, at: entryBase)
-                    try update(table: child, level: level + 1, start: virt, end: chunkEnd, operation)
+                    try update(table: child, level: level + 1, start: virt, end: chunkEnd, operation, freed: &freed)
                 }
             }
             virt = chunkEnd
@@ -378,6 +391,16 @@ struct ArchAspace {
         unsafe UnsafeMutableRawPointer(bitPattern: UInt(KernelLayout.physmap(phys)))!
             .initializeMemory(as: UInt8.self, repeating: 0, count: Int(KernelLayout.pageSize))
         return phys
+    }
+
+    private func freeTables(_ chain: UInt64) {
+        var table = chain
+        while table != 0 {
+            let next = unsafe entries(table).pointee
+            unsafe entries(table).pointee = 0
+            pmm.free(table)
+            table = next
+        }
     }
 
     private func entries(_ table: UInt64) -> UnsafeMutablePointer<UInt64> {

@@ -131,7 +131,7 @@ enum Futexes {
                     insert(fresh)
                     record = fresh
                 }
-                if !Scheduler.setOwner(record.queue, owner) { Scheduler.setOwner(record.queue, nil) }
+                if !Scheduler.setOwner(record.queue, owner, adding: me) { Scheduler.setOwner(record.queue, nil) }
                 Trace.event(CROI_TRACE_FUTEX, UInt16(CROI_TK_FUTEX_WAIT), address,
                             UInt64(owner?.pointee.traceId ?? 0))
                 record.pointee.users += 1

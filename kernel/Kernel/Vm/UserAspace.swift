@@ -556,6 +556,9 @@ struct UserAspace: ~Copyable {
                     }
                 }
             } catch {
+                // What was mapped before the failure goes too (review fix:
+                // the entries outlived the mapping, and the pages its VMO).
+                try? record.pointee.arch.unmap(virt: mapping.base, size: mapping.size)
                 mapping.vmo.removeMapper(record.address)
                 mapping.holder.release()
                 throw error
@@ -644,7 +647,7 @@ extension UserAspacePointer {
             throw error.status
         }
         do throws(Status) {
-            return try pointee.lock.withLock { () throws(Status) -> Mapping in
+            let (fresh, oldHolder) = try pointee.lock.withLock { () throws(Status) -> (Mapping, VmoPointer) in
                 guard !pointee.dead else { throw .badState }
                 for i in 0..<pointee.mappings.count where pointee.mappings[i].base == mapping.base {
                     let old = pointee.mappings[i]
@@ -656,11 +659,13 @@ extension UserAspacePointer {
                     pointee.mapGeneration.add(1, ordering: .releasing)
                     try? pointee.arch.unmap(virt: old.base, size: old.size)
                     old.vmo.removeMapper(address)
-                    old.holder.release()  // the old mapping's
-                    return fresh
+                    child.retain()  // the caller's (review fix: an unmap could free it once we unlock)
+                    return (fresh, old.holder)
                 }
                 throw .notFound
             }
+            oldHolder.release()  // the old mapping's, outside the lock: it may be the last
+            return fresh
         } catch {
             child.release()
             throw error

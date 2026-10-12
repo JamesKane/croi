@@ -7,11 +7,13 @@ extension Syscalls {
         switch number {
         case 90:  // futex_wait(value_ptr, current_value, new_owner thread handle, deadline)
             let owner = try futexOwner(table, UInt32(truncatingIfNeeded: a[2]))
+            defer { if let owner { Scheduler.unpin(owner) } }
             try Futexes.wait(a[0], expected: UInt32(truncatingIfNeeded: a[1]), owner: owner, deadline: a[3])
         case 91:  // futex_wake(value_ptr, count)
             try Futexes.wake(a[0], count: UInt32(truncatingIfNeeded: a[1]))
         case 92:  // futex_requeue(value_ptr, wake_count, current_value, requeue_ptr, requeue_count, owner)
             let owner = try futexOwner(table, UInt32(truncatingIfNeeded: a[5]))
+            defer { if let owner { Scheduler.unpin(owner) } }
             try Futexes.requeue(a[0], wakeCount: UInt32(truncatingIfNeeded: a[1]),
                                 expected: UInt32(truncatingIfNeeded: a[2]), target: a[3],
                                 requeueCount: UInt32(truncatingIfNeeded: a[4]), owner: owner)
@@ -38,13 +40,12 @@ extension Syscalls {
         }
     }
 
-    /// A futex owner from a thread handle (0: none); a thread that isn't
-    /// running has no scheduler thread to lend to, so none either.
+    /// A futex owner from a thread handle (0: none), pinned (the caller
+    /// unpins); a thread that isn't running has no scheduler thread to lend
+    /// to, so none either.
     private static func futexOwner(_ table: borrowing HandleTable, _ handle: UInt32) throws(Status) -> ThreadPointer? {
         guard handle != 0 else { return nil }
         let thread = try table.get(handle, type: .thread)
-        let object = ThreadObjectPointer(object: thread.object)
-        let running = thread.object.header.lock.withLock { object.pointee.thread }
-        return running == 0 ? nil : ThreadPointer(address: running)
+        return Processes.pinnedThread(thread.object)
     }
 }

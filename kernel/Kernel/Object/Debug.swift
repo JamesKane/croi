@@ -178,14 +178,16 @@ enum Debug {
             for i in 0..<record.pointee.mappings.count where record.pointee.mappings[i].contains(address & ~(KernelLayout.pageSize - 1)) {
                 found = record.pointee.mappings[i]
             }
+            found?.vmo.retain()  // under the lock (review fix: an unmap could free it first)
         }
         guard var mapping = found else { throw .notFound }
+        defer { mapping.vmo.release() }
         if write, Vdso.owns(mapping.vmo) { throw .accessDenied }
         if write, !mapping.rights.contains(.write), case .anonymous = mapping.vmo.pointee.kind {
-            mapping = try record.privatize(mapping)
+            let original = mapping.vmo
+            mapping = try record.privatize(mapping)  // retained for us
+            original.release()
         }
-        mapping.vmo.retain()
-        defer { mapping.vmo.release() }
         let vmo = mapping.vmo
         let offset = mapping.offset + (address - mapping.base)
         let end = min(mapping.offset + mapping.size, vmo.pointee.size)

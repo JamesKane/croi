@@ -283,6 +283,11 @@ enum Dma {
                     writable: Bool) throws(Status) -> ObjectPointer {
         let bti = BtiPointer(object: object)
         guard size > 0 else { throw .invalidArgs }
+        // Before paging in (review fix: ensureRange's loop trapped on a
+        // range wrapping past 2^64).
+        guard !offset.addingReportingOverflow(size).overflow, offset + size <= vmo.pointee.size else {
+            throw .outOfRange
+        }
         try Pagers.ensureRange(vmo, offset, size)
         do throws(VmError) {
             try Vmo.withBorrowed(vmo) { (v: borrowing Vmo) throws(VmError) in try v.pin(offset: offset, size: size) }

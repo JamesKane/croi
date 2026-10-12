@@ -4929,6 +4929,95 @@ static int64_t mapping_ceilings(const startup_t *s, uint64_t vdso_base) {
   return 0;
 }
 
+// Review round 1, part 2: what used to panic the kernel or reach freed or
+// live kernel memory now fails cleanly.
+static uint32_t unstarted_thread(const startup_t *s, uint64_t *sp) {
+  uint32_t thread = 0, stack = 0;
+  uint64_t at = 0;
+  CHECK(140, sys(CROI_SYS_VMO_CREATE, STACK_SIZE, 0, (uint64_t)&stack, 0, 0) == 0);
+  CHECK(141, sys(CROI_SYS_VMO_MAP, stack, 0, STACK_SIZE, 3, (uint64_t)&at) == 0);
+  sys(CROI_SYS_HANDLE_CLOSE, stack, 0, 0, 0, 0);
+  CHECK(142, sys6(CROI_SYS_THREAD_CREATE, s->process, (uint64_t)"t", 1, 0, (uint64_t)&thread, 0) == 0);
+  *sp = ENTRY_SP(at + STACK_SIZE);
+  return thread;
+}
+
+typedef struct {
+  uint32_t word, other;
+} futex_cycle_t;
+
+static void futex_cycle_waiter(uint64_t arg) {
+  futex_cycle_t *c = (futex_cycle_t *)arg;
+  sys(CROI_SYS_FUTEX_WAIT, (uint64_t)&c->word, 0, c->other, now_ns() + 50000000ull, 0);
+  sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
+}
+
+static void nap_then_exit(uint64_t ns) {
+  sys(CROI_SYS_NANOSLEEP, now_ns() + ns, 0, 0, 0, 0);
+  sys(CROI_SYS_NANOSLEEP, now_ns() + 1000000, 0, 0, 0, 0);
+  sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
+}
+
+static void timer_setter(uint64_t timer) {
+  for (int i = 0; i < 3000; i++) sys(CROI_SYS_TIMER_SET, timer, now_ns() + 1000000000ull, 0, 0, 0);
+  sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
+}
+
+static int ended(uint32_t thread) {
+  int done = (wait_for(thread, CROI_SIGNAL_TASK_TERMINATED, 3000000000ull) & CROI_SIGNAL_TASK_TERMINATED) != 0;
+  sys(CROI_SYS_HANDLE_CLOSE, thread, 0, 0, 0, 0);
+  return done;
+}
+
+static int64_t review_fixes(const startup_t *s) {
+  // Two futex waits naming each other's thread as owner: the second is a
+  // cycle through its own waiter (inheritance looped until a panic).
+  futex_cycle_t cycle[2] = {{0, 0}, {0, 0}};
+  uint64_t sp0 = 0, sp1 = 0;
+  uint32_t t0 = unstarted_thread(s, &sp0), t1 = unstarted_thread(s, &sp1);
+  cycle[0].other = t1;
+  cycle[1].other = t0;
+  CHECK(689, sys(CROI_SYS_THREAD_START, t0, (uint64_t)futex_cycle_waiter, sp0, (uint64_t)&cycle[0], 0) == 0 &&
+                 sys(CROI_SYS_THREAD_START, t1, (uint64_t)futex_cycle_waiter, sp1, (uint64_t)&cycle[1], 0) == 0 &&
+                 ended(t0) && ended(t1));
+  // A thread suspended before its first entry has no user registers yet
+  // (its kernel stack top was live kernel frames).
+  uint64_t sp = 0;
+  uint32_t parked = unstarted_thread(s, &sp), token = 0;
+  croi_thread_state_general_regs_t regs;
+  CHECK(690, sys(CROI_SYS_TASK_SUSPEND, parked, (uint64_t)&token, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_THREAD_START, parked, (uint64_t)nap_then_exit, sp, 1000, 0) == 0 &&
+                 (wait_for(parked, CROI_THREAD_SUSPENDED, 2000000000ull) & CROI_THREAD_SUSPENDED) &&
+                 sys(CROI_SYS_THREAD_READ_STATE, parked, CROI_THREAD_STATE_GENERAL_REGS, (uint64_t)&regs, sizeof regs,
+                     0) == ERR_BAD_STATE &&
+                 sys(CROI_SYS_THREAD_WRITE_STATE, parked, CROI_THREAD_STATE_GENERAL_REGS, (uint64_t)&regs,
+                     sizeof regs, 0) == ERR_BAD_STATE);
+  sys(CROI_SYS_HANDLE_CLOSE, token, 0, 0, 0, 0);
+  CHECK(690, ended(parked));
+  // Offsets that wrap past 2^64: out of range, not a trap.
+  uint32_t vmo = 0, slice = 0;
+  CHECK(691, sys(CROI_SYS_VMO_CREATE, 2 * PAGE, 0, (uint64_t)&vmo, 0, 0) == 0 &&
+                 sys(CROI_SYS_VMO_CREATE_CHILD, vmo, CROI_VMO_CHILD_SLICE, PAGE, PAGE, (uint64_t)&slice) == 0 &&
+                 sys6(CROI_SYS_VMO_OP_RANGE, slice, CROI_VMO_OP_COMMIT, 0ull - PAGE, 0, 0, 0) == ERR_OUT_OF_RANGE);
+  sys(CROI_SYS_HANDLE_CLOSE, slice, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, vmo, 0, 0, 0, 0);
+  CHECK(692, sys6(CROI_SYS_TRACE_CONFIGURE, s->resource, CROI_TRACE_OP_START, 0, 1ull << 63, 0, 0) == ERR_INVALID_ARGS);
+  // A 2 s budget every 10 s, waking with budget left (its CBS products
+  // passed 2^64).
+  uint32_t profile = 0, napper = 0, refusal = 0;
+  CHECK(693, deadline_profile(s->resource, 2000000000ll, 10000000000ll, 10000000000ll, &profile) == 0 &&
+                 (napper = start_thread(s, nap_then_exit, 20000000)) != 0 &&
+                 sys(CROI_SYS_OBJECT_SET_PROFILE, napper, profile, 0, (uint64_t)&refusal, 0) == 0 && ended(napper));
+  sys(CROI_SYS_HANDLE_CLOSE, profile, 0, 0, 0, 0);
+  // Two threads setting one timer at once (both armed its node: a panic).
+  uint32_t timer = 0;
+  CHECK(694, sys(CROI_SYS_TIMER_CREATE, 0, 0, (uint64_t)&timer, 0, 0) == 0);
+  uint32_t a = start_thread(s, timer_setter, timer), b = start_thread(s, timer_setter, timer);
+  CHECK(694, ended(a) && ended(b));
+  sys(CROI_SYS_HANDLE_CLOSE, timer, 0, 0, 0, 0);
+  return 0;
+}
+
 static uint64_t pac_sign(uint64_t value, uint64_t modifier) {
 #if defined(__aarch64__)
   register uint64_t x17 __asm__("x17") = value;
@@ -5137,6 +5226,8 @@ static int64_t extensions(const startup_t *s, uint64_t vdso_base) {
   if (zeroed != 0) return zeroed;
   int64_t ceilings = mapping_ceilings(s, vdso_base);
   if (ceilings != 0) return ceilings;
+  int64_t fixes = review_fixes(s);
+  if (fixes != 0) return fixes;
   int64_t signedPointers = pointer_auth(s);
   if (signedPointers != 0) return signedPointers;
   int64_t guardedCode = guarded_pages(s);

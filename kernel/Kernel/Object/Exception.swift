@@ -489,7 +489,9 @@ enum Exceptions {
             if t.pointee.exceptionFrame != 0 { return t.pointee.exceptionFrame }
             if t.pointee.inException { throw .notSupported }  // THREAD_EXITING: no registers (Zircon's)
             guard t.pointee.suspended, t.pointee.thread != 0 else { return 0 }
-            return UInt64(UInt(bitPattern: unsafe UserTraps.userFrame(of: ThreadPointer(address: t.pointee.thread))))
+            let scheduled = ThreadPointer(address: t.pointee.thread)  // alive: exit clears `thread` under this lock
+            guard scheduled.pointee.enteredUser else { return 0 }  // parked before its first entry: no frame yet
+            return UInt64(UInt(bitPattern: unsafe UserTraps.userFrame(of: scheduled)))
         }
         guard let frame = unsafe UnsafeMutablePointer<arch_exception_frame_t>(bitPattern: UInt(address)) else {
             throw .badState

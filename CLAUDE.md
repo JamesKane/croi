@@ -204,6 +204,11 @@ User address spaces and VMOs (K4a, Kernel/Vm/):
   faulting context's interrupt state, so a CPU waiting for the aspace
   lock still answers the holder's TLB shootdown (it deadlocked masked).
   `vm` trace category: fault (resolved or refused) and commit records.
+- Review round 1, part 2 (VM): `ArchAspace.unmap` chains emptied tables
+  through their first entry (a page address, never present) and frees
+  them after `flushOthers`; a failed eager map in `insert` unmaps what it
+  mapped; `process_read_memory` retains the VMO under the aspace lock and
+  `privatize` returns its child retained.
 - Mapping ceilings (review round 1): each `Mapping` keeps `ceiling`, the
   rights it may ever have (vmar_map: the VMO handle's read/write/execute;
   kernel mappings: what they were mapped with; a `sharedReadOnly` VMO:
@@ -2106,6 +2111,18 @@ admitted threads never migrate. CPU capacity defaults from the core type
 service's call). `reserve(cpu:tag:)` (ext 8). Each CPU publishes
 `powerHints` (wake-latency bound, frequency floor) for KP. `frame` intent
 (ext 10) is stored only.
+
+Thread pins (review round 1): code that reads a thread object's `thread`
+under its lock and uses it after (futex owners, object_set_profile,
+overrun ports, timeline alignment) takes `Processes.pinnedThread`, which
+pins the record (`Scheduler.pin`, under the object lock: exit clears
+`thread` under it first); the reaper leaves a pinned zombie to the last
+`unpin`. `dropOwnership` marks the thread `exiting`, and `setOwner`
+refuses exiting or dead owners and (futex waits) a chain through the
+waiter itself (`adding:`): two waits naming each other looped inheritance
+into a panic. `Thread.enteredUser` (set just before `arch_enter_user`)
+gates register access to a suspended thread: one parked in
+`UserTraps.enter` has only kernel frames at its stack top (BAD_STATE).
 
 Priority inheritance (K3b, with K3c's profiles): a `QueueHead` with an
 `owner` is an owned wait queue. Its waiters lend their effective profile to

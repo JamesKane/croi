@@ -48,16 +48,21 @@ extension Syscalls {
             let infos = number == 214
             let entry = infos ? MemoryLayout<croi_handle_info_t>.size : 4
             let capacity = (bytes: UInt32(truncatingIfNeeded: a[4]), handles: UInt32(truncatingIfNeeded: a[4] >> 32))
-            let size = try Channels.peek(channel.object)
-            try put(UInt64(size.bytes) | UInt64(size.handles) << 32, a[5])
-            guard size.bytes <= capacity.bytes, size.handles <= capacity.handles else {
-                if a[1] != 0, let dropped = try? Channels.read(channel.object) { dropped.free() }
-                throw .bufferTooSmall
+            // The message read is the one whose size was checked (another
+            // reader may take it meanwhile: then peek again).
+            var taken: MessagePointer? = nil
+            while taken == nil {
+                let size = try Channels.peek(channel.object)
+                try put(UInt64(size.bytes) | UInt64(size.handles) << 32, a[5])
+                guard size.bytes <= capacity.bytes, size.handles <= capacity.handles else {
+                    if a[1] != 0, let dropped = Channels.discard(channel.object, ifLargerThan: capacity) { dropped.free() }
+                    throw .bufferTooSmall
+                }
+                if size.bytes > 0 { try check(a[2], Int(size.bytes)) }
+                if size.handles > 0 { try check(a[3], Int(size.handles) * entry) }
+                taken = try Channels.read(channel.object, ifFits: size)
             }
-            if size.bytes > 0 { try check(a[2], Int(size.bytes)) }
-            if size.handles > 0 { try check(a[3], Int(size.handles) * entry) }
-            let message = try Channels.read(channel.object)
-            try deliver(message, to: table, bytes: a[2], handles: a[3], infos: infos)
+            try deliver(taken!, to: table, bytes: a[2], handles: a[3], infos: infos)
         case 213:  // channel_write_etc(channel, options, bytes, num_bytes, dispositions, num_handles), K13e
             let channel: ObjectRef
             do throws(Status) {

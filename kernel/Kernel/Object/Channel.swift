@@ -360,19 +360,35 @@ enum Channels {
         }
     }
 
-    /// Takes the next message. A call becomes owned by the reading thread
+    /// Takes the next message if it fits `limit` (the sizes the reader
+    /// checked its buffers for), else nil: another reader took the one it
+    /// peeked (review fix: it then copied a bigger message into the
+    /// smaller buffers). A call becomes owned by the reading thread
     /// (donation) until its reply.
-    static func read(_ object: ObjectPointer) throws(Status) -> MessagePointer {
+    static func read(_ object: ObjectPointer, ifFits limit: (bytes: UInt32, handles: UInt32)) throws(Status)
+        -> MessagePointer? {
+        try take(object) { bytes, handles in bytes <= limit.bytes && handles <= limit.handles }
+    }
+
+    /// The next message if it doesn't fit `capacity` (MAY_DISCARD), else nil.
+    static func discard(_ object: ObjectPointer, ifLargerThan capacity: (bytes: UInt32, handles: UInt32)) -> MessagePointer? {
+        (try? take(object) { bytes, handles in bytes > capacity.bytes || handles > capacity.handles }) ?? nil
+    }
+
+    private static func take(_ object: ObjectPointer, _ accept: (UInt32, UInt32) -> Bool) throws(Status)
+        -> MessagePointer? {
         let me = ChannelPointer(object: object)
-        let message = try me.pointee.shared.pointee.lock.withLock { () throws(Status) -> MessagePointer in
+        let taken = try me.pointee.shared.pointee.lock.withLock { () throws(Status) -> MessagePointer? in
             guard me.pointee.head != 0 else { throw me.pointee.peer == 0 ? .peerClosed : .shouldWait }
             let first = MessagePointer(address: me.pointee.head)
+            guard accept(first.pointee.bytes, first.pointee.handles) else { return nil }
             me.pointee.head = first.pointee.next
             if me.pointee.head == 0 { me.pointee.tail = 0 }
             me.pointee.queued -= 1
             first.pointee.next = 0
             return first
         }
+        guard let message = taken else { return nil }
         if me.pointee.head == 0 { object.updateSignals(clear: CROI_SIGNAL_READABLE, set: 0) }
         Trace.event(CROI_TRACE_IPC, UInt16(CROI_TK_CHANNEL_READ), message.pointee.flow,
                     UInt64(message.pointee.bytes) | UInt64(message.pointee.handles) << 32)

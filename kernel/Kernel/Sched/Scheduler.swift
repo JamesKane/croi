@@ -883,12 +883,18 @@ enum Scheduler {
     /// caller waits on such a queue, owned by the server that received
     /// the call until it replies. Refused (false) if it would close a
     /// cycle. Lock held.
+    /// `adding` is a thread about to wait on `queue` (a futex waiter, not
+    /// yet on it): a chain through it is a cycle too (review fix: two
+    /// futex waits naming each other looped inheritance until a panic).
+    /// An exiting or dead owner is refused.
     @discardableResult
-    static func setOwner(_ queue: QueuePointer, _ owner: ThreadPointer?) -> Bool {
+    static func setOwner(_ queue: QueuePointer, _ owner: ThreadPointer?, adding: ThreadPointer? = nil) -> Bool {
         if let owner {
+            guard !owner.pointee.exiting, owner.pointee.state != .dead else { return false }
             var cursor: ThreadPointer? = owner
             for _ in 0..<1024 {
                 guard let thread = cursor else { break }
+                if thread == adding { return false }
                 var waiter = queue.pointee.head
                 while let w = waiter {
                     if w == thread { return false }
@@ -937,6 +943,7 @@ enum Scheduler {
     static func dropOwnership() {
         locked {
             let me = cpus[Int(Cpu.current)].current!
+            me.pointee.exiting = true
             while let queue = me.pointee.ownedQueues {
                 removeOwned(queue, from: me)
             }
@@ -1079,6 +1086,7 @@ enum Scheduler {
                              affinity: UInt64?) {
         let owned = context?.leak()
         let old = locked { () -> SchedContextPointer? in
+            guard thread.pointee.state != .dead else { return owned }  // exited while pinned: nothing to apply
             if let affinity, affinity & allCpus != 0 { thread.pointee.affinity = affinity & allCpus }
             if weight != nil || owned != nil {
                 giveBackForChange(thread)
@@ -1214,7 +1222,8 @@ enum Scheduler {
     /// replaced (0 if none); nil if the thread has no such context.
     static func bindOverrunSource(_ thread: ThreadPointer, _ source: UInt64) -> UInt64? {
         locked { () -> UInt64? in
-            guard let context = thread.pointee.profileContext, context.pointee.profile.discipline == .deadline else {
+            guard thread.pointee.state != .dead, let context = thread.pointee.profileContext,
+                  context.pointee.profile.discipline == .deadline else {
                 return nil
             }
             let old = context.pointee.overrunSource
@@ -1412,7 +1421,8 @@ enum Scheduler {
     /// deadline context of its own.
     static func align(_ thread: ThreadPointer, page: UInt64, timeline: UInt64) -> (aligned: Bool, replaced: UInt64) {
         locked { () -> (Bool, UInt64) in
-            guard let context = thread.pointee.context, context.pointee.profile.discipline == .deadline else {
+            guard thread.pointee.state != .dead, let context = thread.pointee.context,
+                  context.pointee.profile.discipline == .deadline else {
                 return (false, 0)
             }
             let old = context.pointee.alignTimeline
@@ -1432,13 +1442,20 @@ enum Scheduler {
 
     /// The CBS wakeup rule: keep the current period's budget only if using
     /// it before the deadline wouldn't exceed the reserved utilization.
+    /// a x b > c x d without overflow (review fix: a 2 s budget in a 10 s
+    /// period made 2e19, past UInt64).
+    private static func exceedsShare(_ a: UInt64, _ b: UInt64, _ c: UInt64, _ d: UInt64) -> Bool {
+        let left = a.multipliedFullWidth(by: b), right = c.multipliedFullWidth(by: d)
+        return left.high != right.high ? left.high > right.high : left.low > right.low
+    }
+
     private static func replenishOnWake(_ thread: ThreadPointer, _ now: UInt64) {
         let params = thread.pointee.effective.params
         let deadline = thread.pointee.absoluteDeadline
         if thread.pointee.remaining <= 0 {
             if now >= thread.pointee.periodStart + params.period { startPeriod(thread, now) } else { nextPeriod(thread, now) }
         } else if now >= deadline
-                    || UInt64(thread.pointee.remaining) * params.period > (deadline - now) * params.capacity {
+                    || exceedsShare(UInt64(thread.pointee.remaining), params.period, deadline - now, params.capacity) {
             startPeriod(thread, now)
         }
     }
@@ -1955,11 +1972,32 @@ enum Scheduler {
     }
 
     /// Frees dead detached threads. Not with the lock held.
+    /// Keeps `thread`'s record from being freed until `unpin` (review fix).
+    /// Its holder must know it is alive: its thread object's lock held,
+    /// with the object's `thread` still set (exit clears it under that lock).
+    static func pin(_ thread: ThreadPointer) {
+        locked { thread.pointee.pins += 1 }
+    }
+
+    static func unpin(_ thread: ThreadPointer) {
+        locked {
+            thread.pointee.pins -= 1
+            if thread.pointee.pins == 0, thread.pointee.reapPending {
+                thread.pointee.reapPending = false
+                zombies.push(thread)
+            }
+        }
+    }
+
     static func reapZombies() {
         while true {
             let saved = arch_interrupts_save()
             lock.lockMasked()
-            let zombie = zombies.pop()
+            var zombie = zombies.pop()
+            while let pinned = zombie, pinned.pointee.pins > 0 {  // the last unpin queues it again
+                pinned.pointee.reapPending = true
+                zombie = zombies.pop()
+            }
             lock.unlockMasked()
             arch_interrupts_restore(saved)
             guard let zombie else { return }

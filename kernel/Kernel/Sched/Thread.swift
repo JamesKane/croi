@@ -139,6 +139,19 @@ struct Thread: ~Copyable {
     var interruptible = false
     /// The futex record it waits on (moved by requeue), or 0.
     var futex: UInt64 = 0
+    /// Review fix: code holding this record's address past its thread
+    /// object's lock (a futex owner, a profile target) pins it
+    /// (`Scheduler.pin`); the reaper leaves a pinned zombie to the last
+    /// `unpin` (`reapPending`). Under the scheduler lock.
+    var pins = 0
+    var reapPending = false
+    /// Set by `dropOwnership` on its way out: it may own nothing again.
+    var exiting = false
+    /// Its kernel stack top holds its user registers from here on (set as
+    /// it first enters user mode). Before, a thread parked suspended in
+    /// `UserTraps.enter` has only live kernel frames there (review fix:
+    /// thread_read/write_state read and wrote them).
+    var enteredUser = false
     /// Its name in trace records: task << 12 | thread; kernel threads are
     /// task 0, idle threads 0.
     var traceId: UInt32 = 0

@@ -843,22 +843,20 @@ THREAD, VMO, maps, handle table) and the NAME property.
   default (`croi.ppb.loan=off`). Requirement 3's pool no longer holds
   memory idle.
 - **Review round 1 (2026-10-12): adversarial review, seven readers by
-  area.** Fixed so far: mapping ceilings for vmar_protect (the vDSO and
+  area.** Part 1: mapping ceilings for vmar_protect (the vDSO and
   read-only handles' mappings could be made writable), syscall 6 gated to
-  test boots, ranged-root ranges that wrap. Open, by severity:
-  - high: thread_read/write_state on a thread parked before its first
-    user entry reads/writes live kernel stack (Exception.swift `frame`);
-    emptied page tables freed before the remote shootdown (amd64/rv64,
-    ArchAspace `update`); channel_read's capacity checked on a `peek`
-    separate from the `read` (two readers overflow the buffer); futex
-    owner and object_set_profile use a ThreadPointer after the object
-    lock (thread may exit); process_read_memory retains the VMO after
-    the aspace lock; a failed eager map leaves PTEs with no Mapping;
-    concurrent timer_set arms a node twice (panic); futex owner cycles
-    through the caller aren't refused (panic); traps on user arithmetic:
-    trace_configure `Int(a[3])`, vmo_op_range on a slice (`offset +
-    shift`), CBS rule products (10 s periods), bti_pin on a pager VMO.
-  - medium: READABLE cleared outside the channel lock; handle object and
+  test boots, ranged-root ranges that wrap. Part 2 (checks 689-694, each
+  but the channel and table fixes seen to fail without its fix): register
+  access to a thread parked before its first user entry (live kernel
+  stack), emptied page tables freed only after the remote shootdown,
+  channel_read takes only a message that fits what it checked, thread
+  records pinned while futex/profile code uses them, process_read_memory
+  retains under the lock, a failed eager map unmaps what it mapped,
+  timer_set under one lock, futex cycles through the waiter refused,
+  wrapping or 64-bit-overflowing arithmetic in trace_configure, slice
+  op_range, the CBS rule and bti_pin. Not a bug after all: READABLE
+  (Channels' read re-checks after clearing). Open, by severity:
+  - medium: handle object and
     rights read in two lookups; channel_call txids collide when both ends
     call; futex records leak when a timed-out waiter named an owner;
     SMMU registers grantable before the first iommu_create; no caps on

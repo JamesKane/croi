@@ -49,10 +49,16 @@ enum TimerObjects {
     /// places it. Replaces any earlier set.
     static func set(_ object: ObjectPointer, deadline: UInt64, slack: UInt64) {
         let timer = TimerObjectPointer(object: object)
+        // One hold of `configuring` from the cancel to the arm (review fix:
+        // two sets could both cancel, then both arm the node: a panic).
         configure(timer) {
             cancelArmed(timer)
+            object.updateSignals(clear: Signals.signaled, set: 0)
+            arm(timer, object, deadline: deadline, slack: slack)
         }
-        object.updateSignals(clear: Signals.signaled, set: 0)
+    }
+
+    private static func arm(_ timer: TimerObjectPointer, _ object: ObjectPointer, deadline: UInt64, slack: UInt64) {
         let width = Scheduler.effectiveProfile(of: Scheduler.current).discipline == .deadline ? 0 : slack
         let start: UInt64, window: UInt64
         switch timer.pointee.slackPolicy {
@@ -63,13 +69,11 @@ enum TimerObjects {
                                ? .max : 2 * width)
         }
         object.retain()  // the armed kernel timer's
-        configure(timer) {
-            object.header.lock.withLock {
-                timer.pointee.generation += 1
-                Timers.arm(timer.node, deadline: start, slack: window, fired, object.address,
-                           context: timer.pointee.generation)
-                timer.pointee.armedCpu = Int(Cpu.current)
-            }
+        object.header.lock.withLock {
+            timer.pointee.generation += 1
+            Timers.arm(timer.node, deadline: start, slack: window, fired, object.address,
+                       context: timer.pointee.generation)
+            timer.pointee.armedCpu = Int(Cpu.current)
         }
     }
 

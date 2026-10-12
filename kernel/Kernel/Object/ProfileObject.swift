@@ -90,10 +90,10 @@ enum Profiles {
             }
             let thread = try table.get(UInt32(truncatingIfNeeded: a[0]), type: .thread, rights: .manageThread)
             let port = try table.get(UInt32(truncatingIfNeeded: a[1]), type: .port, rights: .write)
-            let address = thread.object.header.lock.withLock { ThreadObjectPointer(object: thread.object).pointee.thread }
-            guard address != 0 else { throw .badState }
+            guard let target = Processes.pinnedThread(thread.object) else { throw .badState }
+            defer { Scheduler.unpin(target) }
             let source = try PacketSourcePointer.make(port: port, key: a[2], type: PortPacket.budgetOverrun)
-            guard let old = Scheduler.bindOverrunSource(ThreadPointer(address: address), source.address) else {
+            guard let old = Scheduler.bindOverrunSource(target, source.address) else {
                 source.retire()
                 throw .badState
             }
@@ -156,10 +156,10 @@ enum Profiles {
     /// Ext 10: the thread's deadline periods start on `timeline`'s vblanks.
     /// BAD_STATE if the profile just applied gave it no deadline context.
     static func align(_ thread: ObjectPointer, to timeline: ObjectPointer) throws(Status) {
-        let address = thread.header.lock.withLock { ThreadObjectPointer(object: thread).pointee.thread }
-        guard address != 0 else { throw .badState }
+        guard let target = Processes.pinnedThread(thread) else { throw .badState }
+        defer { Scheduler.unpin(target) }
         timeline.retain()  // the context's
-        let (aligned, old) = Scheduler.align(ThreadPointer(address: address),
+        let (aligned, old) = Scheduler.align(target,
                                              page: TimelinePointer(object: timeline).pointee.pageAddress,
                                              timeline: timeline.address)
         if old != 0 { ObjectPointer(address: old).release() }
@@ -190,9 +190,8 @@ enum Profiles {
 
     /// Applies `profile` to the thread object `thread` (running).
     static func apply(_ profile: ProfileObjectPointer, to thread: ObjectPointer, refusal: inout UInt32) throws(Status) {
-        let address = thread.header.lock.withLock { ThreadObjectPointer(object: thread).pointee.thread }
-        guard address != 0 else { throw .badState }  // not started, or gone
-        let scheduled = ThreadPointer(address: address)
+        guard let scheduled = Processes.pinnedThread(thread) else { throw .badState }  // not started, or gone
+        defer { Scheduler.unpin(scheduled) }
         let flags = profile.pointee.flags
         let mask: UInt64? = profile.pointee.cpuMask != 0 ? profile.pointee.cpuMask : nil
         if flags & UInt32(CROI_PROFILE_INFO_FLAG_DEADLINE) != 0 {
