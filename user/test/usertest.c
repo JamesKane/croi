@@ -475,6 +475,16 @@ static int64_t child(uint32_t self, uint64_t submode, uint64_t vdso) {
     sys(CROI_SYS_OBJECT_WAIT_ONE, a, CROI_SIGNAL_READABLE, ~0ull, (uint64_t)&observed, 0);  // until killed
     return 89;
   }
+  case 11: {  // K14s: exit with this process's PAC signature of a fixed value
+#if defined(__aarch64__)
+    register uint64_t x17 __asm__("x17") = 0x0000000001234560ull;
+    register uint64_t x16 __asm__("x16") = 7;
+    __asm__ volatile("hint #8" : "+r"(x17) : "r"(x16));  // pacia1716
+    return sys(CROI_SYS_PROCESS_EXIT, (int64_t)x17, 0, 0, 0, 0);
+#else
+    return sys(CROI_SYS_PROCESS_EXIT, 0x0000000001234560ll, 0, 0, 0, 0);
+#endif
+  }
   case 9: {  // in a job with reserved CPUs: exit with the CPUs it ran on
     uint64_t seen = 0;
     for (int i = 0; i < 300; i++) {
@@ -4895,15 +4905,44 @@ static int64_t zero_intervals(const startup_t *s) {
 // K14p: user code's pointer authentication key isn't the kernel's. User
 // code signs a value with PACIA1716 (hint-space: unchanged where PAC is off)
 // and asks the kernel for its own key's signature of the same value.
-static int64_t pointer_auth(void) {
+static uint64_t pac_sign(uint64_t value, uint64_t modifier) {
 #if defined(__aarch64__)
-  const uint64_t value = 0x0000000001234560ull, modifier = 7;
   register uint64_t x17 __asm__("x17") = value;
   register uint64_t x16 __asm__("x16") = modifier;
   __asm__ volatile("hint #8" : "+r"(x17) : "r"(x16));  // pacia1716
+  return x17;
+#else
+  (void)modifier;
+  return value;
+#endif
+}
+
+static void pac_signer(uint64_t out) {
+  *(volatile uint64_t *)out = pac_sign(0x0000000001234560ull, 7);
+  sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
+}
+
+static int64_t pointer_auth(const startup_t *s) {
+#if defined(__aarch64__)
+  const uint64_t value = 0x0000000001234560ull, modifier = 7;
+  uint64_t mine = pac_sign(value, modifier);
   uint64_t kernel = (uint64_t)sys6(CROI_SYS_TEST_PROFILE, 11, value, modifier, 0, 0, 0);
   if (kernel == value) return 0;  // PAC off (croi.pac=off, or not implemented)
-  CHECK(676, x17 != value && x17 != kernel);
+  CHECK(676, mine != value && mine != kernel);
+  // K14s: a key per process: another thread of ours signs alike, a child
+  // process differently (its exit code is its signature).
+  volatile uint64_t theirs = 0;
+  uint32_t thread = start_thread(s, pac_signer, (uint64_t)&theirs);
+  uint32_t child = spawn_child(s, s->job, 11);
+  CHECK(684, (wait_for(thread, CROI_SIGNAL_TASK_TERMINATED, 3000000000ull) & CROI_SIGNAL_TASK_TERMINATED));
+  CHECK(685, theirs == mine);
+  CHECK(683, (wait_terminated(child) & CROI_SIGNAL_TASK_TERMINATED) &&
+                 (uint64_t)return_code(child) != mine && (uint64_t)return_code(child) != value &&
+                 (uint64_t)return_code(child) != kernel);
+  sys(CROI_SYS_HANDLE_CLOSE, thread, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, child, 0, 0, 0, 0);
+#else
+  (void)s;
 #endif
   return 0;
 }
@@ -5072,7 +5111,7 @@ static int64_t extensions(const startup_t *s) {
   if (unbound != 0) return unbound;
   int64_t zeroed = zero_intervals(s);
   if (zeroed != 0) return zeroed;
-  int64_t signedPointers = pointer_auth();
+  int64_t signedPointers = pointer_auth(s);
   if (signedPointers != 0) return signedPointers;
   int64_t guardedCode = guarded_pages(s);
   if (guardedCode != 0) return guardedCode;

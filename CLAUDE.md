@@ -2216,11 +2216,16 @@ Pointer authentication, arm64 (K14p; Main.swift `PointerAuth`, cpu.S
 built with -mbranch-protection=pac-ret (kernel/CMakeLists.txt), so every
 non-leaf function signs its return address with the APIA key and checks
 it before returning (paciasp/autiasp: hint space, NOPs without PAuth or
-with it off). One random kernel key per boot on every CPU and another for
-user space, chosen before `arch_continue_on_stack`; the key registers
-serve EL0 and EL1 alike, so entry from EL0 loads the kernel's
-(`arch_pac_load_kernel_key`, before any signed code) and every return to
-EL0 the user's (`arch_pac_load_user_key`, also in `arch_enter_user`).
+with it off). One random kernel key per boot on every CPU, chosen before
+`arch_continue_on_stack`, and one per process (K14s: random in its
+`UserAspaceRecord`, `pacKeyLo/Hi`); the key registers serve EL0 and EL1
+alike, so entry from EL0 loads the kernel's (`arch_pac_load_kernel_key`,
+before any signed code) and every return to EL0 the running process's
+(`arch_pac_load_user_key`, also in `arch_enter_user`), read from the
+CPU's `croi_percpu_arch_t` (CROI_PERCPU_PAC_USER), where the scheduler
+copies it at each switch to a user thread and in `setAspace` (a new
+thread takes its address space after the switch to it: the first version
+missed that, and a second thread signed with the previous process's key).
 SCTLR_EL1.EnIA is set only on paths that never return through an earlier
 frame (`arch_pac_enable` in `arch_continue_on_stack` and before
 `kernel_ap_main`): a function entered before it would fail its own check.
@@ -2229,10 +2234,12 @@ with no handler). Kernel stack walks strip the signatures
 (`arch_pac_strip`, XPACLRI; qemu-monitor.py does the same by bit 55); a
 failure with FEAT_FPAC is EC 0x1C, "pointer authentication failure".
 `croi.pac=off`, or no address authentication (ID_AA64ISAR1/2): unsigned.
-The boot self-test checks signing and that the keys differ; mode 17's
-check 676 that user code's signature isn't the kernel's (it failed with
-the return path's key load removed). User programs aren't built with it
-(their own choice; the user key is per boot, not per process).
+The boot self-test checks signing and that another key signs differently;
+mode 17's check 676 that user code's signature isn't the kernel's (it
+failed with the return path's key load removed), 683-685 that another
+thread of the process signs alike and a child process differently (683
+failed with one key for every process). User programs aren't built with
+pac-ret (their own choice).
 
 Branch target identification, arm64 (K14q; Main.swift `BranchTargets`,
 cpu.S `arch_bti_*`, PageTableFormat `guardedKernelText`): built with

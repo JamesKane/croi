@@ -1685,7 +1685,10 @@ enum Scheduler {
         loadPkru(next.pointee.pkru, me)
         switchUserTls(from: current, to: next, me)
         if next.pointee.debugState != 0 || cpus[me].debugLoaded { HardwareDebug.switchTo(next, loaded: &cpus[me].debugLoaded) }
-        if let aspace = next.pointee.aspace { IoPorts.switched(to: aspace, me) }
+        if let aspace = next.pointee.aspace {
+            IoPorts.switched(to: aspace, me)
+            loadPacKey(aspace)
+        }
         setKernelStack(next.pointee.stack.top)
         Sampler.switched(to: next)
         Pmu.switched(from: current, to: next)
@@ -2135,7 +2138,19 @@ enum Scheduler {
             }
             thread.pointee.pkru = aspace == nil ? 0 : Jit.defaultUserPkru
             loadPkru(thread.pointee.pkru, me)
+            if let aspace { loadPacKey(aspace) }  // a new thread's first entry
         }
+    }
+
+    /// arm64 (K14s): `aspace`'s pointer authentication key, for this CPU's
+    /// next return to EL0 (cpu.S `arch_pac_load_user_key`). At each switch
+    /// to a user thread and when a thread takes its address space.
+    private static func loadPacKey(_ aspace: UserAspacePointer) {
+        #if arch(arm64)
+        let percpu = unsafe UnsafeMutablePointer<PerCpu>(bitPattern: UInt(arch_percpu()))!
+        unsafe percpu.pointee.arch.pac_user_lo = aspace.pointee.pacKeyLo
+        unsafe percpu.pointee.arch.pac_user_hi = aspace.pointee.pacKeyHi
+        #endif
     }
 
     /// Opens or closes writes to JIT key `key` for the running thread only

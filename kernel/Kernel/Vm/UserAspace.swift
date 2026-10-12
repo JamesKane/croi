@@ -103,6 +103,10 @@ struct UserAspaceRecord: ~Copyable {
     let asid: UInt64
     let lock = SpinLock()
     var mappings = UniqueArray<Mapping>()
+    /// arm64 (K14s): this process's own pointer authentication key (APIA),
+    /// random at creation; each CPU loads it at returns to EL0 of its threads.
+    var pacKeyLo: UInt64 = 0
+    var pacKeyHi: UInt64 = 0
     /// Bumped (under the lock) whenever `mappings` changes: a thread's
     /// cached out-pointer check is good while it is unchanged (K14m).
     let mapGeneration = Atomic<UInt64>(0)
@@ -177,6 +181,10 @@ struct UserAspace: ~Copyable {
             .initialize(to: UserAspaceRecord(arch: arch, asid: Asids.allocate()))
         record = UserAspacePointer(address: UInt64(UInt(bitPattern: raw)))
         record.pointee.arch.owner = record.address  // shootdowns reach its active CPUs only
+        #if arch(arm64)
+        record.pointee.pacKeyLo = Random.word()  // K14s: one key per process
+        record.pointee.pacKeyHi = Random.word()
+        #endif
         UserAspaces.live.add(1, ordering: .relaxed)
     }
 

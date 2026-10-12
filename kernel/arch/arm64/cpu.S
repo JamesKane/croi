@@ -1159,6 +1159,8 @@ arch_debug_write:
     ret
 .size arch_debug_write, . - arch_debug_write
 
+#include "stack.h"
+
 // Pointer authentication (K14p): return addresses signed with the APIA key
 // (the kernel is built with -mbranch-protection=pac-ret; paciasp/autiasp
 // are hint-space, so NOPs where PAC isn't implemented or enabled). The key
@@ -1179,7 +1181,7 @@ arch_debug_write:
 arch_pac_load_kernel_key:
     adrp    x9, croi_pac_keys
     add     x9, x9, :lo12:croi_pac_keys
-    ldr     w10, [x9, #32]
+    ldr     w10, [x9, #16]
     cbz     w10, 1f
     ldp     x10, x11, [x9, #0]
     msr     APIAKEYLO_EL1, x10
@@ -1193,14 +1195,25 @@ arch_pac_load_kernel_key:
 arch_pac_load_user_key:
     adrp    x9, croi_pac_keys
     add     x9, x9, :lo12:croi_pac_keys
-    ldr     w10, [x9, #32]
+    ldr     w10, [x9, #16]
     cbz     w10, 1f
-    ldp     x10, x11, [x9, #16]
+    mrs     x9, tpidr_el1                       // this CPU's PerCpu: the running
+    ldp     x10, x11, [x9, #CROI_PERCPU_PAC_USER] // process's key (K14s)
     msr     APIAKEYLO_EL1, x10
     msr     APIAKEYHI_EL1, x11
     isb
 1:  ret
 .size arch_pac_load_user_key, . - arch_pac_load_user_key
+
+// void arch_pac_set_key(uint64_t lo, uint64_t hi)
+.globl arch_pac_set_key
+.type arch_pac_set_key, %function
+arch_pac_set_key:
+    msr     APIAKEYLO_EL1, x0
+    msr     APIAKEYHI_EL1, x1
+    isb
+    ret
+.size arch_pac_set_key, . - arch_pac_set_key
 
 // void arch_pac_enable(void): this CPU on the kernel's key with
 // SCTLR_EL1.EnIA set, if croi_pac_keys.enabled. Only from a path that never
@@ -1214,7 +1227,7 @@ arch_pac_enable:
     mov     x30, x12
     adrp    x9, croi_pac_keys
     add     x9, x9, :lo12:croi_pac_keys
-    ldr     w10, [x9, #32]
+    ldr     w10, [x9, #16]
     cbz     w10, 1f
     mrs     x10, sctlr_el1
     orr     x10, x10, #(1 << 31)        // EnIA
@@ -1253,7 +1266,7 @@ arch_pac_sign:
 .balign 16
 .globl croi_pac_keys
 croi_pac_keys:
-    .skip   40
+    .skip   24
 
 // uint64_t arch_pac_strip(uint64_t pointer): the pointer without its PAC
 // (XPACLRI on x30; a NOP, the pointer as it was, without PAuth). For

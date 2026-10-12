@@ -18,6 +18,7 @@
 #define CROI_PERCPU_KERNEL_SP 16       // the running thread's kernel stack top (user entry)
 #define CROI_PERCPU_USER_SP 24         // scratch: the user sp at entry (amd64 syscall, rv64)
 #define CROI_PERCPU_TSS 32             // amd64: this CPU's TSS (RSP0 at offset 4)
+#define CROI_PERCPU_PAC_USER 40        // arm64: the running process's APIA key (lo, hi; K14s)
 
 #ifndef __ASSEMBLER__
 #include <stdint.h>
@@ -28,5 +29,6 @@ typedef struct {
   uint64_t kernel_sp;
   uint64_t user_sp;
   uint64_t tss;
+  uint64_t pac_user_lo, pac_user_hi;  // arm64 (K14s): loaded on every return to EL0
 } croi_percpu_arch_t;
 #endif

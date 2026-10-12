@@ -195,9 +195,10 @@ enum BranchTargets {
 /// address with the APIA key on entry and authenticates it before
 /// returning; a return address overwritten on the stack fails (a fault with
 /// FEAT_FPAC, else a non-canonical address). One random kernel key per boot
-/// on every CPU (threads migrate), another for user space, swapped at each
-/// entry from and return to EL0 (cpu.S), so user code can't sign with the
-/// kernel's. `croi.pac=off`, or no address authentication: unsigned (the
+/// on every CPU (threads migrate), and one per process (K14s: in its
+/// address space, copied to the CPU at each switch to its threads), swapped
+/// at each entry from and return to EL0 (cpu.S), so user code can sign with
+/// neither the kernel's key nor another process's. `croi.pac=off`, or no address authentication: unsigned (the
 /// hint-space instructions are NOPs).
 enum PointerAuth {
     nonisolated(unsafe) private(set) static var enabled = false
@@ -206,20 +207,19 @@ enum PointerAuth {
         guard arch_pac_supported() != 0, !BootOptions.has("croi.pac=off") else { return }
         unsafe croi_pac_keys.kernel_lo = Random.word()
         unsafe croi_pac_keys.kernel_hi = Random.word()
-        unsafe croi_pac_keys.user_lo = Random.word()
-        unsafe croi_pac_keys.user_hi = Random.word()
         unsafe croi_pac_keys.enabled = 1
         enabled = true
     }
 
-    /// Signing changes a pointer, and the two keys sign it differently
-    /// (the user key loaded for the moment, interrupts masked).
+    /// Signing changes a pointer, and another key (a random one, as a
+    /// process gets: loaded for the moment, interrupts masked) signs it
+    /// differently.
     static func selfTest() -> Bool {
         let pointer = kernel_image_start() + 0x40, modifier: UInt64 = 0x1234
         let kernel = arch_pac_sign(pointer, modifier)
         guard enabled else { return kernel == pointer }
         let saved = arch_interrupts_save()
-        arch_pac_load_user_key()
+        arch_pac_set_key(Random.word(), Random.word())
         let user = arch_pac_sign(pointer, modifier)
         arch_pac_load_kernel_key()
         arch_interrupts_restore(saved)
@@ -261,7 +261,7 @@ func kernel_main_continue() -> Never {
         guard BranchTargets.selfTest() else { panic("bti self-test: a stray branch wasn't refused") }
         console.write(BranchTargets.enabled ? "  branch: kernel text guarded (BTI), a stray indirect branch refused\n"
                                             : "  branch: BTI off (croi.bti=off, or no FEAT_BTI)\n")
-        console.write(PointerAuth.enabled ? "  pac:    return addresses signed (APIA), user and kernel keys apart\n"
+        console.write(PointerAuth.enabled ? "  pac:    return addresses signed (APIA), a key per process and the kernel's apart\n"
                                           : "  pac:    off (croi.pac=off, or no address authentication)\n")
         #endif
     }
