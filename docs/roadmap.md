@@ -897,6 +897,14 @@ THREAD, VMO, maps, handle table) and the NAME property.
     re-checks the claim under the lock it stores with. The AP MDCR_EL2
     edit first broke every arm64 boot: its numeric label caught an
     earlier `1f` that skips the EL2 drop (named labels there now).
+  - Bench (2026-10-12, `--compare 78abca6`, 5 interleaved KVM boots,
+    load ~3): every median within noise (channel_call 1198 vs 1197 ns,
+    port wake 1639 vs 1804, counter wake 1589 vs 1569, timeline wake
+    4448 vs 4500, irq wait wake 4740 vs 4690, null syscall 55 vs 66,
+    spawn to main 77 vs 93 us). The p99s moved both ways inside
+    spreads that reach 100+ us on single boots (not enforced). Accepted:
+    boot.userboot_start_selftests +4% (3.40 vs 3.28 s), the review's 16
+    new mode 17 checks; self-tests only.
   - left, as Zircon does or unverified: NMI/#MC still choose GS from the
     saved CS (no paranoid entry; NMIs are fatal); REMAP_IRQ resources
     checked against the ISA number; iommu_create's reserved ranges
