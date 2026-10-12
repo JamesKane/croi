@@ -328,7 +328,7 @@ enum Syscalls {
         case 44:  // vmo_get_size(vmo, out)
             try check(a[1], MemoryLayout<UInt64>.size)
             let ref = try table.get(handle, type: .vmo)
-            try put(VmoPointer(address: UnsafeVmoObject(ref.object).vmo).pointee.size, a[1])
+            try put(VmoPointer(address: UnsafeVmoObject(ref.object).vmo).sizeOwner.pointee.size, a[1])  // K14g: a reference's is its root's
         case 43:  // vmo_map (into the thread's address space, until VMARs)
             var rights = VmRights()
             if a[3] & 1 != 0 { rights.insert(.read) }
@@ -513,15 +513,18 @@ enum Syscalls {
     private static func vmoCopy(_ table: borrowing HandleTable, _ handle: UInt32, user: UInt64, offset: UInt64,
                                 length: UInt64, toUser: Bool) throws(Status) {
         let ref = try table.get(handle, type: .vmo, rights: toUser ? .read : .write)
-        let vmo = VmoPointer(address: UnsafeVmoObject(ref.object).vmo)
+        let holder = VmoPointer(address: UnsafeVmoObject(ref.object).vmo)
+        // K14g: an alias's pages are its root's, from its offset there.
+        let (vmo, shift) = holder.target
         // Device memory isn't in the physmap; an uncached VMO's pages
         // would be read through a cached alias (Zircon: BAD_STATE).
         guard vmo.inPhysmap else { throw .notSupported }
         guard vmo.pointee.cache == .cached else { throw .badState }
-        guard offset <= vmo.pointee.size, length <= vmo.pointee.size - offset else { throw .outOfRange }
+        let size = holder.sizeOwner.pointee.size
+        guard offset <= size, length <= size - offset else { throw .outOfRange }
         var done: UInt64 = 0
         while done < length {
-            let at = offset + done
+            let at = shift + offset + done
             // A pager's page (K13d): requested and waited for, with the
             // rest of the copy as read-ahead.
             if toUser {

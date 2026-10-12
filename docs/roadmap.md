@@ -842,6 +842,16 @@ THREAD, VMO, maps, handle table) and the NAME property.
   ALWAYS_NEED) and their eviction when a lender wants its page. On by
   default (`croi.ppb.loan=off`). Requirement 3's pool no longer holds
   memory idle.
+- **K14g: the other VMO child kinds.** **Done** (2026-10-12): SNAPSHOT
+  (copied at creation), SNAPSHOT_MODIFIED (a full snapshot, or under a
+  pager the child's own pages copied and the rest read through), slices
+  of anonymous VMOs and REFERENCE children (aliases sharing their root's
+  pages; references share its sizes and resize it), in Zircon's order of
+  checks; clones of anonymous VMOs refuse pinned pages and slices, as
+  Zircon's do. Slices of slices count as the slice's children (they were
+  the root's). Fixed on the way: a child's first touch copied its
+  parent's page after dropping the parent's lock, so a concurrent
+  decommit could hand it a freed page.
 - **K14e: scheduling-context handoff on interrupt wakeup (ext 5).**
   **Done** (2026-10-11): object_set_profile with CROI_PROFILE_HANDOFF on
   an interrupt admits a deadline context the object owns; the thread
@@ -903,9 +913,8 @@ from Zircon, see docs/zircon-divergences.md.
   governor and the frequency floor: KP, which needs the power service).
 
 **Zircon pieces not yet in croi**
-- VM (eviction and reclaim came in K14a): UNBOUNDED VMOs, SNAPSHOT
-  (isolated), REFERENCE and
-  SNAPSHOT_MODIFIED children, slices of anonymous VMOs.
+- VM (eviction and reclaim came in K14a, the other child kinds in K14g):
+  UNBOUNDED VMOs.
 - IOB, restricted mode, membarrier, the ktrace/sampler syscalls (croi has
   its own).
 

@@ -69,7 +69,13 @@ extension Syscalls {
         guard offset % page == 0, size % page == 0, count <= 64 * page / 8 else { throw .invalidArgs }
         let vmo = try table.get(vmoHandle, type: .vmo, rights: .map)
         let vmoRights = try table.rights(of: vmoHandle)
-        let record = VmoPointer(address: UnsafeVmoObject(vmo.object).vmo)
+        let holder = VmoPointer(address: UnsafeVmoObject(vmo.object).vmo)
+        // K14g: an alias pins its root's pages, inside its own window.
+        let (record, shift) = holder.target
+        if record != holder, holder.pointee.slice,
+           offset.addingReportingOverflow(size).overflow || offset + size > holder.pointee.size {
+            throw .invalidArgs  // as the VMO's own range check
+        }
 
         var remaining = options
         if remaining & UInt32(CROI_BTI_PERM_READ) != 0 {
@@ -103,7 +109,7 @@ extension Syscalls {
         try check(a[4], Int(count) * 8)
         try check(a[5], MemoryLayout<UInt32>.size)
 
-        let pmt = try Dma.pin(bti.object, vmo: record, offset: offset, size: size,
+        let pmt = try Dma.pin(bti.object, vmo: record, offset: offset + shift, size: size,
                               writable: options & UInt32(CROI_BTI_PERM_WRITE) != 0)
         do throws(Status) {
             for i in 0..<count {

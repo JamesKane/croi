@@ -131,7 +131,7 @@ extension VmoPointer {
             // Grown space is zeros nobody is asked for (K13h).
             return offset >= pointee.lock.withLock({ pointee.pagerZeroFrom }) ? nil : (self, offset)
         }
-        guard let parent = pointee.parent else { return nil }
+        guard offset < pointee.parentLimit, let parent = pointee.parent else { return nil }  // K14g
         return parent.pagerGap(at: pointee.parentOffset + offset)
     }
 

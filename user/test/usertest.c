@@ -4369,8 +4369,8 @@ static int64_t vmo_slices(const startup_t *s) {
   uint32_t observed = 0, slice = 0, deeper = 0, ro = 0, ro_slice = 0, nw_slice = 0, anon = 0, bad = 0;
   uint32_t zero = CROI_VMO_ZERO_CHILDREN, slice_option = CROI_VMO_CHILD_SLICE;
   CHECK(430, sys(CROI_SYS_OBJECT_WAIT_ONE, parent, zero, 0, (uint64_t)&observed, 0) == 0 && (observed & zero));
-  CHECK(431, sys(CROI_SYS_VMO_CREATE, PAGE, 0, (uint64_t)&anon, 0, 0) == 0 &&
-                 vmo_child(anon, slice_option, 0, PAGE, &bad) == ERR_NOT_SUPPORTED &&
+  CHECK(431, sys(CROI_SYS_VMO_CREATE, PAGE, CROI_VMO_CREATE_RESIZABLE, (uint64_t)&anon, 0, 0) == 0 &&
+                 vmo_child(anon, slice_option, 0, PAGE, &bad) == ERR_NOT_SUPPORTED &&  // resizable (K14g)
                  vmo_child(parent, slice_option | CROI_VMO_CHILD_SNAPSHOT_AT_LEAST_ON_WRITE, 0, PAGE, &bad) ==
                      ERR_INVALID_ARGS &&
                  vmo_child(parent, slice_option, 8, PAGE, &bad) == ERR_INVALID_ARGS &&
@@ -4384,8 +4384,8 @@ static int64_t vmo_slices(const startup_t *s) {
                  sys6(CROI_SYS_VMAR_MAP, s->vmar | (uint64_t)CROI_VM_PERM_READ << 32, 0, slice, 0, PAGE,
                       (uint64_t)&at) == 0 &&
                  *(volatile uint32_t *)at == *(volatile uint32_t *)(whole + 0x8000));
-  // A slice of the slice is one of the parent; neither side's cache policy
-  // can change now.
+  // A slice of the slice is one of the parent (counted as the slice's
+  // child, K14g); neither side's cache policy can change now.
   CHECK(433, vmo_child(slice, slice_option, 0, PAGE, &deeper) == 0 &&
                  sys6(CROI_SYS_VMAR_MAP, s->vmar | (uint64_t)CROI_VM_PERM_READ << 32, 0, deeper, 0, PAGE,
                       (uint64_t)&deep_at) == 0 &&
@@ -4442,11 +4442,10 @@ static int64_t vmo_children(void) {
   if (sys(CROI_SYS_VMO_WRITE, parent, (uint64_t)&byte, 0, 1, 0) != 0) return 410;
   byte = 'C';
   if (sys(CROI_SYS_VMO_WRITE, parent, (uint64_t)&byte, 2 * P, 1, 0) != 0) return 410;
-  // Refusals: no type, unknown bits, kinds not yet, an unaligned offset.
+  // Refusals: no type, unknown bits, an unaligned offset (the other kinds:
+  // K14g's child_kinds).
   if (sys(CROI_SYS_VMO_CREATE_CHILD, parent, 0, 0, P, (uint64_t)&other) != ERR_INVALID_ARGS ||
       sys(CROI_SYS_VMO_CREATE_CHILD, parent, 1u << 9, 0, P, (uint64_t)&other) != ERR_INVALID_ARGS ||
-      sys(CROI_SYS_VMO_CREATE_CHILD, parent, CROI_VMO_CHILD_SNAPSHOT, 0, P, (uint64_t)&other) != ERR_NOT_SUPPORTED ||
-      sys(CROI_SYS_VMO_CREATE_CHILD, parent, CROI_VMO_CHILD_SLICE, 0, P, (uint64_t)&other) != ERR_NOT_SUPPORTED ||
       sys(CROI_SYS_VMO_CREATE_CHILD, parent, CROI_VMO_CHILD_SNAPSHOT_AT_LEAST_ON_WRITE, 100, P, (uint64_t)&other) !=
           ERR_INVALID_ARGS)
     return 411;
@@ -4498,6 +4497,183 @@ static int64_t vmo_children(void) {
   if (byte != 'C') return 422;
   uint32_t handles[] = {parent, child, grand, ro};
   for (int i = 0; i < 4; i++) sys(CROI_SYS_HANDLE_CLOSE, handles[i], 0, 0, 0, 0);
+  return 0;
+}
+
+// K14g: the other child kinds. Bytes read and written through vmo_read /
+// vmo_write (-1 on failure).
+static int vmo_byte(uint32_t vmo, uint64_t offset) {
+  uint8_t byte = 0;
+  return sys(CROI_SYS_VMO_READ, vmo, (uint64_t)&byte, offset, 1, 0) == 0 ? byte : -1;
+}
+
+static int vmo_put(uint32_t vmo, uint64_t offset, uint8_t byte) {
+  return sys(CROI_SYS_VMO_WRITE, vmo, (uint64_t)&byte, offset, 1, 0) == 0;
+}
+
+static int64_t child_kinds(const startup_t *s) {
+  uint32_t parent = 0, snap = 0, aow = 0, chain = 0, bad = 0, iommu = 0, bti = 0, pmt = 0, contig = 0;
+  uint64_t counts[2] = {0, 0}, addr = 0;
+  uint8_t desc = 0;
+  croi_info_vmo_t v;
+  // SNAPSHOT of an anonymous VMO: what the parent shows now, isolated both
+  // ways; a clone of the parent with its pages, decommit refused.
+  CHECK(650, sys(CROI_SYS_VMO_CREATE, 3 * PAGE, 0, (uint64_t)&parent, 0, 0) == 0 && vmo_put(parent, 0, 'A') &&
+                 vmo_put(parent, 2 * PAGE, 'C') &&
+                 vmo_child(parent, CROI_VMO_CHILD_SNAPSHOT, 0, 4 * PAGE, &snap) == 0 && vmo_byte(snap, 0) == 'A' &&
+                 vmo_put(parent, 0, 'B') && vmo_byte(snap, 0) == 'A' && vmo_put(snap, 2 * PAGE, 'X') &&
+                 vmo_byte(parent, 2 * PAGE) == 'C' &&
+                 get_info(snap, CROI_INFO_VMO, &v, sizeof v, counts) == 0 && (v.flags & CROI_INFO_VMO_IS_COW_CLONE) &&
+                 v.parent_koid == koid_of(parent) && v.committed_bytes == 2 * PAGE && vmo_byte(snap, 3 * PAGE) == 0 &&
+                 sys6(CROI_SYS_VMO_OP_RANGE, snap, CROI_VMO_OP_DECOMMIT, 0, PAGE, 0, 0) == ERR_NOT_SUPPORTED);
+  // Through an at-least-on-write child: the parent's later writes show in
+  // the child, not in a snapshot of it. Mapped, the snapshot faults in its
+  // own copies.
+  uint64_t at = 0;
+  CHECK(651, vmo_child(parent, CROI_VMO_CHILD_SNAPSHOT_AT_LEAST_ON_WRITE, 0, 3 * PAGE, &aow) == 0 &&
+                 vmo_child(aow, CROI_VMO_CHILD_SNAPSHOT, 0, 3 * PAGE, &chain) == 0 && vmo_put(parent, 0, 'D') &&
+                 vmo_byte(aow, 0) == 'D' && vmo_byte(chain, 0) == 'B' &&
+                 sys6(CROI_SYS_VMAR_MAP, s->vmar | (uint64_t)(CROI_VM_PERM_READ | CROI_VM_PERM_WRITE) << 32, 0, chain, 0,
+                      3 * PAGE, (uint64_t)&at) == 0 &&
+                 *(volatile uint8_t *)(at + 2 * PAGE) == 'C' && (*(volatile uint8_t *)at = 'Y') == 'Y' &&
+                 vmo_byte(aow, 0) == 'D' && vmo_byte(parent, 0) == 'D' &&
+                 sys(CROI_SYS_VMAR_UNMAP, s->vmar, at, 3 * PAGE, 0, 0) == 0 && vmo_byte(chain, 0) == 'Y');
+  // Refused: pinned pages (BAD_STATE, every kind of an anonymous VMO, as
+  // Zircon's), a contiguous VMO (INVALID_ARGS), a pager VMO (full only);
+  // SNAPSHOT_MODIFIED of an anonymous VMO is a full snapshot.
+  uint32_t pg = 0, port = 0, paged = 0, aux = 0, cow = 0, mod = 0, pmod = 0;
+  CHECK(652, sys(CROI_SYS_IOMMU_CREATE, s->resource, CROI_IOMMU_TYPE_STUB, (uint64_t)&desc, 1, (uint64_t)&iommu) == 0 &&
+                 sys(CROI_SYS_BTI_CREATE, iommu, 0, 0, (uint64_t)&bti, 0) == 0 &&
+                 bti_pin(bti, CROI_BTI_PERM_READ, parent, 1, PAGE, PAGE, &addr, &pmt) == 0 &&
+                 vmo_child(parent, CROI_VMO_CHILD_SNAPSHOT, 0, PAGE, &bad) == ERR_BAD_STATE &&
+                 vmo_child(parent, CROI_VMO_CHILD_SNAPSHOT_AT_LEAST_ON_WRITE, 0, PAGE, &bad) == ERR_BAD_STATE &&
+                 sys(CROI_SYS_PMT_UNPIN, pmt, 0, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_VMO_CREATE_CONTIGUOUS, bti, PAGE, 0, (uint64_t)&contig, 0) == 0 &&
+                 vmo_child(contig, CROI_VMO_CHILD_SNAPSHOT, 0, PAGE, &bad) == ERR_INVALID_ARGS &&
+                 vmo_child(contig, CROI_VMO_CHILD_REFERENCE, 0, 0, &bad) == ERR_NOT_SUPPORTED &&
+                 vmo_child(parent, CROI_VMO_CHILD_SNAPSHOT | CROI_VMO_CHILD_SLICE, 0, PAGE, &bad) == ERR_INVALID_ARGS &&
+                 vmo_child(parent, CROI_VMO_CHILD_SNAPSHOT_MODIFIED, 0, PAGE, &mod) == 0 && vmo_put(parent, 0, 'E') &&
+                 vmo_byte(mod, 0) == 'D');
+  // Under a pager: SNAPSHOT refused; SNAPSHOT_MODIFIED of the pager VMO
+  // reads through; of a child, the child's own pages are snapshotted and
+  // the rest still read through to the pager VMO.
+  CHECK(653, sys(CROI_SYS_PAGER_CREATE, 0, (uint64_t)&pg, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_PORT_CREATE, 0, (uint64_t)&port, 0, 0, 0) == 0 &&
+                 sys6(CROI_SYS_PAGER_CREATE_VMO, pg, 0, port, 93, 2 * PAGE, (uint64_t)&paged) == 0 &&
+                 sys(CROI_SYS_VMO_CREATE, 2 * PAGE, 0, (uint64_t)&aux, 0, 0) == 0 && vmo_put(aux, 0, 'p') &&
+                 vmo_put(aux, PAGE, 'q') && sys6(CROI_SYS_PAGER_SUPPLY_PAGES, pg, paged, 0, 2 * PAGE, aux, 0) == 0 &&
+                 vmo_child(paged, CROI_VMO_CHILD_SNAPSHOT, 0, PAGE, &bad) == ERR_NOT_SUPPORTED &&
+                 vmo_child(paged, CROI_VMO_CHILD_SNAPSHOT_MODIFIED, 0, 2 * PAGE, &pmod) == 0 &&
+                 vmo_byte(pmod, PAGE) == 'q' &&
+                 vmo_child(paged, CROI_VMO_CHILD_SNAPSHOT_AT_LEAST_ON_WRITE, 0, 2 * PAGE, &cow) == 0 &&
+                 vmo_put(cow, 0, 'M') && vmo_child(cow, CROI_VMO_CHILD_SNAPSHOT_MODIFIED, 0, 2 * PAGE, &bad) == 0 &&
+                 vmo_put(cow, 0, 'N') && vmo_byte(bad, 0) == 'M' && vmo_byte(bad, PAGE) == 'q' &&
+                 get_info(bad, CROI_INFO_VMO, &v, sizeof v, counts) == 0 && v.parent_koid == koid_of(cow) &&
+                 vmo_child(cow, CROI_VMO_CHILD_SNAPSHOT, 0, PAGE, &snap) == ERR_NOT_SUPPORTED);
+  sys(CROI_SYS_HANDLE_CLOSE, bad, 0, 0, 0, 0);
+  uint32_t closing[] = {chain, aow, mod, pmod, cow, paged, aux, port, pg, contig, bti, iommu};
+  for (int i = 0; i < 12; i++) sys(CROI_SYS_HANDLE_CLOSE, closing[i], 0, 0, 0, 0);
+
+  // A slice of an anonymous VMO: its pages, from the offset, both ways, by
+  // syscall and by mapping; its size; nothing attributed to it; the
+  // parent's ZERO_CHILDREN cleared while it lives.
+  uint32_t big = 0, slice = 0, deeper = 0, observed = 0, zero = CROI_VMO_ZERO_CHILDREN;
+  uint64_t size = 0, mapped = 0;
+  CHECK(654, sys(CROI_SYS_VMO_CREATE, 4 * PAGE, 0, (uint64_t)&big, 0, 0) == 0 && vmo_put(big, PAGE, 'S') &&
+                 vmo_child(big, CROI_VMO_CHILD_SLICE, PAGE, 2 * PAGE, &slice) == 0 && vmo_byte(slice, 0) == 'S' &&
+                 vmo_put(slice, PAGE + 5, 'T') && vmo_byte(big, 2 * PAGE + 5) == 'T' &&
+                 sys(CROI_SYS_VMO_GET_SIZE, slice, (uint64_t)&size, 0, 0, 0) == 0 && size == 2 * PAGE &&
+                 vmo_byte(slice, 2 * PAGE) == -1 &&
+                 sys6(CROI_SYS_VMAR_MAP, s->vmar | (uint64_t)(CROI_VM_PERM_READ | CROI_VM_PERM_WRITE) << 32, 0, slice, 0,
+                      2 * PAGE, (uint64_t)&mapped) == 0 &&
+                 *(volatile uint8_t *)mapped == 'S' && (*(volatile uint8_t *)(mapped + PAGE) = 'U') == 'U' &&
+                 vmo_byte(big, 2 * PAGE) == 'U' && vmo_put(big, PAGE + 1, 'V') &&
+                 *(volatile uint8_t *)(mapped + 1) == 'V' &&
+                 sys6(CROI_SYS_VMAR_MAP, s->vmar | (uint64_t)CROI_VM_PERM_READ << 32, 0, slice, 0, 3 * PAGE,
+                      (uint64_t)&at) != 0 &&
+                 get_info(slice, CROI_INFO_VMO, &v, sizeof v, counts) == 0 && v.committed_bytes == 0 &&
+                 !(v.flags & CROI_INFO_VMO_IS_COW_CLONE) && v.parent_koid == koid_of(big) && v.size_bytes == 2 * PAGE &&
+                 sys(CROI_SYS_OBJECT_WAIT_ONE, big, zero, 0, (uint64_t)&observed, 0) == ERR_TIMED_OUT);
+  // Decommit and ZERO through it reach the parent's pages (and the
+  // mapping); a slice of it is the parent's at the summed offset, counted
+  // as the slice's child.
+  // (The decommitted page is taken by another VMO first: a mapping left
+  // on it would read that VMO's byte.)
+  uint32_t spare = 0;
+  CHECK(655, sys6(CROI_SYS_VMO_OP_RANGE, slice, CROI_VMO_OP_DECOMMIT, 0, PAGE, 0, 0) == 0 &&
+                 sys(CROI_SYS_VMO_CREATE, PAGE, 0, (uint64_t)&spare, 0, 0) == 0 && vmo_put(spare, 0, 'J') &&
+                 *(volatile uint8_t *)mapped == 0 && vmo_byte(big, PAGE) == 0 &&
+                 sys(CROI_SYS_HANDLE_CLOSE, spare, 0, 0, 0, 0) == 0 &&
+                 sys6(CROI_SYS_VMO_OP_RANGE, slice, CROI_VMO_OP_ZERO, PAGE, 4, 0, 0) == 0 &&
+                 vmo_byte(big, 2 * PAGE) == 0 && vmo_byte(big, 2 * PAGE + 5) == 'T' &&
+                 vmo_child(slice, CROI_VMO_CHILD_SLICE, PAGE, PAGE, &deeper) == 0 && vmo_byte(deeper, 5) == 'T' &&
+                 sys(CROI_SYS_OBJECT_WAIT_ONE, slice, zero, 0, (uint64_t)&observed, 0) == ERR_TIMED_OUT &&
+                 sys(CROI_SYS_HANDLE_CLOSE, deeper, 0, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_OBJECT_WAIT_ONE, slice, zero, now_ns() + 1000000000ull, (uint64_t)&observed, 0) == 0);
+  // Refused through a slice: snapshots of it (an anonymous one, Zircon's),
+  // a reference, a window past it; the parent's cache policy is fixed.
+  uint32_t grow = 0;
+  CHECK(656, vmo_child(slice, CROI_VMO_CHILD_SNAPSHOT_AT_LEAST_ON_WRITE, 0, PAGE, &bad) == ERR_NOT_SUPPORTED &&
+                 vmo_child(slice, CROI_VMO_CHILD_SNAPSHOT, 0, PAGE, &bad) == ERR_NOT_SUPPORTED &&
+                 vmo_child(slice, CROI_VMO_CHILD_REFERENCE, 0, 0, &bad) == ERR_NOT_SUPPORTED &&
+                 vmo_child(slice, CROI_VMO_CHILD_SLICE, PAGE, 2 * PAGE, &bad) == ERR_INVALID_ARGS &&
+                 vmo_child(big, CROI_VMO_CHILD_SLICE, 100, PAGE, &bad) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_VMO_SET_CACHE_POLICY, big, CROI_CACHE_POLICY_UNCACHED, 0, 0, 0) == ERR_BAD_STATE &&
+                 sys(CROI_SYS_VMO_CREATE, PAGE, CROI_VMO_CREATE_RESIZABLE, (uint64_t)&grow, 0, 0) == 0 &&
+                 vmo_child(grow, CROI_VMO_CHILD_SLICE, 0, PAGE, &bad) == ERR_NOT_SUPPORTED);
+  // The parent's handle goes; the slice (and its mapping) keep the pages.
+  CHECK(657, sys(CROI_SYS_HANDLE_CLOSE, big, 0, 0, 0, 0) == 0 && vmo_byte(slice, PAGE + 5) == 'T' &&
+                 (*(volatile uint8_t *)mapped = 'W') == 'W' && vmo_byte(slice, 0) == 'W' &&
+                 sys(CROI_SYS_VMAR_UNMAP, s->vmar, mapped, 2 * PAGE, 0, 0) == 0 &&
+                 sys(CROI_SYS_HANDLE_CLOSE, slice, 0, 0, 0, 0) == 0);
+
+  // REFERENCE: the whole VMO, its pages and sizes, under its own koid.
+  // Refusals in Zircon's order; RESIZABLE needs the parent resizable and
+  // its handle's RESIZE; resizing the reference resizes the parent.
+  uint32_t ref = 0, weak = 0, rref = 0, rsnap = 0;
+  uint32_t no_resize = 1u << 0 | 1u << 1 | 1u << 2 | 1u << 3 | 1u << 5 | 1u << 14 | 1u << 15;
+  CHECK(658, vmo_child(grow, CROI_VMO_CHILD_REFERENCE, PAGE, 0, &bad) == ERR_INVALID_ARGS &&
+                 vmo_child(grow, CROI_VMO_CHILD_REFERENCE, 0, PAGE, &bad) == ERR_INVALID_ARGS &&
+                 vmo_child(grow, CROI_VMO_CHILD_REFERENCE | CROI_VMO_CHILD_NO_WRITE | CROI_VMO_CHILD_RESIZABLE, 0, 0,
+                           &bad) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_HANDLE_DUPLICATE, grow, no_resize, (uint64_t)&weak, 0, 0) == 0 &&
+                 vmo_child(weak, CROI_VMO_CHILD_REFERENCE | CROI_VMO_CHILD_RESIZABLE, 0, 0, &bad) == ERR_ACCESS_DENIED_ &&
+                 vmo_child(weak, CROI_VMO_CHILD_REFERENCE, 0, 0, &ref) == 0 &&
+                 vmo_child(grow, CROI_VMO_CHILD_REFERENCE | CROI_VMO_CHILD_RESIZABLE, 0, 0, &rref) == 0 &&
+                 vmo_put(grow, 7, 'R') && vmo_byte(ref, 7) == 'R' && vmo_put(rref, 8, 'Q') && vmo_byte(grow, 8) == 'Q' &&
+                 koid_of(ref) != koid_of(grow) && sys(CROI_SYS_VMO_SET_SIZE, ref, 3 * PAGE, 0, 0, 0) ==
+                     ERR_ACCESS_DENIED_ &&
+                 sys(CROI_SYS_VMO_SET_SIZE, rref, 3 * PAGE, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_VMO_GET_SIZE, grow, (uint64_t)&size, 0, 0, 0) == 0 && size == 3 * PAGE &&
+                 sys(CROI_SYS_VMO_GET_SIZE, ref, (uint64_t)&size, 0, 0, 0) == 0 && size == 3 * PAGE &&
+                 vmo_put(ref, 2 * PAGE, 'G') && vmo_byte(grow, 2 * PAGE) == 'G');
+  // The stream size is shared; a snapshot through a reference is of the
+  // parent, counted as the reference's child; info names the parent.
+  uint64_t content = 100;
+  CHECK(659, sys(CROI_SYS_VMO_SET_STREAM_SIZE, grow, 100, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_VMO_GET_STREAM_SIZE, ref, (uint64_t)&content, 0, 0, 0) == 0 && content == 100 &&
+                 sys(CROI_SYS_VMO_SET_STREAM_SIZE, rref, 50, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_VMO_GET_STREAM_SIZE, grow, (uint64_t)&content, 0, 0, 0) == 0 && content == 50 &&
+                 vmo_child(ref, CROI_VMO_CHILD_SNAPSHOT, 0, PAGE, &rsnap) == 0 && vmo_byte(rsnap, 7) == 'R' &&
+                 sys(CROI_SYS_OBJECT_WAIT_ONE, ref, zero, 0, (uint64_t)&observed, 0) == ERR_TIMED_OUT &&
+                 get_info(rsnap, CROI_INFO_VMO, &v, sizeof v, counts) == 0 && v.parent_koid == koid_of(ref) &&
+                 get_info(ref, CROI_INFO_VMO, &v, sizeof v, counts) == 0 && v.parent_koid == koid_of(grow) &&
+                 v.committed_bytes == 0 && (v.flags & CROI_INFO_VMO_RESIZABLE) && v.size_bytes == 3 * PAGE);
+  // A stream over a slice: its own stream size, its parent's pages.
+  uint32_t window = 0, st = 0;
+  uint64_t actual = 0;
+  croi_iovec_t hello = {(void *)"hello", 5};
+  CHECK(660, vmo_child(grow, CROI_VMO_CHILD_SLICE, PAGE, PAGE, &window) == ERR_NOT_SUPPORTED &&
+                 sys(CROI_SYS_VMO_CREATE, 2 * PAGE, 0, (uint64_t)&big, 0, 0) == 0 &&
+                 vmo_child(big, CROI_VMO_CHILD_SLICE, PAGE, PAGE, &window) == 0 &&
+                 sys(CROI_SYS_VMO_SET_STREAM_SIZE, window, 0, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_STREAM_CREATE, CROI_STREAM_MODE_WRITE, window, 0, (uint64_t)&st, 0) == 0 &&
+                 sys(CROI_SYS_STREAM_WRITEV, st, 0, (uint64_t)&hello, 1, (uint64_t)&actual) == 0 && actual == 5 &&
+                 vmo_byte(big, PAGE + 4) == 'o' &&
+                 sys(CROI_SYS_VMO_GET_STREAM_SIZE, window, (uint64_t)&content, 0, 0, 0) == 0 && content == 5 &&
+                 sys(CROI_SYS_VMO_GET_STREAM_SIZE, big, (uint64_t)&content, 0, 0, 0) == 0 && content == 2 * PAGE);
+  uint32_t last[] = {st, window, big, rsnap, ref, rref, weak, grow, snap, parent};
+  for (int i = 0; i < 10; i++) sys(CROI_SYS_HANDLE_CLOSE, last[i], 0, 0, 0, 0);
   return 0;
 }
 
@@ -4611,6 +4787,8 @@ static int64_t extensions(const startup_t *s) {
   if (children != 0) return children;
   int64_t slices = vmo_slices(s);
   if (slices != 0) return slices;
+  int64_t kinds = child_kinds(s);
+  if (kinds != 0) return kinds;
   int64_t fifos = fifos_and_exec(s);
   if (fifos != 0) return fifos;
   int64_t socks = sockets(s);

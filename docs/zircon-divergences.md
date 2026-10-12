@@ -94,10 +94,19 @@ matches the pinned tree where upstream docs or expectations say otherwise).
   least on write"; no hidden nodes); DECOMMIT on a child is NOT_SUPPORTED
   and ZERO writes zeros into a copy. Kind: deliberate. Impact: more memory
   for read-mostly children.
-- **Other child kinds** — SNAPSHOT (isolated), REFERENCE and
-  SNAPSHOT_MODIFIED are NOT_SUPPORTED; snapshots of physical or contiguous
-  VMOs NOT_SUPPORTED; SLICE of an anonymous VMO NOT_SUPPORTED (Zircon has
-  them). Kind: not yet. Impact: code relying on those child types.
+- **Full snapshots copy at creation** (K14g) — SNAPSHOT (and
+  SNAPSHOT_MODIFIED wherever Zircon makes it a full snapshot) copies every
+  page the parent shows in range when the child is created; Zircon moves
+  them into a hidden node both sides share until written. Contents and
+  isolation are the same; the copy costs memory and time up front, and a
+  write racing the creation may land in the snapshot on one page and not
+  on another (Zircon's is atomic). The parent itself stays a plain VMO,
+  so it can still DECOMMIT (Zircon's parent, now under a hidden node,
+  can't). Kind: deliberate (no hidden nodes). Impact: memory for large
+  snapshots that are mostly never written; racy writers only.
+- **Aliases' mapping counts** (K14g) — ZX_INFO_VMO's num_mappings for a
+  slice or reference of an anonymous VMO is 0: mappings of it are listed
+  on its root. Kind: simplification. Impact: diagnostics only.
 - **arm64 UNCACHED** — vmo_set_cache_policy maps UNCACHED and
   UNCACHED_DEVICE both as device memory, so arm64 gets Device-nGnRE where
   Zircon uses Device-nGnRnE for UNCACHED. Kind: deliberate. Impact: arm64

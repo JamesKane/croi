@@ -167,13 +167,16 @@ extension Syscalls {
                                    size: UInt64, buffer: UInt64, bufferSize: UInt64) throws(Status) {
         let ref = try table.get(handle, type: .vmo)
         let rights = try table.rights(of: handle)
-        let record = VmoPointer(address: UnsafeVmoObject(ref.object).vmo)
+        let holder = VmoPointer(address: UnsafeVmoObject(ref.object).vmo)
+        // K14g: an alias's pages are its root's, from its offset there.
+        let (record, shift) = holder.target
+        let at = offset + shift
         let page = KernelLayout.pageSize
         func need(_ right: Rights) throws(Status) {
             guard rights.contains(right) else { throw .accessDenied }
         }
         func inRange() throws(Status) {
-            guard !offset.addingReportingOverflow(size).overflow, offset + size <= record.pointee.size else {
+            guard !offset.addingReportingOverflow(size).overflow, offset + size <= holder.sizeOwner.pointee.size else {
                 throw .outOfRange
             }
         }
@@ -183,7 +186,7 @@ extension Syscalls {
             try need(op == UInt32(CROI_VMO_OP_COMMIT) ? .write : .read)
             try inRange()
             guard size > 0 else { return }
-            let start = offset & ~(page - 1), end = (offset + size + page - 1) & ~(page - 1)
+            let start = at & ~(page - 1), end = (at + size + page - 1) & ~(page - 1)
             try Pagers.ensureRange(record, start, end - start)
             try vm { () throws(VmError) in
                 try Vmo.withBorrowed(record) { (vmo: borrowing Vmo) throws(VmError) in
@@ -204,7 +207,7 @@ extension Syscalls {
             guard size > 0 else { return }
             try vm { () throws(VmError) in
                 try Vmo.withBorrowed(record) { (vmo: borrowing Vmo) throws(VmError) in
-                    try vmo.decommit(offset: offset, size: size)
+                    try vmo.decommit(offset: at, size: size)
                 }
             }
             return
@@ -212,11 +215,11 @@ extension Syscalls {
             try need(.write)
             try inRange()
             guard record.inPhysmap else { throw .notSupported }
-            try Pagers.ensureWritableRange(record, offset & ~(page - 1),
-                                           ((offset + size + page - 1) & ~(page - 1)) - (offset & ~(page - 1)))
+            try Pagers.ensureWritableRange(record, at & ~(page - 1),
+                                           ((at + size + page - 1) & ~(page - 1)) - (at & ~(page - 1)))
             try vm { () throws(VmError) in
                 try Vmo.withBorrowed(record) { (vmo: borrowing Vmo) throws(VmError) in
-                    try vmo.zero(offset: offset, size: size)
+                    try vmo.zero(offset: at, size: size)
                 }
             }
             return
@@ -226,7 +229,7 @@ extension Syscalls {
             try inRange()
             try vm { () throws(VmError) in
                 try Vmo.withBorrowed(record) { (vmo: borrowing Vmo) throws(VmError) in
-                    try vmo.syncInstructions(offset: offset, size: size)
+                    try vmo.syncInstructions(offset: at, size: size)
                 }
             }
             return
@@ -262,7 +265,7 @@ extension Syscalls {
             return
         case UInt32(CROI_VMO_OP_DONT_NEED), UInt32(CROI_VMO_OP_ALWAYS_NEED):  // hints: no rights (Zircon's)
             try inRange()
-            Reclaim.hint(record, offset: offset, size: size, alwaysNeed: op == UInt32(CROI_VMO_OP_ALWAYS_NEED))
+            Reclaim.hint(record, offset: at, size: size, alwaysNeed: op == UInt32(CROI_VMO_OP_ALWAYS_NEED))
             return
         default:
             throw .invalidArgs
@@ -271,7 +274,7 @@ extension Syscalls {
         try inRange()
         try vm { () throws(VmError) in
             try Vmo.withBorrowed(record) { (vmo: borrowing Vmo) throws(VmError) in
-                try vmo.cacheOp(offset: offset, size: size, cacheOp)
+                try vmo.cacheOp(offset: at, size: size, cacheOp)
             }
         }
     }

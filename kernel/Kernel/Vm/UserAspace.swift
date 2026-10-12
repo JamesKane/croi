@@ -44,21 +44,51 @@ struct Region {
 }
 
 /// A VMO range mapped into a user address space (Zircon's VmMapping). It
-/// holds a reference to the VMO, and the VMO lists the address space (for
-/// decommit).
+/// holds a reference to the VMO mapped (`holder`), and the VMO whose pages
+/// it maps (`vmo`) lists the address space (for decommit). They differ for
+/// an alias (K14g: a slice or reference of an anonymous VMO), whose pages
+/// are its root's: `vmo` and `offset` are the root's, so faults, unmaps
+/// and reclaim see the root's pages wherever they are mapped.
 struct Mapping {
     var base: UInt64
     var size: UInt64
     let vmo: VmoPointer
-    /// Byte offset into the VMO of `base`.
+    /// Byte offset into `vmo` of `base`.
     var offset: UInt64
     var rights: VmRights
     let region: UInt32
     /// Its region's JIT protection key (0: none).
     var key: UInt8 = 0
+    /// The VMO mapped (its handle's): the mapping's reference, its koid
+    /// and name in the info topics.
+    let holder: VmoPointer
+
+    /// `vmo` at `offset` as mapped; an alias resolves to its root.
+    init(base: UInt64, size: UInt64, vmo: VmoPointer, offset: UInt64, rights: VmRights, region: UInt32,
+         key: UInt8 = 0) {
+        let (pages, shift) = vmo.target
+        self.init(base: base, size: size, vmo: pages, offset: offset + shift, rights: rights, region: region,
+                  key: key, holder: vmo)
+    }
+
+    /// A piece of an existing mapping (already resolved).
+    init(base: UInt64, size: UInt64, vmo: VmoPointer, offset: UInt64, rights: VmRights, region: UInt32,
+         key: UInt8, holder: VmoPointer) {
+        self.base = base
+        self.size = size
+        self.vmo = vmo
+        self.offset = offset
+        self.rights = rights
+        self.region = region
+        self.key = key
+        self.holder = holder
+    }
 
     func contains(_ virt: UInt64) -> Bool { virt >= base && virt - base < size }
     func overlaps(_ base: UInt64, _ size: UInt64) -> Bool { base < self.base + self.size && self.base < base + size }
+
+    /// `offset` in the mapped VMO's terms.
+    var holderOffset: UInt64 { holder == vmo ? offset : offset - holder.target.offset }
 }
 
 /// A user address space's state (Zircon's user VmAspace): lower-half page
@@ -394,12 +424,14 @@ struct UserAspace: ~Copyable {
     // MARK: Helpers (lock held)
 
     /// An anonymous VMO may be mapped past its end (K13h, Zircon's: it
-    /// may grow; until then a fault there fails); others only inside.
+    /// may grow; until then a fault there fails), a reference to one too
+    /// (K14g); others only inside (a slice's window most of all: past it
+    /// are its root's other pages).
     private func checkMapping(_ vmo: borrowing Vmo, _ offset: UInt64, _ size: UInt64, _ rights: VmRights) throws(VmError) {
         let page = KernelLayout.pageSize
         guard size > 0, size % page == 0, offset % page == 0, !rights.isEmpty,
               !offset.addingReportingOverflow(size).overflow else { throw .invalidArgument }
-        if case .anonymous = vmo.record.pointee.kind { return }
+        if case .anonymous = vmo.record.pointee.kind, !vmo.record.pointee.slice { return }
         guard offset <= vmo.size, size <= vmo.size - offset else { throw .invalidArgument }
     }
 
@@ -458,7 +490,7 @@ struct UserAspace: ~Copyable {
     /// VMO reference and listing this address space on the VMO.
     private func insert(_ mapping: Mapping) throws(VmError) {
         if mapping.vmo.pointee.sharedReadOnly, mapping.rights != .read { throw .invalidArgument }
-        mapping.vmo.retain()
+        mapping.holder.retain()
         // A mapper before it is mapped, and a contiguous VMO's lent pages
         // (K14f) read in the same locked step: a decommit either sees the
         // mapper and unmaps here, or this sees its pages lent and skips them.
@@ -487,7 +519,7 @@ struct UserAspace: ~Copyable {
                 }
             } catch {
                 mapping.vmo.removeMapper(record.address)
-                mapping.vmo.release()
+                mapping.holder.release()
                 throw error
             }
         }
@@ -502,11 +534,11 @@ struct UserAspace: ~Copyable {
             let m = record.pointee.mappings[i]
             guard at > m.base, at < m.base + m.size else { continue }
             record.pointee.mappings[i].size = at - m.base
-            m.vmo.retain()
+            m.holder.retain()
             m.vmo.addMapper(record.address)
             record.pointee.mappings.insert(Mapping(base: at, size: m.base + m.size - at, vmo: m.vmo,
                                                    offset: m.offset + (at - m.base), rights: m.rights,
-                                                   region: m.region, key: m.key), at: i + 1)
+                                                   region: m.region, key: m.key, holder: m.holder), at: i + 1)
             return
         }
     }
@@ -523,7 +555,7 @@ struct UserAspace: ~Copyable {
             if m.base >= base, m.base + m.size <= base + size {
                 _ = record.pointee.mappings.remove(at: i)
                 m.vmo.removeMapper(record.address)
-                released.append(m.vmo.address)
+                released.append(m.holder.address)
             } else {
                 i += 1
             }
@@ -546,7 +578,7 @@ struct UserAspace: ~Copyable {
             while let region = record.pointee.regions.popLast() { Jit.freeKey(region.jitKey) }
             while let mapping = record.pointee.mappings.popLast() {
                 mapping.vmo.removeMapper(record.address)
-                released.append(mapping.vmo.address)
+                released.append(mapping.holder.address)
             }
             record.pointee.arch.destroyUser()  // every table, at once
         }
@@ -580,7 +612,7 @@ extension UserAspacePointer {
                     pointee.mappings[i] = fresh
                     try? pointee.arch.unmap(virt: old.base, size: old.size)
                     old.vmo.removeMapper(address)
-                    old.vmo.release()  // the old mapping's
+                    old.holder.release()  // the old mapping's
                     return fresh
                 }
                 throw .notFound
@@ -883,6 +915,9 @@ extension UserAspace {
             for i in 0..<record.pointee.mappings.count {
                 let m = record.pointee.mappings[i]
                 stats.mem_mapped_bytes += m.size
+                // An alias's pages are its root's, attributed to the root's
+                // mappings only (Zircon: a reference has none attributed).
+                guard m.holder == m.vmo else { continue }
                 let (committed, spaces) = m.vmo.attribution(offset: m.offset, size: m.size)
                 guard committed > 0 else { continue }
                 if spaces <= 1 {

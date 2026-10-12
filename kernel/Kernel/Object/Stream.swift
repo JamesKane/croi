@@ -62,13 +62,18 @@ enum Streams {
 
     // MARK: Stream size
 
+    /// K14g: a reference shares its root's sizes (Zircon: its stream size
+    /// manager); a slice of an anonymous VMO has its own, over its root's
+    /// pages (`transfer` and `zero` go there).
     static func streamSize(_ vmo: VmoPointer) -> UInt64 {
-        vmo.pointee.lock.withLock { vmo.pointee.streamSize ?? vmo.pointee.size }
+        let vmo = vmo.sizeOwner
+        return vmo.pointee.lock.withLock { vmo.pointee.streamSize ?? vmo.pointee.size }
     }
 
     /// vmo_set_stream_size: OUT_OF_RANGE past the VMO; the bytes from the
     /// smaller of the old and new sizes to the VMO's end read as zero.
     static func setStreamSize(_ vmo: VmoPointer, _ size: UInt64) throws(Status) {
+        let vmo = vmo.sizeOwner
         guard case .anonymous = vmo.pointee.kind else { throw .notSupported }
         guard size <= vmo.pointee.size else { throw .outOfRange }
         sizeLock.lock()
@@ -79,8 +84,10 @@ enum Streams {
         vmo.pointee.lock.withLock { vmo.pointee.streamSize = size }
     }
 
-    private static func zero(_ vmo: VmoPointer, _ offset: UInt64, _ length: UInt64) throws(Status) {
+    private static func zero(_ holder: VmoPointer, _ offset: UInt64, _ length: UInt64) throws(Status) {
         guard length > 0 else { return }
+        let (vmo, shift) = holder.target
+        let offset = offset + shift
         if vmo.pointee.pager != nil || vmo.pointee.readsFromPager {  // zeroed in place: the pages first
             var at = offset & ~(KernelLayout.pageSize - 1)
             while at < offset + length {
@@ -119,8 +126,10 @@ enum Streams {
 
     /// Moves up to `limit` bytes between the VMO at `offset` and the
     /// iovecs in order; stops at the first fault. The bytes moved.
-    private static func transfer(_ vmo: VmoPointer, _ offset: UInt64, _ limit: UInt64, _ vector: UInt64,
+    private static func transfer(_ holder: VmoPointer, _ offset: UInt64, _ limit: UInt64, _ vector: UInt64,
                                  _ count: UInt64, toUser: Bool) throws(Status) -> (moved: UInt64, faulted: Bool) {
+        let (vmo, shift) = holder.target
+        let offset = offset + shift
         var moved: UInt64 = 0
         var zeros = InlineArray<256, UInt8>(repeating: 0)
         for i in 0..<count where moved < limit {
@@ -184,6 +193,7 @@ enum Streams {
                       _ count: UInt64) throws(Status) -> (UInt64, UInt64) {
         let me = StreamPointer(object: object)
         let vmo = me.pointee.vmo
+        let limit = vmo.sizeOwner.pointee.size
         let total = try capacity(vector, count)
         guard total > 0 else { return (requested, 0) }
         sizeLock.lock()
@@ -192,11 +202,14 @@ enum Streams {
         let offset = append ? size : requested
         let (sum, overflow) = offset.addingReportingOverflow(total)
         guard !overflow else { throw append ? .outOfRange : .fileBig }
-        guard offset < vmo.pointee.size else { throw .outOfRange }
-        let end = min(sum, vmo.pointee.size)
+        guard offset < limit else { throw .outOfRange }
+        let end = min(sum, limit)
         if offset > size { try zero(vmo, size, offset - size) }
         let (moved, faulted) = try transfer(vmo, offset, end - offset, vector, count, toUser: false)
-        if offset + moved > size { vmo.pointee.lock.withLock { vmo.pointee.streamSize = offset + moved } }
+        if offset + moved > size {
+            let owner = vmo.sizeOwner
+            owner.pointee.lock.withLock { owner.pointee.streamSize = offset + moved }
+        }
         if moved == 0, faulted { throw .notFound }
         return (offset, moved)
     }

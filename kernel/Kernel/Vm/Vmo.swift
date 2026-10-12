@@ -19,6 +19,14 @@ import Synchronization
 /// write" allows the copy that early, so no hidden-node tree is needed:
 /// the parent's later writes show in the child only where the child
 /// hasn't touched. Lock order: child -> parent.
+///
+/// K14g, the other child kinds. A full SNAPSHOT copies what its parent
+/// shows at creation (no read-through); SNAPSHOT_MODIFIED is one, except
+/// under a pager, where it copies what the parent has made its own and
+/// reads the rest through as above. A SLICE or REFERENCE of an anonymous
+/// VMO is an alias: no pages of its own, its `parent` the root whose pages
+/// it shows from `parentOffset` (`target`); syscalls and mappings resolve
+/// it there. A reference's sizes are its root's (`sizeOwner`).
 struct VmoRecord: ~Copyable {
     enum Kind: Equatable {
         case anonymous
@@ -65,6 +73,20 @@ struct VmoRecord: ~Copyable {
     var parentOffset: UInt64 = 0
     /// A slice (K13a): the parent's pages, never its own.
     var slice = false
+    /// K14g: a reference to an anonymous VMO (its root's pages and sizes).
+    var reference = false
+    /// K14g: the VMO it was created from, where that isn't `parent` (an
+    /// alias of an alias, a full snapshot, a SNAPSHOT_MODIFIED child
+    /// reading through to its grandparent): its ZERO_CHILDREN counts this
+    /// one. A reference held.
+    var owner: VmoPointer? = nil
+    /// K14g: a snapshot child of any kind (ZX_INFO_VMO's IS_COW_CLONE;
+    /// decommit refused, Zircon's), and where reads through `parent` stop
+    /// (bytes; a SNAPSHOT_MODIFIED child's parent's end).
+    var clone = false
+    var parentLimit = UInt64.max
+    /// K14g: live aliases of this root (its cache policy stays).
+    var aliases = 0
     /// Live children (K13a's ZERO_CHILDREN), and the VMO object to signal
     /// (0 once it is gone; cleared under this lock by its destroy).
     var children = 0
@@ -105,6 +127,9 @@ struct VmoRecord: ~Copyable {
     var everPinned = false
 
     var pageCount: Int { Int(size / KernelLayout.pageSize) }
+
+    /// A slice or reference of an anonymous VMO (K14g).
+    var isAlias: Bool { reference || (slice && kind == .anonymous) }
 }
 
 /// A discardable VMO's state (Zircon's DiscardableVmoTracker): reclaimable
@@ -125,6 +150,15 @@ enum DiscardState: UInt8 {
         nonmutating unsafeMutableAddress { unsafe UnsafeMutablePointer<VmoRecord>(bitPattern: UInt(address))! }
     }
 
+    /// Where its pages are (K14g): an alias's root and its offset there,
+    /// else itself at 0.
+    var target: (vmo: VmoPointer, offset: UInt64) {
+        pointee.isAlias ? (pointee.parent!, pointee.parentOffset) : (self, 0)
+    }
+
+    /// Whose size and stream size it has: a reference's root's, else its own.
+    var sizeOwner: VmoPointer { pointee.reference ? pointee.parent! : self }
+
     /// Another owner (a mapping).
     func retain() {
         guard pointee.references.add(1, ordering: .relaxed).newValue > 1 else { panic("vmo: retained after release") }
@@ -142,8 +176,13 @@ enum DiscardState: UInt8 {
             }
             account.release()
         }
+        if let owner = pointee.owner {
+            owner.childGone()
+            owner.release()
+        }
         if let parent = pointee.parent {
-            parent.childGone()
+            if pointee.owner == nil { parent.childGone() }
+            if pointee.isAlias { parent.pointee.lock.withLock { parent.pointee.aliases -= 1 } }
             parent.release()
         }
         switch pointee.kind {
@@ -214,6 +253,7 @@ enum DiscardState: UInt8 {
     /// The physical page holding byte `offset`, committing it (zeroed) if
     /// this is an anonymous VMO and it isn't yet. nil if out of memory.
     func commit(at offset: UInt64) -> UInt64? {
+        if pointee.isAlias { return pointee.parent!.commit(at: pointee.parentOffset + offset) }  // K14g
         let index = Int(offset / KernelLayout.pageSize)
         switch pointee.kind {
         case .contiguous(let base):
@@ -242,8 +282,6 @@ enum DiscardState: UInt8 {
                 let grown = pointee.pager != nil && offset >= pointee.pagerZeroFrom
                 if pointee.pager != nil, !grown { return nil }
                 if let account = pointee.account, !account.charge(KernelLayout.pageSize) { return nil }
-                // A child's first touch: what it reads now, copied in.
-                let source = pointee.parent.flatMap { $0.content(at: pointee.parentOffset + offset) }
                 guard let phys = pmm.allocatePage(.vmo) else {
                     pointee.account?.uncharge(KernelLayout.pageSize)
                     return nil
@@ -253,11 +291,19 @@ enum DiscardState: UInt8 {
                     pointee.account?.uncharge(KernelLayout.pageSize)
                     return nil
                 }
+                // A child's first touch: what it reads now, copied in, under
+                // the lock of the VMO that has it (so it can't be freed and
+                // reused meanwhile).
                 let page = unsafe UnsafeMutableRawPointer(bitPattern: UInt(KernelLayout.physmap(phys)))!
-                if let source {
-                    unsafe page.copyMemory(from: UnsafeRawPointer(bitPattern: UInt(KernelLayout.physmap(source)))!,
-                                           byteCount: Int(KernelLayout.pageSize))
-                } else {
+                let copied = offset < pointee.parentLimit && pointee.parent.map { parent in
+                    parent.withContent(at: pointee.parentOffset + offset) { source in
+                        guard let source else { return false }
+                        unsafe page.copyMemory(from: UnsafeRawPointer(bitPattern: UInt(KernelLayout.physmap(source)))!,
+                                               byteCount: Int(KernelLayout.pageSize))
+                        return true
+                    }
+                } ?? false
+                if !copied {
                     unsafe page.initializeMemory(as: UInt8.self, repeating: 0, count: Int(KernelLayout.pageSize))
                 }
                 pointee.committedPages += 1
@@ -319,14 +365,39 @@ enum DiscardState: UInt8 {
     /// else (a child) its parent's at the matching offset, recursively; nil
     /// for zero. Past the end: nil.
     func content(at offset: UInt64) -> UInt64? {
+        if pointee.isAlias { return pointee.parent!.content(at: pointee.parentOffset + offset) }  // K14g
         guard offset < pointee.size else { return nil }
         if let own = lookup(at: offset) { return own }
-        guard let parent = pointee.parent else { return nil }
+        guard offset < pointee.parentLimit, let parent = pointee.parent else { return nil }
         return parent.content(at: pointee.parentOffset + offset)
+    }
+
+    /// `content(at:)` (an anonymous VMO's), with the lock of the VMO that
+    /// has the page held while `body` reads it (nil: zeros), so it isn't
+    /// freed meanwhile. Lock order child -> parent: the caller may hold
+    /// a descendant's lock, never an ancestor's.
+    func withContent<R>(at offset: UInt64, _ body: (UInt64?) -> R) -> R {
+        var result: R? = nil
+        var up: (VmoPointer, UInt64)? = nil
+        pointee.lock.withLock {
+            let phys = offset < pointee.size ? pointee.pages.lookup(Int(offset / KernelLayout.pageSize)) : 0
+            if phys != 0 {
+                if pointee.reclaimable { Reclaim.touch(phys) }
+                result = body(phys)
+            } else if offset < pointee.size, offset < pointee.parentLimit, let parent = pointee.parent {
+                up = (parent, pointee.parentOffset + offset)
+            } else {
+                result = body(nil)
+            }
+        }
+        if let result { return result }
+        let (parent, at) = up!
+        return parent.withContent(at: at, body)
     }
 
     /// The physical page holding byte `offset` if committed (no commit).
     func lookup(at offset: UInt64) -> UInt64? {
+        if pointee.isAlias { return pointee.parent!.lookup(at: pointee.parentOffset + offset) }  // K14g
         let index = Int(offset / KernelLayout.pageSize)
         switch pointee.kind {
         case .contiguous(let base):
@@ -515,58 +586,239 @@ struct Vmo: ~Copyable {
         }
     }
 
-    /// vmo_create_child's SNAPSHOT_AT_LEAST_ON_WRITE child of `parent`
-    /// (anonymous: its own or a child; others are NOT_SUPPORTED, as
-    /// Zircon refuses snapshots of physical and contiguous VMOs): `size`
-    /// bytes reading as the parent's from `offset` (zero past its end),
-    /// each page copied in at its first touch. Holds a parent reference.
-    init(childOf parent: VmoPointer, offset: UInt64, size: UInt64) throws(VmError) {
+    /// A SNAPSHOT_AT_LEAST_ON_WRITE child of `parent` (anonymous: its own
+    /// or a child, never an alias): `size` bytes reading as the parent's
+    /// from `offset` (zero past its end), each page copied in at its first
+    /// touch. Holds a parent reference; counted as a child of `owner` if
+    /// given (K14g: the alias it was created through), else of `parent`.
+    init(childOf parent: VmoPointer, offset: UInt64, size: UInt64, owner: VmoPointer? = nil) throws(VmError) {
         guard case .anonymous = parent.pointee.kind else { throw .notSupported }
         guard offset % KernelLayout.pageSize == 0 else { throw .invalidArgument }
         let made = try Self.make(.anonymous, size: size, cache: .cached)
-        parent.retain()
-        made.pointee.parent = parent
-        made.pointee.parentOffset = offset
         made.pointee.readsFromPager = parent.pointee.pager != nil || parent.pointee.readsFromPager
-        parent.childAdded()
+        made.pointee.clone = true
+        Self.link(made, parent: parent, at: offset, owner: owner)
         record = made
     }
 
-    /// vmo_create_child's SLICE (K13a) of a physical or contiguous VMO:
-    /// [offset, offset+size) of its pages, page aligned and wholly inside,
-    /// with its cache policy and memory flags; a slice of a slice is one of
-    /// the root. Holds a reference to the root. Anonymous parents: not yet.
-    init(sliceOf parent: VmoPointer, offset: UInt64, size: UInt64) throws(VmError) {
+    /// The child kinds of vmo_create_child that copy (K14g).
+    enum Snapshot {
+        case full, atLeastOnWrite, modified
+    }
+
+    /// vmo_create_child's snapshots of `holder`, in Zircon's order of
+    /// checks (CreateClone, CreateCloneLocked): physical NOT_SUPPORTED,
+    /// contiguous INVALID_ARGS; an unaligned offset INVALID_ARGS; uncached
+    /// BAD_STATE; a full snapshot under a pager NOT_SUPPORTED. Zircon's
+    /// "bidirectional" clones (full; modified of a child) can't be taken
+    /// through a slice, and only pager hierarchies have the other kind, so
+    /// a slice of an anonymous VMO takes none (NOT_SUPPORTED); bidirectional
+    /// ones (and at-least-on-write of anonymous VMOs, bidirectional there)
+    /// refuse a VMO with pinned pages (BAD_STATE). What croi builds:
+    /// - at least on write: read-through (`init(childOf:)`);
+    /// - full, and modified without a pager: every page the source shows
+    ///   in range copied now, nothing read through (Zircon shares them
+    ///   until written: same contents, more memory at once here);
+    /// - modified of a pager VMO's child: the child's own pages copied, the
+    ///   rest read through to the pager VMO as at least on write;
+    /// - modified of a pager VMO itself: at least on write.
+    static func snapshot(of holder: VmoPointer, _ type: Snapshot, offset: UInt64, size: UInt64) throws(VmError) -> Vmo {
+        switch holder.pointee.kind {
+        case .physical: throw .notSupported
+        case .contiguous: throw .invalidArgument
+        case .anonymous: break
+        }
         let page = KernelLayout.pageSize
-        guard offset % page == 0, size % page == 0, size > 0,
-              !offset.addingReportingOverflow(size).overflow, offset + size <= parent.pointee.size else {
+        guard offset % page == 0 else { throw .invalidArgument }
+        let (source, shift) = holder.target
+        guard source.pointee.lock.withLock({ source.pointee.cache }) == .cached else { throw .badState }
+        let pagerTree = source.pointee.pager != nil || source.pointee.readsFromPager
+        if type == .full, pagerTree { throw .notSupported }
+        let (start, overflow) = shift.addingReportingOverflow(offset)
+        guard !overflow, !start.addingReportingOverflow(size).overflow else { throw .invalidArgument }
+        let hasParent = source.pointee.parent != nil || source.pointee.clone
+        let bidirectional = type == .full || (type == .modified && hasParent)
+        let throughSlice = holder.pointee.slice
+        if bidirectional, throughSlice { throw .notSupported }
+        let unidirectional = !bidirectional && pagerTree
+        if !unidirectional {
+            if throughSlice { throw .notSupported }
+            guard source.pointee.lock.withLock({ source.pointee.pins.isEmpty }) else { throw .badState }
+        }
+        let owner = holder == source ? nil : holder
+        if type == .atLeastOnWrite || unidirectional {
+            return try Vmo(childOf: source, offset: start, size: size, owner: owner)
+        }
+        let made = try make(.anonymous, size: size, cache: .cached)
+        made.pointee.clone = true
+        if pagerTree {
+            // Modified of a pager VMO's child: its own pages now, the rest
+            // through to its parent, up to where it stops reading through.
+            guard let parent = source.pointee.parent else {
+                made.release()
+                throw .badState
+            }
+            do throws(VmError) {
+                try copyContent(of: source, from: start, into: made, throughParents: false)
+            } catch {
+                made.release()
+                throw error
+            }
+            let limit = min(source.pointee.size, source.pointee.parentLimit)
+            made.pointee.parentLimit = limit > start ? limit - start : 0
+            made.pointee.readsFromPager = true
+            link(made, parent: parent, at: source.pointee.parentOffset + start, owner: holder)
+            return Vmo(made: made)
+        }
+        do throws(VmError) {
+            try copyContent(of: source, from: start, into: made, throughParents: true)
+        } catch {
+            made.release()
+            throw error
+        }
+        holder.retain()
+        made.pointee.owner = holder
+        holder.childAdded()
+        return Vmo(made: made)
+    }
+
+    private init(made: VmoPointer) {
+        record = made
+    }
+
+    /// Sets a new child's parent (a reference taken) and counts it as a
+    /// child of `owner` (a reference taken too) if given, else of `parent`.
+    private static func link(_ made: VmoPointer, parent: VmoPointer, at offset: UInt64, owner: VmoPointer?) {
+        parent.retain()
+        made.pointee.parent = parent
+        made.pointee.parentOffset = offset
+        if let owner {
+            owner.retain()
+            made.pointee.owner = owner
+            owner.childAdded()
+        } else {
+            parent.childAdded()
+        }
+    }
+
+    /// Copies into `made` (new: nobody else sees it yet) the pages `source`
+    /// shows over [start, +made's size): its own, and with `throughParents`
+    /// its ancestors' where nearer ones have none, as `content(at:)` reads.
+    /// One level at a time, each under its lock while its pages are copied.
+    private static func copyContent(of source: VmoPointer, from start: UInt64, into made: VmoPointer,
+                                    throughParents: Bool) throws(VmError) {
+        let page = KernelLayout.pageSize
+        var level = source, at = start, limit = made.pointee.size  // bytes of `made` this level may show
+        while limit > 0 {
+            var failed = false
+            var next: (VmoPointer, UInt64, UInt64)? = nil
+            level.pointee.lock.withLock {
+                let end = level.pointee.size > at ? min(limit, level.pointee.size - at) : 0
+                let first = Int(at / page), last = first + Int((end + page - 1) / page)
+                level.pointee.pages.forEach { index, phys in
+                    guard !failed, index >= first, index < last,
+                          made.pointee.pages.lookup(index - first) == 0 else { return }  // a nearer level's
+                    guard let copy = pmm.allocatePage(.vmo) else {
+                        failed = true
+                        return
+                    }
+                    unsafe UnsafeMutableRawPointer(bitPattern: UInt(KernelLayout.physmap(copy)))!
+                        .copyMemory(from: UnsafeRawPointer(bitPattern: UInt(KernelLayout.physmap(phys)))!, byteCount: Int(page))
+                    guard made.pointee.pages.set(index - first, copy) else {
+                        pmm.free(copy)
+                        failed = true
+                        return
+                    }
+                    made.pointee.committedPages += 1
+                }
+                if throughParents, let parent = level.pointee.parent {
+                    let through = level.pointee.parentLimit > at ? min(end, level.pointee.parentLimit - at) : 0
+                    next = (parent, level.pointee.parentOffset + at, through)
+                }
+            }
+            if failed { throw .outOfMemory }
+            guard let (parent, parentAt, through) = next else { return }
+            level = parent
+            at = parentAt
+            limit = through
+        }
+    }
+
+    /// vmo_create_child's SLICE: [offset, offset+size) of `holder`'s pages,
+    /// page aligned and wholly inside (INVALID_ARGS). Physical and
+    /// contiguous (K13a): a VMO of that kind over the range, with its root's
+    /// cache policy and memory flags. Anonymous (K14g): an alias of the
+    /// root (resizable: NOT_SUPPORTED; uncached: BAD_STATE, Zircon's). A
+    /// slice of a slice is one of the root, counted as the slice's child
+    /// (Zircon's parent). Holds a reference to the root (and the slice).
+    init(sliceOf holder: VmoPointer, offset: UInt64, size: UInt64) throws(VmError) {
+        let page = KernelLayout.pageSize
+        let anonymous = holder.pointee.kind == .anonymous
+        guard offset % page == 0, size % page == 0, size > 0 || anonymous,
+              !offset.addingReportingOverflow(size).overflow, offset + size <= holder.sizeOwner.pointee.size else {
             throw .invalidArgument
         }
-        var root = parent, at = offset
-        if parent.pointee.slice, let up = parent.pointee.parent {
+        var root = holder, at = offset
+        if holder.pointee.slice || holder.pointee.reference, let up = holder.pointee.parent {
             root = up
-            at += parent.pointee.parentOffset
+            at += holder.pointee.parentOffset
         }
+        let owner = holder == root ? nil : holder
         let kind: VmoRecord.Kind
         switch root.pointee.kind {
         case .physical(let base): kind = .physical(base: base + at)
         case .contiguous(let base): kind = .contiguous(base: base + at)
-        case .anonymous: throw .notSupported
+        case .anonymous:
+            guard !holder.pointee.resizable, !root.pointee.resizable else { throw .notSupported }
+            kind = .anonymous
         }
         let (cache, firmware, readOnly) = root.pointee.lock.withLock {
             (root.pointee.cache, root.pointee.cachedFirmware, root.pointee.sharedReadOnly)
         }
+        if anonymous, cache != .cached { throw .badState }
         let made = try Self.make(kind, size: size, cache: cache)
         made.pointee.slice = true
         made.pointee.cachedFirmware = firmware
         made.pointee.sharedReadOnly = readOnly
-        guard root.childAdded(unlessLent: true) else {  // K14f: not over lent pages
-            made.release()
-            throw .badState
+        if let owner {
+            // The slice it was cut from shares the root's pages, so the root
+            // has a child and lends nothing (K14f).
+            owner.retain()
+            made.pointee.owner = owner
+            owner.childAdded()
+        } else {
+            guard root.childAdded(unlessLent: true) else {  // K14f: not over lent pages
+                made.release()
+                throw .badState
+            }
         }
         root.retain()
         made.pointee.parent = root
         made.pointee.parentOffset = at
+        if anonymous { root.pointee.lock.withLock { root.pointee.aliases += 1 } }
+        record = made
+    }
+
+    /// vmo_create_child's REFERENCE (K14g): the whole of `holder`'s root,
+    /// its pages and sizes, under a VMO of its own (koid, name, handles,
+    /// children), in Zircon's order: physical NOT_SUPPORTED, a range given
+    /// INVALID_ARGS (the caller's), a slice or contiguous VMO NOT_SUPPORTED,
+    /// RESIZABLE of a non-resizable VMO NOT_SUPPORTED, uncached BAD_STATE.
+    /// Resizable if its root is (resizing it resizes the root).
+    init(referenceOf holder: VmoPointer, resizable: Bool) throws(VmError) {
+        switch holder.pointee.kind {
+        case .physical, .contiguous: throw .notSupported
+        case .anonymous: break
+        }
+        guard !holder.pointee.slice else { throw .notSupported }
+        let root = holder.target.vmo
+        if resizable, !root.pointee.resizable { throw .notSupported }
+        guard root.pointee.lock.withLock({ root.pointee.cache }) == .cached else { throw .badState }
+        let made = try Self.make(.anonymous, size: 0, cache: .cached)
+        made.pointee.reference = true
+        made.pointee.resizable = root.pointee.resizable
+        Self.link(made, parent: root, at: 0, owner: holder == root ? nil : holder)
+        root.pointee.lock.withLock { root.pointee.aliases += 1 }
         record = made
     }
 
@@ -611,8 +863,8 @@ struct Vmo: ~Copyable {
         if case .contiguous = record.pointee.kind { return try Loans.decommit(record, offset: offset, size: size) }
         guard case .anonymous = record.pointee.kind else { throw .invalidArgument }
         // A child's decommitted page would read as its parent's again, not
-        // zero (Zircon: NOT_SUPPORTED on snapshot children).
-        guard record.pointee.parent == nil else { throw .notSupported }
+        // zero (Zircon: NOT_SUPPORTED on snapshot children, K14g's too).
+        guard record.pointee.parent == nil, !record.pointee.clone else { throw .notSupported }
         // A pager VMO's page would come back from the pager, not zero.
         guard record.pointee.pager == nil else { throw .notSupported }
         let freed = try take(offset: offset, size: size)
@@ -741,7 +993,7 @@ struct Vmo: ~Copyable {
             let pageStart = at & ~(page - 1)
             let length = min(end, pageStart + page) - at
             if case .anonymous = record.pointee.kind, length == page, record.pointee.parent == nil,
-               record.pointee.pager == nil, !record.pointee.lock.withLock({ record.pinnedLocked(pageStart, page) }) {
+               !record.pointee.clone, record.pointee.pager == nil, !record.pointee.lock.withLock({ record.pinnedLocked(pageStart, page) }) {
                 try decommit(offset: pageStart, size: page)
             } else if let phys = record.pointee.parent != nil || record.pointee.pager != nil
                         ? record.commit(at: pageStart) : record.lookup(at: pageStart) {
@@ -761,8 +1013,10 @@ struct Vmo: ~Copyable {
     /// the old type outlives the change.
     func setCachePolicy(_ policy: CachePolicy) throws(VmError) {
         try record.pointee.lock.withLock { () throws(VmError) in
-            // Slices share their parent's policy, so neither side changes it.
-            guard !record.pointee.slice, record.pointee.children == 0 else { throw .badState }
+            // Slices and references share their root's policy, so neither
+            // side changes it (K14g: nor a root with aliases of aliases).
+            guard !record.pointee.slice, !record.pointee.reference, record.pointee.children == 0,
+                  record.pointee.aliases == 0 else { throw .badState }
             // K14a: a pager-backed or discardable VMO stays cached (Zircon's).
             guard policy == .cached || (record.pointee.pager == nil && !record.pointee.discardable) else { throw .badState }
             guard !record.pointee.cachedFirmware || policy == .cached else { throw .denied(0) }

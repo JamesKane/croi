@@ -1225,10 +1225,46 @@ VMO children, K11a (Vmo.swift `init(childOf:)`, VmoObject
   NOT_SUPPORTED (its page would read as the parent's again); ZERO
   writes zeros into a copy. Rights as Zircon: the parent handle's (needs
   DUPLICATE and READ) plus GET/SET_PROPERTY; WRITE added and EXECUTE
-  removed unless NO_WRITE removes WRITE. SNAPSHOT, REFERENCE,
-  SNAPSHOT_MODIFIED: NOT_SUPPORTED (SLICE came in K13a, CHILD_RESIZABLE in
-  K13h); physical or contiguous parents of a snapshot: NOT_SUPPORTED. Mode
-  17 checks it (`vmo_children`).
+  removed unless NO_WRITE removes WRITE. (SLICE came in K13a,
+  CHILD_RESIZABLE in K13h, the other kinds in K14g.) Mode 17 checks it
+  (`vmo_children`).
+
+The other child kinds, K14g (Vmo.swift `Vmo.snapshot`, `init(sliceOf:)`,
+`init(referenceOf:)`; VmoObject `createChild` in Zircon's order):
+- Snapshots (`Vmo.Snapshot`): SNAPSHOT copies every page its parent shows
+  in range at creation (`copyContent`, level by level up the chain, each
+  under its lock), so nothing reads through (no hidden nodes; see
+  docs/zircon-divergences.md). SNAPSHOT_MODIFIED is that too, except
+  under a pager: of the pager VMO it is at least on write; of a child, the
+  child's own pages are copied and the rest read through to the child's
+  parent up to `parentLimit`. Zircon's refusals: physical NOT_SUPPORTED,
+  contiguous INVALID_ARGS, uncached BAD_STATE, SNAPSHOT under a pager
+  NOT_SUPPORTED, any clone of an anonymous VMO through a slice
+  NOT_SUPPORTED or with pinned pages BAD_STATE (at least on write too:
+  Zircon's is bidirectional there). `VmoRecord.clone` marks every
+  snapshot child (IS_COW_CLONE; DECOMMIT NOT_SUPPORTED).
+- Aliases (`VmoRecord.isAlias`): a SLICE of an anonymous VMO (wholly
+  inside; not of a resizable one) or a REFERENCE (offset and size 0; not
+  of a slice or contiguous VMO; RESIZABLE only of a resizable VMO and with
+  RESIZE on the parent handle). No pages of their own: `parent` is the
+  root, `target` gives (root, offset). Syscalls resolve them (vmo_read/
+  write, op_range, bti_pin, streams), and `Mapping` keeps the root and
+  root offset in `vmo`/`offset` with the mapped VMO in `holder` (the
+  mapping's reference; koid and name in the info topics), so faults,
+  `unmapEverywhere` and reclaim work on the root unchanged. A reference's
+  size and stream size are its root's (`sizeOwner`): vmo_set_size through
+  one resizes the root; a slice has its own stream size over the root's
+  pages. Aliases have nothing attributed (Zircon's rule). The root's
+  `aliases` count freezes its cache policy.
+- `VmoRecord.owner`: the VMO a child was created from when that isn't its
+  `parent` (an alias of an alias, a full snapshot, a modified snapshot
+  reading through to its grandparent); its ZERO_CHILDREN and ZX_INFO_VMO
+  parent_koid follow `owner`, else `parent`. A slice of a slice (K13a's
+  physical ones too) is now its slice's child.
+- `withContent(at:)` copies a parent's page under that parent's lock
+  (a child's first touch did it after dropping the lock, so a concurrent
+  decommit could hand it a freed, reused page).
+- Mode 17's `child_kinds` (checks 650-660).
 
 VMO slices, ZERO_CHILDREN and handle counts, K13a (Vmo.swift `init(sliceOf:)`,
 `childAdded`/`childGone`; VmoObject; agreed with Todhchai for the GPU
@@ -1239,7 +1275,7 @@ driver host's BAR windows):
   else INVALID_ARGS), with its cache policy and memory flags, `slice`
   set (a contiguous slice frees nothing); a slice of a slice is one of
   the root. Rights: the parent handle's plus GET/SET_PROPERTY, less WRITE
-  with NO_WRITE. Anonymous parents: NOT_SUPPORTED (Zircon has them).
+  with NO_WRITE. Anonymous parents: K14g's aliases.
 - Every VMO record counts its live children (K11a's snapshots too) and
   knows its object (`VmoRecord.object`, cleared by the object's destroy).
   ZERO_CHILDREN (signal bit 3) is set at wrap, cleared by `childAdded`,

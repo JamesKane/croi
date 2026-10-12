@@ -13,9 +13,11 @@ enum : uint32_t {
   // alone) of a physical or contiguous VMO: the same pages at an offset,
   // page aligned and wholly inside the parent (INVALID_ARGS otherwise),
   // with the parent's cache policy; a slice of a slice is one of the root.
-  // Slices of anonymous VMOs are NOT_SUPPORTED yet (Zircon has them), as
-  // are the other kinds. A VMO with children, or a slice, can't change its
-  // cache policy (BAD_STATE).
+  // K14g: the rest, in Zircon's order of checks: SNAPSHOT (isolated both
+  // ways; not under a pager), SNAPSHOT_MODIFIED, SLICE of an anonymous VMO
+  // (not a resizable one) and REFERENCE (offset and size 0; RESIZABLE only
+  // of a resizable VMO, with RESIZE on the handle). A VMO with children, or
+  // a slice or reference, can't change its cache policy (BAD_STATE).
   CROI_VMO_CHILD_SNAPSHOT = 1u << 0,
   CROI_VMO_CHILD_RESIZABLE = 1u << 2,
   CROI_VMO_CHILD_SLICE = 1u << 3,

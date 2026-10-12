@@ -302,15 +302,20 @@ extension Syscalls {
 
     static func vmoInfo(_ vmo: VmoPointer, via: UInt32, rights: UInt32) -> croi_info_vmo_t {
         var info = croi_info_vmo_t()
-        let (committed, spaces) = vmo.attribution(offset: 0, size: vmo.pointee.size)
+        // K14g: an alias has nothing attributed (its pages are its root's,
+        // Zircon's rule); a reference's size and pager are its root's.
+        let alias = vmo.pointee.isAlias
+        let (committed, spaces) = alias ? (0, 0) : vmo.attribution(offset: 0, size: vmo.pointee.size)
+        let root = vmo.target.vmo
+        let size = vmo.sizeOwner.pointee.size
         vmo.pointee.lock.withLock {
             info.koid = vmo.pointee.koid
             let name = vmo.pointee.name
             withUnsafeMutableBytes(of: &info.name) { bytes in
                 for i in 0..<32 { unsafe bytes[i] = name[i] }
             }
-            info.size_bytes = vmo.pointee.size
-            info.parent_koid = vmo.pointee.parent.map { $0.pointee.koid } ?? 0
+            info.size_bytes = size
+            info.parent_koid = (vmo.pointee.owner ?? vmo.pointee.parent).map { $0.pointee.koid } ?? 0
             info.num_children = UInt64(vmo.pointee.children)
             info.num_mappings = UInt64(vmo.pointee.mappers.count)
             var flags = via
@@ -318,9 +323,9 @@ extension Syscalls {
             case .anonymous:
                 flags |= UInt32(CROI_INFO_VMO_TYPE_PAGED)
                 if vmo.pointee.resizable { flags |= UInt32(CROI_INFO_VMO_RESIZABLE) }
-                if vmo.pointee.pager != nil { flags |= UInt32(CROI_INFO_VMO_PAGER_BACKED) }
+                if root.pointee.pager != nil { flags |= UInt32(CROI_INFO_VMO_PAGER_BACKED) }
                 if vmo.pointee.discardable { flags |= UInt32(CROI_INFO_VMO_DISCARDABLE) }
-                if vmo.pointee.parent != nil { flags |= UInt32(CROI_INFO_VMO_IS_COW_CLONE) }
+                if vmo.pointee.clone { flags |= UInt32(CROI_INFO_VMO_IS_COW_CLONE) }
             case .contiguous:
                 flags |= UInt32(CROI_INFO_VMO_TYPE_PAGED) | UInt32(CROI_INFO_VMO_CONTIGUOUS)
             case .physical:
@@ -372,7 +377,7 @@ extension Syscalls {
         record.pointee.lock.withLock {
             guard !record.pointee.dead else { return }
             for i in 0..<record.pointee.mappings.count {
-                let vmo = record.pointee.mappings[i].vmo
+                let vmo = record.pointee.mappings[i].holder  // K14g: the VMO mapped, an alias too
                 vmo.retain()
                 vmos.append(vmo.address)
             }
@@ -437,7 +442,7 @@ extension Syscalls {
 
     private static func mappingEntry(_ mapping: Mapping, depth: UInt64, v1: Bool, v2: Bool) -> croi_info_maps_t {
         var entry = croi_info_maps_t()
-        let name = mapping.vmo.pointee.lock.withLock { mapping.vmo.pointee.name }
+        let name = mapping.holder.pointee.lock.withLock { mapping.holder.pointee.name }
         withUnsafeMutableBytes(of: &entry.name) { bytes in
             for i in 0..<32 { unsafe bytes[i] = name[i] }
         }
@@ -449,11 +454,13 @@ extension Syscalls {
         if mapping.rights.contains(.read) { flags |= UInt32(CROI_VM_PERM_READ) }
         if mapping.rights.contains(.write) { flags |= UInt32(CROI_VM_PERM_WRITE) }
         if mapping.rights.contains(.execute) { flags |= UInt32(CROI_VM_PERM_EXECUTE) }
-        let (committed, spaces) = mapping.vmo.attribution(offset: mapping.offset, size: mapping.size)
+        // An alias (K14g) has nothing attributed: its pages are its root's.
+        let (committed, spaces) = mapping.holder == mapping.vmo
+            ? mapping.vmo.attribution(offset: mapping.offset, size: mapping.size) : (0, 1)
         var m = croi_info_maps_mapping_t()
         m.mmu_flags = flags
-        m.vmo_koid = mapping.vmo.pointee.koid
-        m.vmo_offset = mapping.offset
+        m.vmo_koid = mapping.holder.pointee.koid
+        m.vmo_offset = mapping.holderOffset
         if v1 {
             m.committed_bytes = committed / KernelLayout.pageSize  // V1: committed_pages
         } else if v2 {

@@ -72,8 +72,9 @@ struct VmoObject: ~Copyable {
     /// the last page's tail past it reads zero.
     static func setSize(_ table: borrowing HandleTable, _ handle: UInt32, _ size: UInt64) throws(Status) {
         let ref = try table.get(handle, type: .vmo, rights: .write)
-        let vmo = VmoPointer(address: UnsafeVmoObject(ref.object).vmo)
-        if vmo.pointee.resizable, !(try table.rights(of: handle)).contains(.resize) { throw .accessDenied }
+        let holder = VmoPointer(address: UnsafeVmoObject(ref.object).vmo)
+        if holder.pointee.resizable, !(try table.rights(of: handle)).contains(.resize) { throw .accessDenied }
+        let vmo = holder.sizeOwner  // K14g: a reference resizes its root (Zircon's pass-through)
         guard case .anonymous = vmo.pointee.kind else { throw .unavailable }
         let pageMask = KernelLayout.pageSize - 1
         guard size <= UInt64.max - pageMask else { throw .outOfRange }
@@ -99,56 +100,81 @@ struct VmoObject: ~Copyable {
         try Syscalls.put(try table.add(child, rights: rights), a[4])
     }
 
-    /// vmo_create_child (K11a). SNAPSHOT_AT_LEAST_ON_WRITE of an anonymous
-    /// VMO (a child too), optionally NO_WRITE; Zircon's rights: the
-    /// parent handle's (DUPLICATE and READ required) plus GET/SET_PROPERTY,
-    /// then a snapshot gains WRITE and loses EXECUTE unless NO_WRITE takes
-    /// WRITE away instead (how a loader keeps code executable). SLICE
-    /// (K13a, physical and contiguous parents; NO_WRITE the only other
-    /// option): the parent handle's rights plus GET/SET_PROPERTY, less
-    /// WRITE with NO_WRITE. Not yet (NOT_SUPPORTED): SNAPSHOT (isolated from
-    /// the parent's later writes), REFERENCE, SNAPSHOT_MODIFIED, RESIZABLE,
-    /// slices of anonymous VMOs.
+    /// vmo_create_child, in Zircon's order (sys_vmo_create_child,
+    /// create_child_internal). The size rounds up to a page (OUT_OF_RANGE
+    /// on overflow); NO_WRITE with RESIZABLE INVALID_ARGS; the handle needs
+    /// DUPLICATE and READ, and RESIZE too for a resizable REFERENCE;
+    /// discardable VMOs NOT_SUPPORTED. Then by kind: SLICE (alone, else
+    /// INVALID_ARGS; K13a physical and contiguous, K14g anonymous), REFERENCE
+    /// (with RESIZABLE only; offset and size 0, K14g), or one snapshot kind
+    /// (SNAPSHOT, then AT_LEAST_ON_WRITE, then MODIFIED; RESIZABLE allowed;
+    /// none, or anything left over, INVALID_ARGS; K11a, K14g: `Vmo.snapshot`).
+    /// Rights: the parent handle's less RESIZE, plus RESIZE for RESIZABLE,
+    /// plus GET/SET_PROPERTY; NO_WRITE removes WRITE, else a snapshot gains
+    /// WRITE and loses EXECUTE (how a loader keeps code executable).
     static func createChild(_ table: borrowing HandleTable, _ handle: UInt32, options: UInt32, offset: UInt64,
                             size: UInt64) throws(Status) -> (ObjectPointer, Rights) {
-        let snapshotAtLeastOnWrite = UInt32(CROI_VMO_CHILD_SNAPSHOT_AT_LEAST_ON_WRITE)
-        let noWrite = UInt32(CROI_VMO_CHILD_NO_WRITE)
-        let known = UInt32(CROI_VMO_CHILD_SNAPSHOT) | UInt32(CROI_VMO_CHILD_RESIZABLE) | UInt32(CROI_VMO_CHILD_SLICE)
-            | snapshotAtLeastOnWrite | noWrite | UInt32(CROI_VMO_CHILD_REFERENCE) | UInt32(CROI_VMO_CHILD_SNAPSHOT_MODIFIED)
-        guard options & ~known == 0 else { throw .invalidArgs }
-        if options & noWrite != 0, options & UInt32(CROI_VMO_CHILD_RESIZABLE) != 0 { throw .invalidArgs }
-        let resizableChild = UInt32(CROI_VMO_CHILD_RESIZABLE)  // K13h: snapshots only
-        let kind = options & ~noWrite & ~resizableChild
-        guard kind != 0 else { throw .invalidArgs }
-        let slice = UInt32(CROI_VMO_CHILD_SLICE)
-        if kind == slice, options & resizableChild != 0 { throw .invalidArgs }
-        if kind & slice != 0, kind != slice { throw .invalidArgs }  // nothing else goes with SLICE
-        guard kind == snapshotAtLeastOnWrite || kind == slice else { throw .notSupported }
+        let noWrite = UInt32(CROI_VMO_CHILD_NO_WRITE), resizableChild = UInt32(CROI_VMO_CHILD_RESIZABLE)
+        let slice = UInt32(CROI_VMO_CHILD_SLICE), reference = UInt32(CROI_VMO_CHILD_REFERENCE)
+        let full = UInt32(CROI_VMO_CHILD_SNAPSHOT), onWrite = UInt32(CROI_VMO_CHILD_SNAPSHOT_AT_LEAST_ON_WRITE)
+        let modified = UInt32(CROI_VMO_CHILD_SNAPSHOT_MODIFIED)
         let pageMask = KernelLayout.pageSize - 1
         guard size <= UInt64.max - pageMask else { throw .outOfRange }
-        let ref = try table.get(handle, type: .vmo, rights: .duplicate | .read)
+        let rounded = (size + pageMask) & ~pageMask
+        if options & noWrite != 0, options & resizableChild != 0 { throw .invalidArgs }
+        var kind = options & ~noWrite
+        let passThrough = kind & resizableChild != 0 && kind & reference != 0
+        let ref = try table.get(handle, type: .vmo, rights: passThrough ? .duplicate | .read | .resize : .duplicate | .read)
         var rights = try table.rights(of: handle)
         let parent = VmoPointer(address: UnsafeVmoObject(ref.object).vmo)
         guard !parent.pointee.discardable else { throw .notSupported }  // K14a, Zircon's
+        var snapshot = false
         let child: Vmo
         do throws(VmError) {
-            child = kind == slice
-                ? try Vmo(sliceOf: parent, offset: offset, size: (size + pageMask) & ~pageMask)
-                : try Vmo(childOf: parent, offset: offset, size: (size + pageMask) & ~pageMask)
+            if kind & slice != 0 {
+                guard kind == slice else { throw .invalidArgument }
+                child = try Vmo(sliceOf: parent, offset: offset, size: rounded)
+            } else if kind & reference != 0 {
+                kind &= ~reference
+                let resizable = kind & resizableChild != 0
+                kind &= ~resizableChild
+                guard kind == 0 else { throw .invalidArgument }
+                if case .physical = parent.pointee.kind { throw .notSupported }  // Zircon's VmObject default
+                guard offset == 0, size == 0 else { throw .invalidArgument }
+                child = try Vmo(referenceOf: parent, resizable: resizable)
+            } else {
+                let type: Vmo.Snapshot
+                if kind & full != 0 {
+                    kind &= ~full
+                    type = .full
+                } else if kind & onWrite != 0 {
+                    kind &= ~onWrite
+                    type = .atLeastOnWrite
+                } else if kind & modified != 0 {
+                    kind &= ~modified
+                    type = .modified
+                } else {
+                    throw .invalidArgument
+                }
+                kind &= ~resizableChild
+                guard kind == 0 else { throw .invalidArgument }
+                snapshot = true
+                child = try Vmo.snapshot(of: parent, type, offset: offset, size: rounded)
+                if options & resizableChild != 0 { child.record.pointee.resizable = true }
+            }
         } catch {
             throw error == .outOfMemory ? .noMemory : error.status
         }
-        if options & resizableChild != 0 { child.record.pointee.resizable = true }
-        if size & pageMask != 0 { child.record.pointee.streamSize = size }
+        // A slice's or snapshot's content size is its own; a reference's is
+        // its root's.
+        if options & reference == 0, size & pageMask != 0 { child.record.pointee.streamSize = size }
         rights.remove(.resize)
         if options & resizableChild != 0 { rights.insert(.resize) }
         rights.insert(.getProperty)
         rights.insert(.setProperty)
-        if kind == slice {
-            if options & noWrite != 0 { rights.remove(.write) }
-        } else if options & noWrite != 0 {
+        if options & noWrite != 0 {
             rights.remove(.write)
-        } else {
+        } else if snapshot {
             rights.remove(.execute)
             rights.insert(.write)
         }
