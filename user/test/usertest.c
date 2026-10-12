@@ -5158,8 +5158,8 @@ static void kernel_fs_base(uint64_t arg) {
 }
 #endif
 
-// The low items: FS/GS bases in user space only, the reset control port
-// and PSCI 1.3's SYSTEM_OFF2 the kernel's.
+// The low items: FS/GS bases in user space only, PSCI 1.3's SYSTEM_OFF2
+// the kernel's.
 static int64_t review_low(const startup_t *s) {
 #if defined(__x86_64__)
   uint64_t sp = 0;
@@ -5167,8 +5167,6 @@ static int64_t review_low(const startup_t *s) {
   probe.self = unstarted_thread(s, &sp);
   CHECK(701, sys(CROI_SYS_THREAD_START, probe.self, (uint64_t)kernel_fs_base, sp, (uint64_t)&probe, 0) == 0 &&
                  ended(probe.self) && probe.result == ERR_INVALID_ARGS);
-  uint32_t reset = 0;
-  CHECK(703, resource_create(s->resource, CROI_RSRC_KIND_IOPORT, 0xCF8, 4, &reset) == ERR_ACCESS_DENIED);
 #elif defined(__aarch64__)
   uint32_t off2 = 0;
   CHECK(702, resource_create(s->resource, CROI_RSRC_KIND_SMC, 0xC4000015u, 1, &off2) == ERR_ACCESS_DENIED &&

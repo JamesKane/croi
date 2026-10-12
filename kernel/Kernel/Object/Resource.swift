@@ -265,9 +265,10 @@ enum RootFilter {
             // The 8259s (kept masked) and the console UART.
             if base < 0x22 && 0x20 < end { return false }
             if base < 0xA2 && 0xA0 < end { return false }
-            // The reset control register: resets are system_powerctl's
-            // (review round 1). The 8042 stays (keyboard drivers need it).
-            if base <= 0xCF9 && 0xCF9 < end { return false }
+            // Not the reset control register (0xCF9): it lies inside PCI's
+            // CONFIG_ADDRESS dword at 0xCF8, which port-based config access
+            // needs (denying it in review round 1 broke Todhchai's PCI
+            // driver), and Zircon allows it.
             if bootHandoff.uart.kind == UInt32(CROI_UART_NS16550_PIO) {
                 let uart = bootHandoff.uart.base
                 if base < uart + 8 && uart < end { return false }

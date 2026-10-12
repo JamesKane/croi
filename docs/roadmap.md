@@ -891,8 +891,9 @@ THREAD, VMO, maps, handle table) and the NAME property.
     advanced at syscall entry (restart steps back), the handoff page's
     seed cleared, ELF stack sizes and DT_RELAENT bounded and the
     loaders' placement guarded, short PPTT processor nodes skipped, PSCI
-    SET_SUSPEND_MODE/MEM_PROTECT/SYSTEM_OFF2 and port 0xCF9 kept the
-    kernel's, the ITS DISCARDs only mapped events, VT-d bti_create
+    SET_SUSPEND_MODE/MEM_PROTECT/SYSTEM_OFF2 kept the kernel's (port
+    0xCF9 too at first: reverted, it is inside PCI's CONFIG_ADDRESS at
+    0xCF8 and broke Todhchai's port-based PCI access), the ITS DISCARDs only mapped events, VT-d bti_create
     re-checks the claim under the lock it stores with. The AP MDCR_EL2
     edit first broke every arm64 boot: its numeric label caught an
     earlier `1f` that skips the EL2 drop (named labels there now).
