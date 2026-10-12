@@ -2525,6 +2525,116 @@ static void aligned_worker(uint64_t arg) {
   sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
 }
 
+// K14e (ext 5): an interrupt that hands its waiter an admitted context.
+typedef struct {
+  uint32_t interrupt;
+  volatile uint32_t round;     // rounds done
+  volatile uint32_t spinning;  // in round 3, waiting to be withdrawn
+  volatile uint32_t release;
+  volatile int64_t deadline[4], borrowed[4], cpu[4], start[4];
+  volatile int64_t fell_back;  // round 1: ns until the spent budget sent it back to its own, or -1
+  volatile int64_t withdrawn;  // round 3: back on its own while running, once the context was replaced
+} handoff_waiter_t;
+
+static void handoff_waiter(uint64_t arg) {
+  handoff_waiter_t *w = (handoff_waiter_t *)arg;
+  for (uint32_t i = 0; i < 4; i++) {
+    sys(CROI_SYS_INTERRUPT_WAIT, w->interrupt, 0, 0, 0, 0);
+    w->deadline[i] = sys(CROI_SYS_TEST_PROFILE, 0, 0, 0, 0, 0);
+    w->borrowed[i] = sys(CROI_SYS_TEST_PROFILE, 10, 0, 0, 0, 0);
+    w->cpu[i] = sys(CROI_SYS_TEST_PROFILE, 5, 0, 0, 0, 0);
+    w->start[i] = sys(CROI_SYS_TEST_PROFILE, 3, 0, 0, 0, 0);
+    uint64_t t0 = now_ns();
+    if (i == 0) {
+      while (now_ns() - t0 < 500000) {}  // some of the budget
+    } else if (i == 1) {
+      w->fell_back = -1;  // the rest, and past it
+      while (now_ns() - t0 < 2000000000ull) {
+        if (sys(CROI_SYS_TEST_PROFILE, 10, 0, 0, 0, 0) == -1) {
+          w->fell_back = (int64_t)(now_ns() - t0);
+          break;
+        }
+      }
+    } else if (i == 3) {
+      w->spinning = 1;
+      while (!w->release && now_ns() - t0 < 5000000000ull) {}
+      w->withdrawn = sys(CROI_SYS_TEST_PROFILE, 10, 0, 0, 0, 0) == -1 && sys(CROI_SYS_TEST_PROFILE, 0, 0, 0, 0, 0) == 0;
+    }
+    w->round = i + 1;
+  }
+  sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
+}
+
+// Waits until `thread` is blocked in interrupt_wait (a trigger before
+// that is consumed by the wait without a wakeup to hand anything on).
+static int blocked_on_interrupt(uint32_t thread) {
+  uint64_t give_up = now_ns() + 2000000000ull, counts[2];
+  croi_info_thread_t info;
+  while (now_ns() < give_up) {
+    if (sys6(CROI_SYS_OBJECT_GET_INFO, thread, CROI_INFO_THREAD, (uint64_t)&info, sizeof info, (uint64_t)&counts[0],
+             (uint64_t)&counts[1]) == 0 && info.state == CROI_THREAD_STATE_BLOCKED_INTERRUPT)
+      return 1;
+    sleep_ns(200000);
+  }
+  return 0;
+}
+
+static int round_done(volatile uint32_t *round, uint32_t want) {
+  uint64_t give_up = now_ns() + 5000000000ull;
+  while (*round < want && now_ns() < give_up) sleep_ns(200000);
+  return *round >= want;
+}
+
+static int64_t interrupt_handoff(const startup_t *s, uint32_t counter, uint32_t fair, uint32_t lend) {
+  uint32_t v = 0, handoff = 0, huge = 0, port = 0, refusal = 99;
+  // 2 ms of budget every 2 s: the CBS rule keeps one period across
+  // wakeups that come within half a second.
+  CHECK(628, deadline_profile(s->resource, 2000000, 2000000000, 2000000000, &handoff) == 0 &&
+                 deadline_profile(s->resource, 10000000, 10000000, 10000000, &huge) == 0 &&
+                 sys(CROI_SYS_INTERRUPT_CREATE, 0, 0, CROI_INTERRUPT_VIRTUAL, (uint64_t)&v, 0) == 0 &&
+                 sys(CROI_SYS_PORT_CREATE, 0, (uint64_t)&port, 0, 0, 0) == 0);
+  // Interrupts only, deadline profiles only, admitted (refused with a
+  // reason); its overruns go to a port.
+  CHECK(629, sys(CROI_SYS_OBJECT_SET_PROFILE, counter, handoff, CROI_PROFILE_HANDOFF, 0, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_OBJECT_SET_PROFILE, v, fair, CROI_PROFILE_HANDOFF, 0, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_THREAD_BIND_OVERRUN_PORT, v, port, 7, 0, 0) == ERR_BAD_STATE &&
+                 sys(CROI_SYS_OBJECT_SET_PROFILE, v, huge, CROI_PROFILE_HANDOFF, (uint64_t)&refusal, 0) == -3 &&
+                 (refusal & 0xFF) == CROI_ADMISSION_CPU_OVERLOADED &&
+                 sys(CROI_SYS_OBJECT_SET_PROFILE, v, handoff, CROI_PROFILE_HANDOFF, (uint64_t)&refusal, 0) == 0 &&
+                 refusal == CROI_ADMISSION_ACCEPTED &&
+                 sys(CROI_SYS_THREAD_BIND_OVERRUN_PORT, v, port, 7, 0, 0) == 0);
+  handoff_waiter_t h;
+  zero_bytes(&h, sizeof h);
+  h.interrupt = v;
+  uint32_t worker = start_thread(s, handoff_waiter, (uint64_t)&h);
+  for (uint32_t i = 0; i < 3; i++) {
+    CHECK(630, blocked_on_interrupt(worker) && sys(CROI_SYS_INTERRUPT_TRIGGER, v, 0, now_ns(), 0, 0) == 0 &&
+                   round_done(&h.round, i + 1));
+  }
+  // A fair thread woken runs on the context's deadline, on its CPU.
+  CHECK(631, h.deadline[0] == 1 && h.borrowed[0] >= 0 && h.borrowed[0] == h.cpu[0]);
+  // Woken again within the period: the same period (one budget); when
+  // that runs out it carries on on its own profile, an overrun reported.
+  croi_port_packet_t p;
+  CHECK(632, h.deadline[1] == 1 && h.start[1] == h.start[0] && h.fell_back >= 0 &&
+                 port_next(port, 1000000000, &p) == 0 && p.type == CROI_PKT_TYPE_BUDGET_OVERRUN && p.key == 7 &&
+                 p.payload[1] >= 1);
+  // Woken while the budget is spent: on its own.
+  CHECK(633, h.deadline[2] == 0 && h.borrowed[2] == -1);
+  // A new context (fresh budget); replaced by a lend while the woken
+  // thread runs on it, it is withdrawn at once.
+  CHECK(634, sys(CROI_SYS_OBJECT_SET_PROFILE, v, handoff, CROI_PROFILE_HANDOFF, (uint64_t)&refusal, 0) == 0 &&
+                 blocked_on_interrupt(worker) && sys(CROI_SYS_INTERRUPT_TRIGGER, v, 0, now_ns(), 0, 0) == 0 &&
+                 round_done(&h.spinning, 1) && h.deadline[3] == 1 && h.borrowed[3] >= 0 &&
+                 sys(CROI_SYS_OBJECT_SET_PROFILE, v, lend, 0, 0, 0) == 0);
+  h.release = 1;
+  join_checked(worker);
+  CHECK(635, h.withdrawn == 1);
+  uint32_t handles[] = {v, handoff, huge, port};
+  for (int i = 0; i < 4; i++) sys(CROI_SYS_HANDLE_CLOSE, handles[i], 0, 0, 0, 0);
+  return 0;
+}
+
 static int64_t deadline_wakeups(const startup_t *s) {
   uint32_t deadline = 0, fair = 0, counter = 0, weak = 0, t = 0, page_vmo = 0;
   croi_profile_info_t info;
@@ -2576,6 +2686,8 @@ static int64_t deadline_wakeups(const startup_t *s) {
     CHECK(388, a.done && start >= page->base_time_ns && (start - page->base_time_ns) % page->period_ns == 0);
   }
   sys(CROI_SYS_VMAR_UNMAP, s->vmar, at, PAGE, 0, 0);
+  int64_t handed = interrupt_handoff(s, counter, fair, deadline);
+  if (handed != 0) return handed;
   uint32_t handles[] = {deadline, fair, counter, weak, t, page_vmo};
   for (int i = 0; i < 6; i++) sys(CROI_SYS_HANDLE_CLOSE, handles[i], 0, 0, 0, 0);
   return 0x600D;

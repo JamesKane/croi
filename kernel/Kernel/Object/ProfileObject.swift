@@ -47,16 +47,24 @@ enum Profiles {
             let object = try create(info)
             try Syscalls.put(try table.add(object, rights: ProfileObject.defaultRights), a[3])
         case 121:  // object_set_profile(target, profile, options, refusal, timeline)
-            guard a[2] & ~UInt64(CROI_PROFILE_ALIGN_TIMELINE) == 0 else { throw .invalidArgs }
+            guard a[2] & ~UInt64(CROI_PROFILE_ALIGN_TIMELINE | CROI_PROFILE_HANDOFF) == 0 else { throw .invalidArgs }
             if a[3] != 0 { try Syscalls.check(a[3], MemoryLayout<UInt32>.size) }
             let profile = try table.get(UInt32(truncatingIfNeeded: a[1]), type: .profile, rights: .applyProfile)
             let target = UInt32(truncatingIfNeeded: a[0])
             let type = try table.get(target).type
             if type == .interrupt || type == .counter || type == .timeline {
                 // K10c, ext 5: the event lends this deadline to the threads
-                // it wakes directly.
-                guard a[2] == 0 else { throw .invalidArgs }
+                // it wakes directly; K14e: an interrupt hands them an
+                // admitted context instead.
                 let event = try table.get(target, rights: .write)
+                if a[2] == UInt64(CROI_PROFILE_HANDOFF), type == .interrupt {
+                    var refusal: UInt32 = UInt32(CROI_ADMISSION_ACCEPTED)
+                    defer { if a[3] != 0 { try? Syscalls.put(refusal, a[3]) } }
+                    let context = try admit(ProfileObjectPointer(object: profile.object), reservation: 0, refusal: &refusal)
+                    InterruptObjects.setContext(event.object, context, lend: nil)
+                    return
+                }
+                guard a[2] == 0 else { throw .invalidArgs }
                 try lend(ProfileObjectPointer(object: profile.object), from: event.object)
                 return
             }
@@ -68,7 +76,18 @@ enum Profiles {
                 let timeline = try table.get(UInt32(truncatingIfNeeded: a[4]), type: .timeline, rights: .read)
                 try align(thread.object, to: timeline.object)
             }
-        case 122:  // thread_bind_overrun_port(thread, port, key), K10d
+        case 122:  // thread_bind_overrun_port(thread or interrupt, port, key), K10d; interrupts K14e
+            if try table.get(UInt32(truncatingIfNeeded: a[0])).type == .interrupt {
+                let interrupt = try table.get(UInt32(truncatingIfNeeded: a[0]), rights: .write)
+                let port = try table.get(UInt32(truncatingIfNeeded: a[1]), type: .port, rights: .write)
+                let source = try PacketSourcePointer.make(port: port, key: a[2], type: PortPacket.budgetOverrun)
+                guard let old = InterruptObjects.bindOverrunSource(interrupt.object, source.address) else {
+                    source.retire()
+                    throw .badState
+                }
+                if old != 0 { PacketSourcePointer(address: old).retire() }
+                return
+            }
             let thread = try table.get(UInt32(truncatingIfNeeded: a[0]), type: .thread, rights: .manageThread)
             let port = try table.get(UInt32(truncatingIfNeeded: a[1]), type: .port, rights: .write)
             let address = thread.object.header.lock.withLock { ThreadObjectPointer(object: thread.object).pointee.thread }
@@ -121,6 +140,10 @@ enum Profiles {
     static func lend(_ profile: ProfileObjectPointer, from event: ObjectPointer) throws(Status) {
         guard profile.pointee.flags & UInt32(CROI_PROFILE_INFO_FLAG_DEADLINE) != 0 else { throw .invalidArgs }
         let lent = Profile.deadline(profile.pointee.params)
+        if event.header.type == .interrupt {
+            InterruptObjects.setContext(event, nil, lend: lent)  // a handed-off context goes
+            return
+        }
         event.header.lock.withLock {
             switch event.header.type {
             case .interrupt: InterruptPointer(object: event).pointee.lend = lent
@@ -146,6 +169,25 @@ enum Profiles {
         }
     }
 
+    /// Admits a deadline profile as a context (its CPU mask, if any):
+    /// INVALID_ARGS for a profile that isn't a deadline one or bad
+    /// parameters, NO_RESOURCES with `refusal` set when refused (ext 4).
+    static func admit(_ profile: ProfileObjectPointer, reservation: UInt32, refusal: inout UInt32) throws(Status) -> SchedContext {
+        guard profile.pointee.flags & UInt32(CROI_PROFILE_INFO_FLAG_DEADLINE) != 0 else { throw .invalidArgs }
+        let mask: UInt64 = profile.pointee.cpuMask != 0 ? profile.pointee.cpuMask : .max
+        do throws(AdmissionRefusal) {
+            return try SchedContext(deadline: profile.pointee.params, affinity: mask, reservation: reservation)
+        } catch {
+            switch error {
+            case .invalidParameters: throw .invalidArgs
+            case .noEligibleCpu: refusal = UInt32(CROI_ADMISSION_NO_ELIGIBLE_CPU)
+            case .cpuOverloaded(let cpu): refusal = UInt32(cpu) << 8 | UInt32(CROI_ADMISSION_CPU_OVERLOADED)
+            case .accountExhausted: refusal = UInt32(CROI_ADMISSION_ACCOUNT_EXHAUSTED)
+            }
+            throw .noResources
+        }
+    }
+
     /// Applies `profile` to the thread object `thread` (running).
     static func apply(_ profile: ProfileObjectPointer, to thread: ObjectPointer, refusal: inout UInt32) throws(Status) {
         let address = thread.header.lock.withLock { ThreadObjectPointer(object: thread).pointee.thread }
@@ -154,19 +196,7 @@ enum Profiles {
         let flags = profile.pointee.flags
         let mask: UInt64? = profile.pointee.cpuMask != 0 ? profile.pointee.cpuMask : nil
         if flags & UInt32(CROI_PROFILE_INFO_FLAG_DEADLINE) != 0 {
-            let context: SchedContext
-            do throws(AdmissionRefusal) {
-                context = try SchedContext(deadline: profile.pointee.params, affinity: mask ?? .max,
-                                           reservation: Scheduler.reservation(of: scheduled))
-            } catch {
-                switch error {
-                case .invalidParameters: throw .invalidArgs
-                case .noEligibleCpu: refusal = UInt32(CROI_ADMISSION_NO_ELIGIBLE_CPU)
-                case .cpuOverloaded(let cpu): refusal = UInt32(cpu) << 8 | UInt32(CROI_ADMISSION_CPU_OVERLOADED)
-                case .accountExhausted: refusal = UInt32(CROI_ADMISSION_ACCOUNT_EXHAUSTED)
-                }
-                throw .noResources
-            }
+            let context = try admit(profile, reservation: Scheduler.reservation(of: scheduled), refusal: &refusal)
             Scheduler.applyProfile(scheduled, weight: nil, context: context, affinity: mask)
         } else if flags & UInt32(CROI_PROFILE_INFO_FLAG_PRIORITY) != 0 {
             Scheduler.applyProfile(scheduled, weight: Profile.weight(priority: profile.pointee.priority), context: nil,

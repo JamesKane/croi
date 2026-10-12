@@ -673,8 +673,7 @@ User/DriverSyscalls.swift; Todhchai item 13):
 - Differences from Zircon: closing the handle a thread waits through
   cancels its interrupt_wait (as object waits; Zircon cancels on the last
   handle). The object is destroyed with its last reference. Ext 5's
-  scheduling-context handoff has a field (`context`) and a single wake
-  path (`signal`), unused.
+  scheduling-context handoff (K14e) wakes through `signal`.
 - Boot test mode 11 (`ProcessSelfTest.runInterrupts`): virtual interrupts
   through every state, then each machine's RTC (amd64 CMOS periodic, GSI
   8, edge; arm64 PL031, INTID 34, level; rv64 goldfish, GSI 11, level)
@@ -1057,6 +1056,25 @@ Deadline-carrying wakeups, K10c (Todhchai ext 5 and 10; profile.h):
   re-aligned at once. `SchedContextRecord.intent` is still stored only.
 - Test hooks 3/4 (syscall 6) return the running thread's period start
   and deadline. Boot test mode 16 (`ProcessSelfTest.runDeadlineWakeups`).
+- Ext 5 proper, K14e (profile.h `CROI_PROFILE_HANDOFF`): object_set_profile
+  on an interrupt with that option admits the deadline profile as a
+  context the object owns (`InterruptObject.context`; refusals as for
+  threads, `Profiles.admit`). `signal` wakes through
+  `Scheduler.wakeAll(queue, handingOff:)`: `borrow` makes it the woken
+  thread's `context` (its own kept in `homeContext`, its own period and
+  budget in `home*`), so placement (the context's CPU), stealing (admitted
+  threads stay) and overrun counting follow it. The context keeps the
+  period and budget across wakeups (`handoff*`, written back by
+  `giveBack`; `makeReady` applies the CBS rule), so wakeups share one
+  budget; a wakeup while it is spent wakes the thread on its own. The
+  borrow ends when the thread blocks, when the budget runs out (`requeue`:
+  an overrun on the context, then its own profile, not throttling), at
+  exit, when its own profile changes, or when the context is replaced or
+  the object destroyed (`Scheduler.withdraw`, then destroyed). One
+  borrower at a time (`borrower`). thread_bind_overrun_port takes the
+  interrupt (WRITE) for its context's overruns. A lend replaces a handoff
+  and vice versa. Test hook 10 is the borrowed context's CPU or -1
+  (syscall 6 sends only ops 6-9 to the reclaim hooks now).
 
 Kernel-only extensions reaching user space, K10d (task.h, profile.h,
 log.h; Todhchai ext 3 and 8, its trace export):

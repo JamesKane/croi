@@ -103,6 +103,15 @@ struct Thread: ~Copyable {
     /// interrupt, counter or timeline carrying a profile), until it next
     /// blocks.
     var lent: Profile? = nil
+    /// Ext 5 (K14e): running on an event's scheduling context, which is
+    /// `context` meanwhile; its own context and own budget state, put back
+    /// when it blocks, runs out of the borrowed budget, exits, or the
+    /// context is withdrawn.
+    var borrowing = false
+    var homeContext: SchedContextPointer? = nil
+    var homePeriodStart: UInt64 = 0
+    var homeDeadline: UInt64 = 0
+    var homeRemaining: Int64 = 0
     /// Its WaitState, kept for its next wait (a thread is in one wait at a
     /// time), or 0 until it first waits.
     var waitState: UInt64 = 0

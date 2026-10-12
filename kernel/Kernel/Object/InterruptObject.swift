@@ -47,8 +47,9 @@ struct InterruptObject: ~Copyable {
     /// The CPUs it may go to and the one it does (device interrupts).
     var affinity: UInt64 = 1
     var cpu = 0
-    /// Ext 5: the scheduling context a woken waiter would run on. The hook
-    /// for the handoff (the wait path wakes through `wake`); unused today.
+    /// Ext 5 (K14e): an admitted scheduling context it owns (a
+    /// SchedContextRecord's address, 0 for none); the interrupt_wait thread
+    /// it wakes runs on it at once, sharing its budget across wakeups.
     var context: UInt64 = 0
     /// Ext 5 (K10c): a deadline profile the interrupt_wait thread runs on
     /// from its wakeup until it next blocks (object_set_profile).
@@ -149,6 +150,7 @@ enum InterruptObjects {
 
     private static func free(_ object: ObjectPointer) {
         let interrupt = InterruptPointer(object: object)
+        dropContext(interrupt.pointee.context)
         if interrupt.pointee.msi != 0 { MsiInterrupts.free(MsiStatePointer(address: interrupt.pointee.msi)) }
         interrupt.pointee.packet.free()
         interrupt.pointee.waiters.deallocate()
@@ -234,12 +236,56 @@ enum InterruptObjects {
         return sent
     }
 
-    /// Signals the event and wakes the waiter (ext 5's handoff would go
-    /// here). Object lock held.
+    /// Signals the event and wakes the waiter, handing it the context
+    /// (ext 5) or lending it the profile (K10c). Object lock held.
     private static func signal(_ interrupt: InterruptPointer) {
         Scheduler.locked {
             interrupt.pointee.signaled = true
-            Scheduler.wakeAll(interrupt.pointee.waiters, lending: interrupt.pointee.lend)
+            if interrupt.pointee.context != 0 {
+                Scheduler.wakeAll(interrupt.pointee.waiters,
+                                  handingOff: SchedContextPointer(address: interrupt.pointee.context))
+            } else {
+                Scheduler.wakeAll(interrupt.pointee.waiters, lending: interrupt.pointee.lend)
+            }
+        }
+    }
+
+    /// Ext 5: hands `context` (admitted, now the object's) to the threads
+    /// it wakes from now on, or nil for none; a profile lent before is
+    /// dropped. A context it had is withdrawn from whoever runs on it,
+    /// then destroyed.
+    static func setContext(_ object: ObjectPointer, _ context: consuming SchedContext?, lend: Profile?) {
+        let record = context?.leak()
+        let old = object.header.lock.withLock { () -> UInt64 in
+            let interrupt = InterruptPointer(object: object)
+            let old = interrupt.pointee.context
+            interrupt.pointee.context = record?.address ?? 0
+            interrupt.pointee.lend = lend
+            return old
+        }
+        dropContext(old)
+    }
+
+    private static func dropContext(_ address: UInt64) {
+        guard address != 0 else { return }
+        let context = SchedContextPointer(address: address)
+        Scheduler.withdraw(context)
+        _ = SchedContext(owning: context)  // nobody on it now: destroyed
+    }
+
+    /// Ext 3 for the handed-off context: its overruns go to `source` (a
+    /// PacketSource); the one bound before is returned, nil without a
+    /// context. Under the object lock, so the context can't go meanwhile.
+    static func bindOverrunSource(_ object: ObjectPointer, _ source: UInt64) -> UInt64? {
+        object.header.lock.withLock { () -> UInt64? in
+            let address = InterruptPointer(object: object).pointee.context
+            guard address != 0 else { return nil }
+            return Scheduler.locked { () -> UInt64 in
+                let context = SchedContextPointer(address: address)
+                let old = context.pointee.overrunSource
+                context.pointee.overrunSource = source
+                return old
+            }
         }
     }
 

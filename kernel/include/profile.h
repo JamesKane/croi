@@ -25,6 +25,10 @@ enum : uint32_t {
   // a thread, its periods start on a display timeline's vblanks (ext 10);
   // the timeline's handle (READ) is the fifth argument.
   CROI_PROFILE_ALIGN_TIMELINE = 1u << 0,
+  // With a deadline profile on an interrupt object (ext 5, K14e): admit
+  // it as a scheduling context the object owns (refused with a reason as
+  // for threads) and hand that to the interrupt_wait thread it wakes.
+  CROI_PROFILE_HANDOFF = 1u << 1,
 };
 
 // object_set_profile(target, profile, options, refusal, timeline) also
@@ -34,6 +38,15 @@ enum : uint32_t {
 // on it from its wakeup, with a period starting there, until it next
 // blocks (ext 5, as channel_call donation). No admission: the lent
 // deadline joins the thread's own as inheritance does.
+//
+// With CROI_PROFILE_HANDOFF, an interrupt object instead owns an admitted
+// context: the thread interrupt_wait wakes runs on it at once (on its
+// CPU, with its deadline) until it blocks again, and every wakeup shares
+// the context's budget for its period (the CBS rule at each). A thread
+// that spends it has an overrun counted on the context
+// (thread_bind_overrun_port on the interrupt reports them) and carries on
+// on its own profile; a wakeup while it is spent wakes the thread on its
+// own. A lend replaces a handoff and vice versa.
 
 // zx_sched_deadline_params_t: ns. 50 µs <= capacity <= relative_deadline
 // <= period <= 10 s.

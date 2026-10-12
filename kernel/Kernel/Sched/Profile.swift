@@ -199,6 +199,14 @@ struct SchedContextRecord {
     /// timeline object it holds a reference to; 0 for none.
     var alignPage: UInt64 = 0
     var alignTimeline: UInt64 = 0
+    /// Ext 5 (K14e): a context an interrupt object hands to the thread it
+    /// wakes. Its period and budget live here across wakeups (the CBS rule
+    /// at each), so wakeups share one budget; `borrower` runs on it now.
+    var handoffStarted = false
+    var handoffPeriodStart: UInt64 = 0
+    var handoffDeadline: UInt64 = 0
+    var handoffRemaining: Int64 = 0
+    var borrower: ThreadPointer?
     var next: SchedContextPointer?
 }
 

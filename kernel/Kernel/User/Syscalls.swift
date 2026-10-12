@@ -202,7 +202,7 @@ enum Syscalls {
         case 1: return write(a[0], a[1])
         case 2: Processes.exitThread(Int(Int64(bitPattern: a[0])))
         case 63: Processes.exitProcess(Int64(bitPattern: a[0]))  // process_exit: no handles needed
-        case 6: return a[0] >= 6 ? Reclaim.testHook(a) : TestHooks.profile(a[0])
+        case 6: return (6...9).contains(a[0]) ? Reclaim.testHook(a) : TestHooks.profile(a[0])
         case 3: return Int64(bitPattern: Clock.now())
         case 4:
             Scheduler.sleepInterruptible(until: a[0])
@@ -623,6 +623,7 @@ enum TestHooks {
         case 3: return Int64(bitPattern: Scheduler.currentPeriod().start)     // K10c tests
         case 4: return Int64(bitPattern: Scheduler.currentPeriod().deadline)
         case 5: return Int64(Cpu.current)  // K10d tests
+        case 10: return Int64(Scheduler.borrowedCpu())  // K14e: the borrowed context's CPU, or -1
         default: return Int64(Status.invalidArgs.rawValue)
         }
     }

@@ -322,7 +322,7 @@ enum ProcessSelfTest {
         }
         before.expectUnchanged(console)
         console.write("  deadline wakeups: a counter lends its deadline until the woken thread blocks; ")
-        console.write("periods aligned to vblanks\n")
+        console.write("periods aligned to vblanks; an interrupt hands its waiter an admitted context (shared budget, overrun, withdrawn)\n")
     }
 
     static func runExtensions(_ console: Uart) {

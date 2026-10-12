@@ -368,6 +368,7 @@ enum Scheduler {
         let thread = cpus[me].current!
         guard !thread.pointee.isIdle else { panic("sched: the idle thread exited") }
         guard thread.pointee.ownedQueues == nil else { panic("sched: a thread exited holding a mutex") }
+        giveBack(thread, Clock.now())
         detachContext(thread)
         thread.pointee.aspace?.pointee.threads -= 1
         thread.pointee.aspace = nil  // the switch away loads whatever runs next
@@ -456,6 +457,8 @@ enum Scheduler {
         guard !thread.pointee.isIdle else { panic("sched: the idle thread blocked") }
         // A user-facing wait (syscalls) ends when its thread is killed.
         if interruptible, thread.pointee.killPending { return .interrupted }
+        // A borrowed context (ext 5, K14e) is held until the thread blocks.
+        if thread.pointee.borrowing { giveBack(thread, Clock.now()) }
         // A lent profile (ext 5) lasts until the thread blocks again.
         if thread.pointee.lent != nil {
             thread.pointee.lent = nil
@@ -583,6 +586,111 @@ enum Scheduler {
             woken += 1
         }
         return woken
+    }
+
+    /// Wakes every thread on `queue` (an interrupt object's one waiter),
+    /// the first running on `context` at once (ext 5, K14e) if it has
+    /// budget left this period and nobody holds it; otherwise, and the
+    /// rest, on their own profiles. Lock held.
+    @discardableResult
+    static func wakeAll(_ queue: QueuePointer, handingOff context: SchedContextPointer?) -> Int {
+        guard let context else { return wakeAll(queue) }
+        var woken = 0
+        while let thread = queue.pointee.pop() {
+            thread.pointee.waitQueue = nil
+            if context.pointee.borrower == nil, !thread.pointee.borrowing { borrow(context, for: thread, Clock.now()) }
+            makeReady(thread)
+            if let owner = queue.pointee.owner { updateEffectiveProfile(owner) }
+            woken += 1
+        }
+        return woken
+    }
+
+    /// `thread` (waking) runs on `context` from now, with the context's
+    /// period and budget (`makeReady` then applies the CBS rule to them, as
+    /// for a thread's own), unless that budget is spent until the next
+    /// period: then it wakes on its own profile. Lock held.
+    private static func borrow(_ context: SchedContextPointer, for thread: ThreadPointer, _ now: UInt64) {
+        let params = context.pointee.profile.params
+        if !context.pointee.handoffStarted {
+            context.pointee.handoffStarted = true
+            context.pointee.handoffPeriodStart = now
+            context.pointee.handoffDeadline = now + params.deadline
+            context.pointee.handoffRemaining = Int64(params.capacity)
+        } else if context.pointee.handoffRemaining <= 0, now < context.pointee.handoffPeriodStart + params.period {
+            return
+        }
+        thread.pointee.homeContext = thread.pointee.context
+        thread.pointee.homePeriodStart = thread.pointee.periodStart
+        thread.pointee.homeDeadline = thread.pointee.absoluteDeadline
+        thread.pointee.homeRemaining = thread.pointee.remaining
+        thread.pointee.borrowing = true
+        thread.pointee.context = context
+        context.pointee.boundThreads += 1
+        context.pointee.borrower = thread
+        thread.pointee.effective = computeEffective(thread)
+        thread.pointee.periodStart = context.pointee.handoffPeriodStart
+        thread.pointee.absoluteDeadline = context.pointee.handoffDeadline
+        thread.pointee.remaining = context.pointee.handoffRemaining
+    }
+
+    /// Ends `thread`'s run on a borrowed context (charged first if
+    /// running): what is left of the budget goes back to the context, and
+    /// the thread to its own context and budget. Not its queue: the caller
+    /// takes it off one first. Lock held.
+    private static func giveBack(_ thread: ThreadPointer, _ now: UInt64) {
+        guard thread.pointee.borrowing, let context = thread.pointee.context else { return }
+        if thread.pointee.state == .running { charge(thread, thread.pointee.cpu, now) }
+        context.pointee.handoffPeriodStart = thread.pointee.periodStart
+        context.pointee.handoffDeadline = thread.pointee.absoluteDeadline
+        context.pointee.handoffRemaining = thread.pointee.remaining
+        context.pointee.borrower = nil
+        context.pointee.boundThreads -= 1
+        thread.pointee.context = thread.pointee.homeContext
+        thread.pointee.homeContext = nil
+        thread.pointee.borrowing = false
+        let profile = computeEffective(thread)
+        thread.pointee.effective = profile
+        switch profile.discipline {
+        case .deadline:
+            thread.pointee.periodStart = thread.pointee.homePeriodStart
+            thread.pointee.absoluteDeadline = thread.pointee.homeDeadline
+            thread.pointee.remaining = thread.pointee.homeRemaining
+            if thread.pointee.absoluteDeadline <= now { startPeriod(thread, now) }
+        case .fair:
+            thread.pointee.vruntime = cpus[thread.pointee.cpu].minVruntime
+        }
+    }
+
+    /// The context an interrupt object handed off is going (replaced, or
+    /// the object destroyed): a thread running on it goes back to its own
+    /// now, so the context can be destroyed.
+    static func withdraw(_ context: SchedContextPointer) {
+        locked {
+            guard let thread = context.pointee.borrower else { return }
+            let now = Clock.now()
+            switch thread.pointee.state {
+            case .ready:
+                dequeue(thread, thread.pointee.cpu)
+                giveBack(thread, now)
+                makeReady(thread)
+            case .running:
+                giveBack(thread, now)
+                requestPreemption(on: thread.pointee.cpu)  // re-evaluate, re-arm its slice
+            case .blocked, .dead:
+                giveBack(thread, now)  // not reached: blocking and exiting give it back
+            }
+        }
+    }
+
+    /// Test hook 10: the CPU of the context the running thread borrowed,
+    /// or -1.
+    static func borrowedCpu() -> Int {
+        locked {
+            let thread = cpus[Int(Cpu.current)].current!
+            guard thread.pointee.borrowing, let context = thread.pointee.context else { return -1 }
+            return context.pointee.cpu
+        }
     }
 
     private static let timeoutFired: Timers.Callback = { address, generation in
@@ -957,6 +1065,7 @@ enum Scheduler {
     /// weight). A deadline context moves it to the admitted CPU.
     static func bind(_ thread: ThreadPointer, _ context: SchedContextPointer?) {
         locked {
+            giveBackForChange(thread)
             detachContext(thread)
             if let context { attach(thread, context) }
             reposition(thread)
@@ -971,7 +1080,10 @@ enum Scheduler {
         let owned = context?.leak()
         let old = locked { () -> SchedContextPointer? in
             if let affinity, affinity & allCpus != 0 { thread.pointee.affinity = affinity & allCpus }
-            if weight != nil || owned != nil { detachContext(thread) }
+            if weight != nil || owned != nil {
+                giveBackForChange(thread)
+                detachContext(thread)
+            }
             if let weight { thread.pointee.baseWeight = weight }
             if let owned { attach(thread, owned) }
             if weight != nil, owned == nil { setProfile(thread, computeEffective(thread), Clock.now()) }
@@ -982,6 +1094,20 @@ enum Scheduler {
             return old
         }
         if let old { _ = SchedContext(owning: old) }  // unbound now: destroyed
+    }
+
+    /// Its own profile is about to change: a borrowed context goes back
+    /// first (a ready thread off its queue meanwhile; `reposition` queues
+    /// it again).
+    private static func giveBackForChange(_ thread: ThreadPointer) {
+        guard thread.pointee.borrowing else { return }
+        if thread.pointee.state == .ready {
+            dequeue(thread, thread.pointee.cpu)
+            giveBack(thread, Clock.now())
+            enqueue(thread, on: thread.pointee.cpu, Clock.now())
+        } else {
+            giveBack(thread, Clock.now())
+        }
     }
 
     private static func attach(_ thread: ThreadPointer, _ context: SchedContextPointer) {
@@ -1580,6 +1706,14 @@ enum Scheduler {
     /// wherever it may run now if this CPU no longer takes it. A deadline
     /// thread out of budget waits for its next period.
     private static func requeue(_ thread: ThreadPointer, _ me: Int, _ now: UInt64) {
+        // A borrowed context's budget ran out (ext 5, K14e): an overrun on
+        // that context, and the thread carries on on its own profile (the
+        // context's next wakeup gets a budget again at its next period).
+        if thread.pointee.borrowing, thread.pointee.remaining <= 0 {
+            if !thread.pointee.budgetYielded { overrun(thread) }
+            thread.pointee.budgetYielded = false
+            giveBack(thread, now)
+        }
         if thread.pointee.effective.discipline == .deadline, thread.pointee.remaining <= 0 {
             if !thread.pointee.budgetYielded { overrun(thread) }
             thread.pointee.budgetYielded = false

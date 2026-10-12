@@ -834,6 +834,15 @@ THREAD, VMO, maps, handle table) and the NAME property.
   system_get_event, eviction at critical, OOM eviction then reboot),
   KMEM_STATS' reclaim fields, committed_change_events. Not yet: jobkill
   at OOM, compression, zero-page dedupe, page-table reclaim, page loaning.
+- **K14e: scheduling-context handoff on interrupt wakeup (ext 5).**
+  **Done** (2026-10-11): object_set_profile with CROI_PROFILE_HANDOFF on
+  an interrupt admits a deadline context the object owns; the thread
+  interrupt_wait wakes runs on it at once (its CPU and deadline) until it
+  blocks, and wakeups share the context's budget per period (CBS rule),
+  so an interrupt storm is bounded: a spent budget is an overrun on the
+  context (reported through thread_bind_overrun_port on the interrupt)
+  and the thread carries on on its own profile. Withdrawn when replaced
+  or destroyed. K10c's unadmitted lend stays for counters and timelines.
 - **K14d: thread_raise_exception.** **Done** (2026-10-11): ZX_EXCP_USER
   to every job debugger up the tree, single shot (each reply ignored),
   Zircon's checks; closed job debugger channels are now pruned whenever
@@ -883,8 +892,7 @@ from Zircon, see docs/zircon-divergences.md.
 - Requirement 9: lazy AMX through XFD, SME streaming mode, per-thread SVE
   vector lengths (none available under QEMU TCG).
 - Requirement 1: the GENI UART (Q8B); a text console on the framebuffer.
-- Extensions: 5 (scheduling-context handoff on interrupt wakeup: the field
-  exists, unused), 10 (the frame intent: stored only), 11 and 12 (an idle
+- Extensions: 10 (the frame intent: stored only), 11 and 12 (an idle
   governor and the frequency floor: KP, which needs the power service).
 
 **Zircon pieces not yet in croi**
