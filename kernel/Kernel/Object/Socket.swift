@@ -151,17 +151,28 @@ struct SocketObject: ~Copyable {
             pointee.tail = 0
             return
         }
-        // Pages strictly between the head's and the tail's (going forward
-        // from the head) hold nothing.
-        let headPage = Int((pointee.head % SocketObject.capacity) / 4096)
-        let tailPage = Int((pointee.tail % SocketObject.capacity) / 4096)
-        var page = (headPage + 1) % 64
-        while page != tailPage {
+        // Pages wholly inside the free region, which runs from the head
+        // (the next byte written) for `capacity - used` bytes. (Review fix:
+        // this walked the pages strictly between the head's and the tail's,
+        // which, both in one page of a nearly full ring, were all the others,
+        // full of unread data: they were freed and the socket wedged.)
+        let capacity = SocketObject.capacity
+        var at = pointee.head % capacity
+        var left = capacity - used
+        let into = at % 4096
+        if into != 0 {  // the rest of the head's page isn't all free
+            guard left > 4096 - into else { return }
+            left -= 4096 - into
+            at = (at + 4096 - into) % capacity
+        }
+        while left >= 4096 {
+            let page = Int(at / 4096)
             if pointee.pages[page] != 0 {
                 pmm.free(pointee.pages[page])
                 pointee.pages[page] = 0
             }
-            page = (page + 1) % 64
+            at = (at + 4096) % capacity
+            left -= 4096
         }
     }
 
@@ -339,7 +350,7 @@ enum Sockets {
                 if let peer = me.peerPointer {
                     var set: UInt32 = 0
                     if peer.pointee.writeThreshold > 0, me.free >= peer.pointee.writeThreshold { set |= writeThreshold }
-                    if wasFull { set |= writable }
+                    if wasFull, moved > 0 { set |= writable }  // Zircon's (review fix: also when nothing moved)
                     if set != 0 { peer.object.updateSignals(clear: 0, set: set) }
                 }
             }

@@ -108,8 +108,20 @@ enum Fifos {
     /// how many went.
     static func write(_ object: ObjectPointer, size: UInt64, source: UInt64, count: UInt64) throws(Status) -> UInt64 {
         let me = FifoPointer(object: object)
-        guard size == UInt64(me.pointee.elementSize), count > 0 else { throw .outOfRange }
-        let wanted = min(count, UInt64(me.pointee.elementCount))  // more never fits
+        // Zircon's order: the peer, the size and count, room; then only the
+        // records that fit are read from user memory (review fix: the
+        // whole buffer was read first, so a full or peerless FIFO gave
+        // INVALID_ARGS for a short buffer, and OUT_OF_RANGE before
+        // PEER_CLOSED).
+        let room = try me.pointee.shared.pointee.lock.withLock { () throws(Status) -> UInt64 in
+            guard me.pointee.peer != 0 else { throw .peerClosed }
+            guard size == UInt64(me.pointee.elementSize), count > 0 else { throw .outOfRange }
+            let target = FifoPointer(object: ObjectPointer(address: me.pointee.peer))
+            let used = target.pointee.head - target.pointee.tail
+            guard used < UInt64(target.pointee.elementCount) else { throw .shouldWait }
+            return UInt64(target.pointee.elementCount) - used
+        }
+        let wanted = min(count, room)
         let bytes = Int(wanted) * me.pointee.elementSize
         guard let staging = unsafe heap.allocate(size: bytes) else { throw .noMemory }
         defer { unsafe heap.free(staging) }
@@ -139,7 +151,15 @@ enum Fifos {
     static func read(_ object: ObjectPointer, size: UInt64, destination: UInt64, count: UInt64) throws(Status) -> UInt64 {
         let me = FifoPointer(object: object)
         guard size == UInt64(me.pointee.elementSize), count > 0 else { throw .outOfRange }
-        let wanted = min(count, UInt64(me.pointee.elementCount))
+        // Empty first, then the destination only for the records there
+        // (review fix, Zircon's order: an empty FIFO gave INVALID_ARGS for a
+        // bad buffer, and a buffer for fewer records than asked was refused).
+        let available = try me.pointee.shared.pointee.lock.withLock { () throws(Status) -> UInt64 in
+            let used = me.pointee.head - me.pointee.tail
+            guard used > 0 else { throw me.pointee.peer == 0 ? .peerClosed : .shouldWait }
+            return used
+        }
+        let wanted = min(count, available)
         let bytes = Int(wanted) * me.pointee.elementSize
         try Syscalls.check(destination, bytes)
         guard let staging = unsafe heap.allocate(size: bytes) else { throw .noMemory }

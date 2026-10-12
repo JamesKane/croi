@@ -5227,6 +5227,63 @@ static int64_t review_entry(const startup_t *s) {
   return 0;
 }
 
+// Negative tests from the second review (sockets, FIFOs, streams).
+static int64_t review_queues(const startup_t *s) {
+  // A full stream socket read one byte, then page by page: the ring's trim
+  // freed every other page (unread data) when both ends fell in one page.
+  uint32_t a = 0, b = 0, vmo = 0;
+  uint64_t chunk = 0, actual = 0, written = 0;
+  CHECK(703, sys(CROI_SYS_SOCKET_CREATE, CROI_SOCKET_STREAM, (uint64_t)&a, (uint64_t)&b, 0, 0) == 0 &&
+                 sys(CROI_SYS_VMO_CREATE, PAGE, 0, (uint64_t)&vmo, 0, 0) == 0 &&
+                 sys6(CROI_SYS_VMAR_MAP, s->vmar | (uint64_t)(CROI_VM_PERM_READ | CROI_VM_PERM_WRITE) << 32, 0, vmo,
+                      0, PAGE, (uint64_t)&chunk) == 0);
+  volatile uint8_t *bytes = (volatile uint8_t *)chunk;
+  for (;;) {
+    for (uint64_t i = 0; i < PAGE; i++) bytes[i] = (uint8_t)((written / PAGE) + i);
+    if (sys(CROI_SYS_SOCKET_WRITE, a, 0, chunk, PAGE, (uint64_t)&actual) != 0) break;
+    written += actual;
+  }
+  uint64_t got = 0;
+  int intact = sys(CROI_SYS_SOCKET_READ, b, 0, chunk, 1, (uint64_t)&actual) == 0 && actual == 1 && bytes[0] == 0;
+  got = 1;
+  while (intact && got < written) {
+    uint64_t want = written - got < PAGE ? written - got : PAGE;
+    if (sys(CROI_SYS_SOCKET_READ, b, 0, chunk, want, (uint64_t)&actual) != 0 || actual != want) {
+      intact = 0;
+      break;
+    }
+    for (uint64_t i = 0; i < actual; i++) {
+      uint64_t at = got + i;
+      if (bytes[i] != (uint8_t)((at / PAGE) + at % PAGE)) intact = 0;
+    }
+    got += actual;
+  }
+  CHECK(703, written >= 64 * PAGE && intact && got == written);
+  sys(CROI_SYS_HANDLE_CLOSE, a, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, b, 0, 0, 0, 0);
+  sys(CROI_SYS_VMAR_UNMAP, s->vmar, chunk, PAGE, 0, 0);
+  // Buffers near 2^64: a status, not a trap in the kernel's page-in.
+  uint32_t st = 0;
+  croi_iovec_t far = {(void *)0xFFFFFFFFFFFFF800ull, 0x1000};
+  CHECK(704, sys(CROI_SYS_STREAM_CREATE, CROI_STREAM_MODE_READ | CROI_STREAM_MODE_WRITE, vmo, 0, (uint64_t)&st, 0) == 0 &&
+                 sys6(CROI_SYS_STREAM_WRITEV_AT, st, 0, 0, (uint64_t)&far, 1, (uint64_t)&actual) < 0);
+  CHECK(705, sys(CROI_SYS_VMO_WRITE, vmo, 0xFFFFFFFFFFFFF800ull, 0, 0x1000, 0) < 0 &&
+                 sys(CROI_SYS_VMO_READ, vmo, 0xFFFFFFFFFFFFF800ull, 0, 0x1000, 0) < 0);
+  sys(CROI_SYS_HANDLE_CLOSE, st, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, vmo, 0, 0, 0, 0);
+  // FIFOs check in Zircon's order: empty or full before the buffer, the
+  // peer before the record size.
+  uint32_t fa = 0, fb = 0, rec[4] = {1, 2, 3, 4};
+  CHECK(706, sys(CROI_SYS_FIFO_CREATE, 4, 4, 0, (uint64_t)&fa, (uint64_t)&fb) == 0 &&
+                 sys(CROI_SYS_FIFO_READ, fb, 4, 0, 1, (uint64_t)&actual) == ERR_SHOULD_WAIT &&
+                 sys(CROI_SYS_FIFO_WRITE, fa, 4, (uint64_t)rec, 4, (uint64_t)&actual) == 0 && actual == 4 &&
+                 sys(CROI_SYS_FIFO_WRITE, fa, 4, 0, 1, (uint64_t)&actual) == ERR_SHOULD_WAIT &&
+                 sys(CROI_SYS_HANDLE_CLOSE, fb, 0, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_FIFO_WRITE, fa, 8, (uint64_t)rec, 1, (uint64_t)&actual) == ERR_PEER_CLOSED);
+  sys(CROI_SYS_HANDLE_CLOSE, fa, 0, 0, 0, 0);
+  return 0;
+}
+
 static uint64_t pac_sign(uint64_t value, uint64_t modifier) {
 #if defined(__aarch64__)
   register uint64_t x17 __asm__("x17") = value;
@@ -5443,6 +5500,8 @@ static int64_t extensions(const startup_t *s, uint64_t vdso_base) {
   if (entry != 0) return entry;
   int64_t low = review_low(s);
   if (low != 0) return low;
+  int64_t queues = review_queues(s);
+  if (queues != 0) return queues;
   int64_t signedPointers = pointer_auth(s);
   if (signedPointers != 0) return signedPointers;
   int64_t guardedCode = guarded_pages(s);

@@ -1344,6 +1344,9 @@ enum VmoUserCopy {
     /// write, as a fault there would. False: not mapped for that.
     static func pageIn(_ user: UInt64, _ length: UInt64, write: Bool) -> Bool {
         guard length > 0 else { return true }
+        // User addresses only (review fix: `user + length` trapped for a
+        // buffer near 2^64, from streams and vmo_read/write).
+        guard user < UserLayout.top, length <= UserLayout.top - user else { return false }
         let page = KernelLayout.pageSize
         var at = user & ~(page - 1)
         while at < user + length {
