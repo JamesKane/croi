@@ -4908,6 +4908,52 @@ static int64_t pointer_auth(void) {
   return 0;
 }
 
+// K14r: guarded user pages (BTI). Two routines in a page: one starting
+// with a NOP (no landing pad), one with BTI C. Through a guarded mapping an
+// indirect call reaches only the second; through a plain one, either.
+__attribute__((noinline)) static uint64_t bti_call(uint64_t routine) {
+  return ((uint64_t (*)(void))routine)();  // blr
+}
+
+static void bti_stray(uint64_t routine) {
+  bti_call(routine);
+  sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
+}
+
+static int64_t guarded_pages(const startup_t *s) {
+#if defined(__aarch64__)
+  if (sys6(CROI_SYS_TEST_PROFILE, 12, 0, 0, 0, 0, 0) != 1) return 0;  // no BTI (croi.bti=off, or none)
+  const uint32_t code[8] = {0xd503201f, 0xd2800020, 0xd65f03c0, 0xd503201f,   // nop; mov x0, #1; ret
+                            0xd503245f, 0xd2800040, 0xd65f03c0, 0xd503201f};  // bti c; mov x0, #2; ret
+  uint32_t vmo = 0;
+  uint64_t guarded = 0, plain = 0;
+  const uint32_t rx = CROI_VM_PERM_READ | CROI_VM_PERM_EXECUTE;
+  uint32_t raw = 0;
+  CHECK(677, sys(CROI_SYS_VMO_CREATE, PAGE, 0, (uint64_t)&raw, 0, 0) == 0 &&
+                 sys(CROI_SYS_VMO_WRITE, raw, (uint64_t)code, 0, sizeof code, 0) == 0 &&
+                 sys6(CROI_SYS_VMO_OP_RANGE, raw, CROI_VMO_OP_CACHE_SYNC, 0, sizeof code, 0, 0) == 0 &&
+                 sys(CROI_SYS_VMO_REPLACE_AS_EXECUTABLE, raw, s->resource, (uint64_t)&vmo, 0, 0) == 0 &&
+                 sys6(CROI_SYS_VMAR_MAP, s->vmar | (uint64_t)(rx | CROI_VM_PERM_GUARDED) << 32, 0, vmo, 0, PAGE,
+                      (uint64_t)&guarded) == 0 &&
+                 sys6(CROI_SYS_VMAR_MAP, s->vmar | (uint64_t)rx << 32, 0, vmo, 0, PAGE, (uint64_t)&plain) == 0 &&
+                 bti_call(guarded + 16) == 2 && bti_call(plain) == 1 && bti_call(plain + 16) == 2);
+  // The stray call into the guarded copy: the thread's exception, ended.
+  uint32_t channel = exception_channel(s->process), exception = 0;
+  croi_exception_info_t info = {};
+  uint32_t thread = start_thread(s, bti_stray, guarded);
+  uint32_t exit = CROI_EXCEPTION_STATE_THREAD_EXIT;
+  CHECK(678, next_exception(channel, &info, &exception) && info.type == CROI_EXCP_GENERAL &&
+                 sys(CROI_SYS_OBJECT_SET_PROPERTY, exception, CROI_PROP_EXCEPTION_STATE, (uint64_t)&exit, 4, 0) == 0 &&
+                 sys(CROI_SYS_HANDLE_CLOSE, exception, 0, 0, 0, 0) == 0 &&
+                 (wait_for(thread, CROI_SIGNAL_TASK_TERMINATED, 3000000000ull) & CROI_SIGNAL_TASK_TERMINATED));
+  uint32_t handles[] = {thread, channel, vmo};
+  for (int i = 0; i < 3; i++) sys(CROI_SYS_HANDLE_CLOSE, handles[i], 0, 0, 0, 0);
+  sys(CROI_SYS_VMAR_UNMAP, s->vmar, guarded, PAGE, 0, 0);
+  sys(CROI_SYS_VMAR_UNMAP, s->vmar, plain, PAGE, 0, 0);
+#endif
+  return 0;
+}
+
 // K11b: the kernel's CPRNG.
 static int64_t cprng_checks(void) {
   uint8_t a[256], b[256];
@@ -5028,6 +5074,8 @@ static int64_t extensions(const startup_t *s) {
   if (zeroed != 0) return zeroed;
   int64_t signedPointers = pointer_auth();
   if (signedPointers != 0) return signedPointers;
+  int64_t guardedCode = guarded_pages(s);
+  if (guardedCode != 0) return guardedCode;
   int64_t fifos = fifos_and_exec(s);
   if (fifos != 0) return fifos;
   int64_t socks = sockets(s);

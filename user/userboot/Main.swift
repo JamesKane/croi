@@ -218,6 +218,8 @@ struct Userboot {
         if segment.readable { options |= UInt32(CROI_VM_PERM_READ) }
         if segment.writable { options |= UInt32(CROI_VM_PERM_WRITE) }
         if segment.executable { options |= UInt32(CROI_VM_PERM_EXECUTE) }
+        // K14r: a program built with BTI landing pads runs on guarded pages.
+        if segment.executable, elf.branchTargets { options |= UInt32(CROI_VM_PERM_GUARDED) }
         var relocations = 0
         do throws(ElfImage.Error) {
             try elf.forEachRelocation(in: fileBytes) { (target, _) throws(ElfImage.Error) in

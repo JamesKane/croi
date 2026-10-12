@@ -135,6 +135,7 @@ enum ProgramLoader {
         if segment.readable { rights.insert(.read) }
         if segment.writable { rights.insert(.write) }
         if segment.executable { rights.insert(.execute) }
+        if segment.executable, elf.branchTargets { rights.insert(.guarded) }  // K14r: built with BTI pads
         _ = try vmStatus { () throws(VmError) -> UInt64 in
             try UserAspace.withView(record) { (aspace: borrowing UserAspace) throws(VmError) -> UInt64 in
                 try aspace.map(vmo, size: size, at: segment.vaddr &+ delta, rights: rights)

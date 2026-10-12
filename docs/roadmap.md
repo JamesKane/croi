@@ -842,6 +842,10 @@ THREAD, VMO, maps, handle table) and the NAME property.
   ALWAYS_NEED) and their eviction when a lender wants its page. On by
   default (`croi.ppb.loan=off`). Requirement 3's pool no longer holds
   memory idle.
+- **K14r: guarded user pages.** **Done** (2026-10-12): CROI_VM_PERM_GUARDED,
+  the ELF BTI property read by both loaders, croi's arm64 user programs
+  and vDSO built with landing pads and run guarded. Not yet: per-process
+  user PAC keys.
 - **K14q: arm64 branch target identification.** **Done** (2026-10-12):
   kernel text guarded where FEAT_BTI exists, landing pads from the
   compiler (pac-ret+bti) and in the PMU jump tables, BT1, a self-test that
@@ -1002,8 +1006,8 @@ from Zircon, see docs/zircon-divergences.md.
 
 **Kernel internals**
 - amd64 5-level paging, VHE-only arm64 CPUs. (Kernel pointer
-  authentication came in K14p, BTI for the kernel in K14q; per-process
-  user keys and guarded user pages not yet.)
+  authentication came in K14p, BTI in K14q-K14r; per-process user keys
+  not yet.)
 - IOMMUs: ATS, two-level SMMUv3 stream tables, stage 2, posted
   interrupts, source verification for MSI-X, identity-level MSI isolation
   on rv64; SMMUv2 and every unit unverified on hardware.

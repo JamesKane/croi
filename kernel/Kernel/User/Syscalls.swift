@@ -207,6 +207,7 @@ enum Syscalls {
             // K14p: the kernel key's signature of a[1] (modifier a[2]), for
             // a user test to compare with its own key's.
             if a[0] == 11 { return Int64(bitPattern: arch_pac_sign(a[1], a[2])) }
+            if a[0] == 12 { return BranchTargets.enabled ? 1 : 0 }  // K14r: guarded pages in use
             #endif
             return (6...9).contains(a[0]) ? Reclaim.testHook(a) : TestHooks.profile(a[0])
         case 3: return Int64(bitPattern: Clock.now())

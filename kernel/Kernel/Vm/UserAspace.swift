@@ -22,6 +22,8 @@ struct VmRights: BitFlags {
     static var read: VmRights { VmRights(rawValue: 1) }
     static var write: VmRights { VmRights(rawValue: 2) }
     static var execute: VmRights { VmRights(rawValue: 4) }
+    /// Guarded (BTI) where executable (K14r, CROI_VM_PERM_GUARDED).
+    static var guarded: VmRights { VmRights(rawValue: 8) }
 }
 
 /// A sub-region of a user address space (Zircon's child VMAR). Region 0 is
@@ -673,7 +675,7 @@ extension UserAspacePointer {
 /// Page tables attributes for a mapping's rights (and JIT key).
 func attributes(_ rights: VmRights, _ cache: CachePolicy, key: UInt8 = 0) -> MapAttributes {
     MapAttributes(writable: rights.contains(.write), executable: rights.contains(.execute), cache: cache,
-                  global: false, user: true, protectionKey: key)
+                  global: false, user: true, protectionKey: key, guarded: rights.contains(.guarded))
 }
 
 enum UserAspaces {

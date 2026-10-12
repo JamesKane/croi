@@ -178,7 +178,7 @@ enum BranchTargets {
     static func configure(_ handoff: croi_handoff_t) {
         BootOptions.capture(handoff, identity: true)
         guard arch_bti_supported() != 0, !BootOptions.has("croi.bti=off") else { return }
-        PageTableFormat.guardedKernelText = true
+        PageTableFormat.branchTargets = true
         arch_bti_enable()
         enabled = true
     }

@@ -454,6 +454,7 @@ extension Syscalls {
         if mapping.rights.contains(.read) { flags |= UInt32(CROI_VM_PERM_READ) }
         if mapping.rights.contains(.write) { flags |= UInt32(CROI_VM_PERM_WRITE) }
         if mapping.rights.contains(.execute) { flags |= UInt32(CROI_VM_PERM_EXECUTE) }
+        if mapping.rights.contains(.guarded) { flags |= UInt32(CROI_VM_PERM_GUARDED) }
         // An alias (K14g) has nothing attributed: its pages are its root's.
         let (committed, spaces) = mapping.holder == mapping.vmo
             ? mapping.vmo.attribution(offset: mapping.offset, size: mapping.size) : (0, 1)

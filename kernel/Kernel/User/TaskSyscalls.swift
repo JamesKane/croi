@@ -143,7 +143,7 @@ extension Syscalls {
     /// vmar_map(vmar | options << 32, vmar_offset, vmo, vmo_offset, len, out_addr).
     private static func vmarMap(_ table: borrowing HandleTable, _ a: InlineArray<6, UInt64>) throws(Status) {
         let options = UInt32(truncatingIfNeeded: a[0] >> 32)
-        let perms = UInt32(CROI_VM_PERM_READ | CROI_VM_PERM_WRITE | CROI_VM_PERM_EXECUTE)
+        let perms = UInt32(CROI_VM_PERM_READ | CROI_VM_PERM_WRITE | CROI_VM_PERM_EXECUTE) | UInt32(CROI_VM_PERM_GUARDED)
         let accepted = UInt32(CROI_VM_SPECIFIC) | UInt32(CROI_VM_REQUIRE_NON_RESIZABLE) | UInt32(CROI_VM_ALLOW_FAULTS)
         guard options & ~(perms | accepted) == 0 else { throw .invalidArgs }
         let rights = try vmRights(options & perms)
@@ -205,6 +205,7 @@ extension Syscalls {
         if perms & UInt32(CROI_VM_PERM_READ) != 0 { rights.insert(.read) }
         if perms & UInt32(CROI_VM_PERM_WRITE) != 0 { rights.insert(.write) }
         if perms & UInt32(CROI_VM_PERM_EXECUTE) != 0 { rights.insert(.execute) }
+        if perms & UInt32(CROI_VM_PERM_GUARDED) != 0 { rights.insert(.guarded) }  // K14r
         return rights
     }
 

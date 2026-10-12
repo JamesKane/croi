@@ -63,8 +63,50 @@ public struct ElfImage {
     /// (the start is the segment's in what lld makes, the end padded to a
     /// page); nil if there is none or it rounds to nothing.
     public private(set) var relro: (start: UInt64, end: UInt64)?
+    /// arm64 (K14r): the GNU property note (PT_GNU_PROPERTY) says every
+    /// object was built with BTI landing pads (GNU_PROPERTY_AARCH64_FEATURE_1_AND,
+    /// bit 0), so loaders map its executable segments guarded.
+    public private(set) var branchTargets = false
     /// PT_DYNAMIC address, if any.
     private var dynamic: UInt64?
+
+    /// Whether the property notes in [offset, +length) set the AArch64 BTI
+    /// feature: NT_GNU_PROPERTY_TYPE_0 notes named "GNU", whose properties
+    /// (type, size, data padded to 8) include FEATURE_1_AND with bit 0. A
+    /// malformed note is an error; another architecture's: false.
+    private static func propertyHasBti(_ file: RawSpan, _ offset: UInt64, _ length: UInt64) throws(Error) -> Bool {
+        #if arch(arm64)
+        let bad = Error("GNU property note out of bounds")
+        guard offset <= UInt64(file.byteCount), length <= UInt64(file.byteCount) - offset else { throw bad }
+        var at = offset
+        let end = offset + length
+        var bti = false
+        while at + 12 <= end {
+            let nameSize = UInt64(try file.elfRead(UInt32.self, at: at, else: bad))
+            let descSize = UInt64(try file.elfRead(UInt32.self, at: at + 4, else: bad))
+            let type = try file.elfRead(UInt32.self, at: at + 8, else: bad)
+            let desc = at + 12 + ((nameSize + 3) & ~3)
+            guard desc <= end, descSize <= end - desc else { throw bad }
+            if type == 5, nameSize == 4, try file.elfRead(UInt32.self, at: at + 12, else: bad) == 0x0055_4E47 {  // "GNU\0"
+                var p = desc
+                while p + 8 <= desc + descSize {
+                    let propertyType = try file.elfRead(UInt32.self, at: p, else: bad)
+                    let dataSize = UInt64(try file.elfRead(UInt32.self, at: p + 4, else: bad))
+                    guard dataSize <= desc + descSize - (p + 8) else { throw bad }
+                    if propertyType == 0xC000_0000, dataSize >= 4,  // GNU_PROPERTY_AARCH64_FEATURE_1_AND
+                       try file.elfRead(UInt32.self, at: p + 8, else: bad) & 1 != 0 {
+                        bti = true
+                    }
+                    p += 8 + ((dataSize + 7) & ~7)
+                }
+            }
+            at = desc + ((descSize + 7) & ~7)
+        }
+        return bti
+        #else
+        return false
+        #endif
+    }
 
     public init(parsing file: RawSpan) throws(Error) {
         let truncated = Error("truncated ELF header")
@@ -97,6 +139,11 @@ public struct ElfImage {
             if type == 0x6474_E551 {  // PT_GNU_STACK
                 let size = try file.elfRead(UInt64.self, at: ph + 40, else: badPhdr)
                 if size != 0 { stackSize = size }
+            }
+            if type == 0x6474_E553 {  // PT_GNU_PROPERTY
+                let offset = try file.elfRead(UInt64.self, at: ph + 8, else: badPhdr)
+                let length = try file.elfRead(UInt64.self, at: ph + 32, else: badPhdr)
+                branchTargets = try Self.propertyHasBti(file, offset, length)
             }
             if type == 0x6474_E552 {  // PT_GNU_RELRO
                 guard relroRange == nil else { throw Error("two PT_GNU_RELRO headers") }

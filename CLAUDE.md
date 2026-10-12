@@ -2248,8 +2248,23 @@ SCTLR_EL1.BT1 is set. A stray indirect branch is EC 0x0D, "branch target
 exception". The boot self-test branches to a non-pad instruction
 (`arch_bti_probe`) and arch_exception sends it on to a recovery point,
 clearing SPSR.BTYPE (else the recovery instruction is checked too); with
-the jump tables' pads removed the PMU self-test faults. User pages aren't
-guarded (no ELF GNU-property opt-in yet).
+the jump tables' pads removed the PMU self-test faults.
+
+Guarded user pages (K14r): `CROI_VM_PERM_GUARDED` (task.h, 1 << 30,
+croi's) on vmar_map/vmar_protect makes an executable mapping guarded
+(`VmRights.guarded`, `MapAttributes.guarded`, bit 50 where FEAT_BTI is in
+use; accepted and ignored elsewhere; PROCESS_MAPS reports it). Programs
+opt in through their ELF: `ElfImage.branchTargets` reads PT_GNU_PROPERTY's
+GNU_PROPERTY_AARCH64_FEATURE_1_AND (bit 0, BTI), which lld sets only when
+every object has landing pads; ProgramLoader and userboot then map the
+executable segments guarded. croi's arm64 user code is built with
+-mbranch-protection=bti (CROI_USER_CFLAGS): userboot, m2 and the Swift
+test programs come out marked (an unmarked program, `hello`, runs
+unguarded). The vDSO (every entry `bti c`) is always mapped guarded. A
+user branch target exception is CROI_EXCP_GENERAL. Mode 17's checks
+677-678: through a guarded mapping a BTI C routine is reached and a NOP
+one refused (the thread's exception); through a plain one either runs
+(678 failed with the user bit not encoded).
 - `ld/image.ld` Shared linker script: one PT_LOAD per permission (W^X).
 - `cmake/`    Toolchain file, per-arch settings, `croi_image()` helper.
 

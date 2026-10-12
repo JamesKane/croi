@@ -125,7 +125,9 @@ enum Vdso {
         let region = try aspace.allocateRegion(size: codeSize + 3 * page)
         let size = codeSize
         _ = try Vmo.withBorrowed(VmoPointer(address: code)) { (vmo: borrowing Vmo) throws(VmError) -> UInt64 in
-            try aspace.map(vmo, size: size, at: region.base, in: region.id, rights: .read | .execute)
+            // Guarded (K14r): the vDSO is built with BTI landing pads
+            // (CROI_USER_CFLAGS), and user code calls it through pointers.
+            try aspace.map(vmo, size: size, at: region.base, in: region.id, rights: .read | .execute | .guarded)
         }
         for i in 0..<3 {
             let at = region.base + size + UInt64(i) * page

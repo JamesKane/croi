@@ -33,16 +33,19 @@ public struct MapAttributes: Sendable, Equatable {
     public var user = false
     /// amd64 protection key (PKU, 0-15) of a user page; 0 elsewhere.
     public var protectionKey: UInt8 = 0
+    /// arm64: a user page that is guarded where executable (BTI, K14r).
+    public var guarded = false
 
     @inlinable
     public init(writable: Bool = false, executable: Bool = false, cache: CachePolicy = .cached, global: Bool = false,
-                user: Bool = false, protectionKey: UInt8 = 0) {
+                user: Bool = false, protectionKey: UInt8 = 0, guarded: Bool = false) {
         self.writable = writable
         self.executable = executable
         self.cache = cache
         self.global = global
         self.user = user
         self.protectionKey = protectionKey
+        self.guarded = guarded
     }
 }
 
@@ -125,10 +128,11 @@ public enum PageTableFormat {
     @inlinable static var guardedPage: UInt64 { 1 << 50 }
     @inlinable static var addressMask: UInt64 { 0x0000_FFFF_FFFF_F000 }
 
-    /// K14q: executable kernel leaves are guarded pages (BTI: indirect
-    /// branches into them must land on a landing pad). Set by the kernel
-    /// when the CPUs have FEAT_BTI (the bit is reserved otherwise).
-    nonisolated(unsafe) public static var guardedKernelText = false
+    /// K14q/K14r: guarded pages (BTI: indirect branches into them must land
+    /// on a landing pad) are in use: every executable kernel leaf, and user
+    /// leaves asked for (`guarded`). Set by the kernel when the CPUs have
+    /// FEAT_BTI (the bit is reserved otherwise).
+    nonisolated(unsafe) public static var branchTargets = false
 
     @inlinable public static func leafAllowed(level: Int) -> Bool { level >= 1 }
     @inlinable public static func table(_ phys: UInt64) -> UInt64 { phys | valid | tableOrPage }
@@ -144,10 +148,10 @@ public enum PageTableFormat {
         if a.user {
             // EL0's; the kernel never executes it.
             e |= userAccess | privilegedNoExecute | notGlobal
-            if !a.executable || a.cache == .device { e |= unprivilegedNoExecute }
+            if !a.executable || a.cache == .device { e |= unprivilegedNoExecute } else if a.guarded, branchTargets { e |= guardedPage }
         } else {
             e |= unprivilegedNoExecute
-            if !a.executable || a.cache == .device { e |= privilegedNoExecute } else if guardedKernelText { e |= guardedPage }
+            if !a.executable || a.cache == .device { e |= privilegedNoExecute } else if branchTargets { e |= guardedPage }
             if !a.global { e |= notGlobal }
         }
         return e
@@ -166,7 +170,7 @@ public enum PageTableFormat {
         let user = e & userAccess != 0
         return MapAttributes(writable: e & readOnly == 0,
                              executable: e & (user ? unprivilegedNoExecute : privilegedNoExecute) == 0,
-                             cache: cache, global: e & notGlobal == 0, user: user)
+                             cache: cache, global: e & notGlobal == 0, user: user, guarded: user && e & guardedPage != 0)
     }
 
     #elseif arch(riscv64)
