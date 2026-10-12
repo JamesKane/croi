@@ -101,6 +101,9 @@ struct UserAspaceRecord: ~Copyable {
     let asid: UInt64
     let lock = SpinLock()
     var mappings = UniqueArray<Mapping>()
+    /// Bumped (under the lock) whenever `mappings` changes: a thread's
+    /// cached out-pointer check is good while it is unchanged (K14m).
+    let mapGeneration = Atomic<UInt64>(0)
     var regions = UniqueArray<Region>()
     var nextRegion: UInt32 = 1
     /// Torn down: its tables are gone; holders of a reference skip it.
@@ -364,9 +367,17 @@ struct UserAspace: ~Copyable {
     /// Whether mappings with at least `rights` cover all of
     /// [base, base+size) (syscalls check out-pointers before acting).
     func covers(_ base: UInt64, size: UInt64, rights: VmRights) -> Bool {
-        guard size > 0, UserLayout.contains(base, size) else { return false }
-        return record.pointee.lock.withLock { () -> Bool in
-            guard !record.pointee.dead else { return false }
+        coverage(base, size: size, rights: rights) != nil
+    }
+
+    /// `covers`, and when one mapping covers it all, that mapping's range
+    /// and the mapping generation it was seen at (0, 0 and 0 when several
+    /// do): a range inside it is covered as long as the generation holds
+    /// (K14m, `Syscalls.check`). nil if not covered.
+    func coverage(_ base: UInt64, size: UInt64, rights: VmRights) -> (start: UInt64, end: UInt64, generation: UInt64)? {
+        guard size > 0, UserLayout.contains(base, size) else { return nil }
+        return record.pointee.lock.withLock { () -> (UInt64, UInt64, UInt64)? in
+            guard !record.pointee.dead else { return nil }
             // Syscalls ask this for every out-pointer: a binary search for
             // the first mapping ending past `base` (sorted, disjoint), not a
             // scan of them all.
@@ -381,11 +392,14 @@ struct UserAspace: ~Copyable {
             var i = low
             while i < record.pointee.mappings.count, record.pointee.mappings[i].base < base + size {
                 let m = record.pointee.mappings[i]
-                guard m.rights.isSuperset(of: rights) else { return false }
+                guard m.rights.isSuperset(of: rights) else { return nil }
                 covered += min(m.base + m.size, base + size) - max(m.base, base)
                 i += 1
             }
-            return covered == size
+            guard covered == size else { return nil }
+            guard i == low + 1 else { return (0, 0, 0) }
+            let m = record.pointee.mappings[low]
+            return (m.base, m.base + m.size, record.pointee.mapGeneration.load(ordering: .relaxed))
         }
     }
 
@@ -411,6 +425,7 @@ struct UserAspace: ~Copyable {
             try split(at: base + size)
             for i in 0..<record.pointee.mappings.count where record.pointee.mappings[i].overlaps(base, size) {
                 record.pointee.mappings[i].rights = rights
+                record.pointee.mapGeneration.add(1, ordering: .releasing)
                 let m = record.pointee.mappings[i]
                 // A pager VMO's pages stay read only until written (K13d:
                 // its clean pages must fault on a write, and dirty ones
@@ -526,6 +541,7 @@ struct UserAspace: ~Copyable {
         var index = 0
         while index < record.pointee.mappings.count, record.pointee.mappings[index].base < mapping.base { index += 1 }
         record.pointee.mappings.insert(mapping, at: index)
+        record.pointee.mapGeneration.add(1, ordering: .releasing)
     }
 
     /// Splits the mapping spanning `at` (if any) into two at that address.
@@ -534,6 +550,7 @@ struct UserAspace: ~Copyable {
             let m = record.pointee.mappings[i]
             guard at > m.base, at < m.base + m.size else { continue }
             record.pointee.mappings[i].size = at - m.base
+            record.pointee.mapGeneration.add(1, ordering: .releasing)
             m.holder.retain()
             m.vmo.addMapper(record.address)
             record.pointee.mappings.insert(Mapping(base: at, size: m.base + m.size - at, vmo: m.vmo,
@@ -554,6 +571,7 @@ struct UserAspace: ~Copyable {
             let m = record.pointee.mappings[i]
             if m.base >= base, m.base + m.size <= base + size {
                 _ = record.pointee.mappings.remove(at: i)
+                record.pointee.mapGeneration.add(1, ordering: .releasing)
                 m.vmo.removeMapper(record.address)
                 released.append(m.holder.address)
             } else {
@@ -575,6 +593,7 @@ struct UserAspace: ~Copyable {
         var released = UniqueArray<UInt64>()
         record.pointee.lock.withLock {
             record.pointee.dead = true
+            record.pointee.mapGeneration.add(1, ordering: .releasing)
             while let region = record.pointee.regions.popLast() { Jit.freeKey(region.jitKey) }
             while let mapping = record.pointee.mappings.popLast() {
                 mapping.vmo.removeMapper(record.address)
@@ -610,6 +629,7 @@ extension UserAspacePointer {
                                         region: old.region, key: old.key)
                     child.addMapper(address)
                     pointee.mappings[i] = fresh
+                    pointee.mapGeneration.add(1, ordering: .releasing)
                     try? pointee.arch.unmap(virt: old.base, size: old.size)
                     old.vmo.removeMapper(address)
                     old.holder.release()  // the old mapping's
@@ -876,6 +896,13 @@ extension UserAspace {
 /// A running thread's own address space, borrowed for a syscall.
 struct BorrowedAspace {
     let record: UserAspacePointer
+
+    func coverage(_ base: UInt64, size: UInt64, rights: VmRights) -> (start: UInt64, end: UInt64, generation: UInt64)? {
+        let view = UserAspace.view(record)
+        let result = view.coverage(base, size: size, rights: rights)
+        view.forget()
+        return result
+    }
 
     func covers(_ base: UInt64, size: UInt64, rights: VmRights) -> Bool {
         let view = UserAspace.view(record)

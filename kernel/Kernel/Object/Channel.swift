@@ -131,10 +131,10 @@ struct CallRecord: ~Copyable {
     /// call). First, so the record's address is the queue's: no separate
     /// allocation per call.
     var waiters = QueueHead()
-    let txid: UInt32
+    var txid: UInt32
     var state = State.pending
     var reply: UInt64 = 0
-    let flow: UInt64
+    var flow: UInt64
     /// The caller's trace id (DONATE records name it).
     let callerTraceId: UInt32
     let references = Atomic<Int>(1)
@@ -407,17 +407,21 @@ enum Channels {
             message.free()
             throw .invalidArgs
         }
-        let txid = shared.pointee.lock.withLock { () -> UInt32 in
-            me.pointee.nextTxid = (me.pointee.nextTxid + 1) & 0x7FFF_FFFF
-            return me.pointee.nextTxid | 0x8000_0000
-        }
-        unsafe UnsafeMutablePointer<UInt32>(bitPattern: UInt(message.data))!.pointee = txid
-        message.pointee.txid = txid
-        guard let call = CallRecordPointer.allocate(txid: txid, flow: croi_flow_id(shared.pointee.id, txid)) else {
+        guard let call = CallRecordPointer.allocate(txid: 0, flow: 0) else {
             message.free()
             throw .noMemory
         }
-        shared.pointee.lock.withLock { me.pointee.calls.append(call.address) }
+        // Its txid and its place among the pending calls in one locked step.
+        let txid = shared.pointee.lock.withLock { () -> UInt32 in
+            me.pointee.nextTxid = (me.pointee.nextTxid + 1) & 0x7FFF_FFFF
+            let txid = me.pointee.nextTxid | 0x8000_0000
+            call.pointee.txid = txid
+            call.pointee.flow = croi_flow_id(shared.pointee.id, txid)
+            me.pointee.calls.append(call.address)
+            return txid
+        }
+        unsafe UnsafeMutablePointer<UInt32>(bitPattern: UInt(message.data))!.pointee = txid
+        message.pointee.txid = txid
         call.retain()  // the message's
         message.pointee.call = call.address
         var failure: Status? = nil

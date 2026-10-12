@@ -459,7 +459,11 @@ syscalls 90-97 in User/SyncSyscalls.swift):
 - Out-pointer checks (`Syscalls.check`) ask the address space whether
   writable mappings cover the range (`UserAspace.covers`): nothing is
   read or written, so any size works and a concurrent user write isn't
-  clobbered; the copy out still recovers from faults.
+  clobbered; the copy out still recovers from faults. K14m: a thread
+  caches the mapping its last check found (`Thread.coverStart/End`) with
+  the address space's `mapGeneration` (bumped under its lock at every
+  change to `mappings`), and a check inside it with the generation
+  unchanged skips the lock.
 - Timer objects (22): set arms the object's own timer node on the calling
   CPU, holding a reference (generation numbers ignore stale callbacks;
   cancel takes the node out of the arming CPU's queue from anywhere);

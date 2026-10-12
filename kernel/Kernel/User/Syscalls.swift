@@ -482,9 +482,24 @@ enum Syscalls {
     /// nothing is read or written, so any size works.
     static func check(_ address: UInt64, _ size: Int) throws(Status) {
         guard size > 0 else { return }
-        guard let aspace = Scheduler.current.pointee.aspace,
-              UserAspace.borrowing(aspace).covers(address, size: UInt64(size), rights: .write) else {
+        let me = Scheduler.current
+        guard let aspace = me.pointee.aspace else { throw .invalidArgs }
+        // K14m: inside the mapping the last check found, with the mappings
+        // unchanged since (a thread's address space never changes), no
+        // lock: as good as the locked answer, which could also be stale by
+        // the time the copy runs (the copy recovers from faults either way).
+        let (end, overflow) = address.addingReportingOverflow(UInt64(size))
+        if !overflow, address >= me.pointee.coverStart, end <= me.pointee.coverEnd,
+           aspace.pointee.mapGeneration.load(ordering: .acquiring) == me.pointee.coverGeneration {
+            return
+        }
+        guard let found = UserAspace.borrowing(aspace).coverage(address, size: UInt64(size), rights: .write) else {
             throw .invalidArgs
+        }
+        if found.end > found.start {
+            me.pointee.coverStart = found.start
+            me.pointee.coverEnd = found.end
+            me.pointee.coverGeneration = found.generation
         }
     }
 

@@ -842,6 +842,17 @@ THREAD, VMO, maps, handle table) and the NAME property.
   ALWAYS_NEED) and their eviction when a lender wants its page. On by
   default (`croi.ppb.loan=off`). Requirement 3's pool no longer holds
   memory idle.
+- **K14m: channel_call, part 2.** **Done** (2026-10-12): out-pointer
+  checks inside the mapping a thread's last check found skip the address
+  space's lock while its `mapGeneration` holds (three checks per call
+  took ~150 ns), and a call's txid and registration share one lock.
+  Interleaved (5 boots): channel_call 1352 -> 1230 ns. The IPI paths'
+  "copies" from part 1 were the ICR offset 0x300, not copies. Left: the
+  XSAVE switch (~130 ns each way), the four syscalls and two switches the
+  bench's server loop makes (wait_one, read, write), ~50-80 ns steps of
+  locking and signalling between them. Under KVM 1 µs isn't reached;
+  further gains need changes of structure (a combined reply-and-wait, as
+  Zircon's own servers don't have either).
 - **K14l: channel_call, part 1.** **Done** (2026-10-12): m2's IPC profile
   mode (`m2.ipc_profile=1`: per-event gaps and PC samples) found each heap
   free spending ~190 ns in `pmm.page(for:)`, which copied the whole Pmm
@@ -850,8 +861,7 @@ THREAD, VMO, maps, handle table) and the NAME property.
   counter.wake_median 1804 -> 1144 ns, boot.userboot_start 78.9 -> 65.3 ms.
   Left in the call (probes, KVM): three out-pointer checks each taking the
   address space's lock (~150 ns), the XSAVE switch (~130 ns per switch;
-  lazy switching is out, LazyFP), and IPI paths with the same kind of copy
-  (`Ipi.call`, `LocalApic.sendCommand`).
+  lazy switching is out, LazyFP).
 - **K14k: zero intervals.** **Done** (2026-10-12): pager VMOs keep
   Zircon's zero intervals (dirty, awaiting clean, untracked): ZERO, a
   grow and a stream size cut make them, reads copy zeros without

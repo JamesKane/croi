@@ -128,6 +128,13 @@ struct Thread: ~Copyable {
     /// DebugState, from the first write), or 0.
     var debugState: UInt64 = 0
     var restartable = false
+    /// K14m: the mapping the last out-pointer check found writable
+    /// ([coverStart, coverEnd) of its address space at coverGeneration):
+    /// a check inside it skips the address space's lock while the
+    /// mappings are unchanged (`Syscalls.check`).
+    var coverStart: UInt64 = 0
+    var coverEnd: UInt64 = 0
+    var coverGeneration: UInt64 = 0
     var suspendRetry = false
     var interruptible = false
     /// The futex record it waits on (moved by requeue), or 0.
