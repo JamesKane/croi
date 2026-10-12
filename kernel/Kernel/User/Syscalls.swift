@@ -390,6 +390,8 @@ enum Syscalls {
             try smcCall(a, table)
         case 235:  // system_get_event(root job, kind, out), K14a
             try put(try Reclaim.systemEvent(table, handle, kind: a[1]), a[2])
+        case 236:  // thread_raise_exception(options, type, const croi_exception_context_t *), K14d
+            try exceptionCall(number, a, table)
         case 233:  // vmo_set_size(vmo, size), K13h
             try VmoObject.setSize(table, handle, a[1])
         case 230...232:

@@ -3800,6 +3800,81 @@ static int64_t futex_deadlines(const startup_t *s) {
   return 0;
 }
 
+// K14d: thread_raise_exception. ZX_EXCP_USER goes to each job debugger
+// from the caller's job up, one after the other, the reply ignored; with
+// none it returns at once.
+typedef struct {
+  uint32_t data;
+  volatile int64_t result;
+} raise_t;
+
+static void raiser(uint64_t arg) {
+  raise_t *r = (raise_t *)arg;
+  croi_exception_context_t context = {};
+  context.synth_code = CROI_EXCP_USER_CODE_USER0;
+  context.synth_data = r->data;
+  r->result = sys(CROI_SYS_THREAD_RAISE_EXCEPTION, CROI_EXCEPTION_TARGET_JOB_DEBUGGER, CROI_EXCP_USER,
+                  (uint64_t)&context, 0, 0);
+  sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
+}
+
+static int64_t user_exceptions(const startup_t *s) {
+  croi_exception_context_t context = {};
+  CHECK(623, sys(CROI_SYS_THREAD_RAISE_EXCEPTION, 0, CROI_EXCP_USER, (uint64_t)&context, 0, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_THREAD_RAISE_EXCEPTION, CROI_EXCEPTION_TARGET_JOB_DEBUGGER, CROI_EXCP_THREAD_STARTING,
+                     (uint64_t)&context, 0, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_THREAD_RAISE_EXCEPTION, CROI_EXCEPTION_TARGET_JOB_DEBUGGER, CROI_EXCP_USER, 0, 0, 0) ==
+                     ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_THREAD_RAISE_EXCEPTION, CROI_EXCEPTION_TARGET_JOB_DEBUGGER, CROI_EXCP_USER, 8, 0, 0) ==
+                     ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_THREAD_RAISE_EXCEPTION, CROI_EXCEPTION_TARGET_JOB_DEBUGGER, CROI_EXCP_USER,
+                     (uint64_t)&context, 0, 0) == 0);  // no debugger: nothing waits
+  uint32_t first = 0, second = 0, exception = 0;
+  croi_exception_info_t info;
+  croi_exception_report_t report;
+  croi_info_thread_t state;
+  croi_thread_state_general_regs_t regs;
+  uint64_t counts[2];
+  uint32_t try_next = CROI_EXCEPTION_STATE_TRY_NEXT;
+  CHECK(624, sys(CROI_SYS_TASK_CREATE_EXCEPTION_CHANNEL, s->job, CROI_EXCEPTION_CHANNEL_DEBUGGER, (uint64_t)&first,
+                 0, 0) == 0 &&
+                 sys(CROI_SYS_TASK_CREATE_EXCEPTION_CHANNEL, s->job, CROI_EXCEPTION_CHANNEL_DEBUGGER, (uint64_t)&second,
+                     0, 0) == 0);
+  raise_t raise = {42, -1};
+  uint32_t thread = start_thread(s, raiser, (uint64_t)&raise);
+  // The first debugger: the code and data in the report, the registers
+  // readable, the thread blocked on a job debugger's channel.
+  CHECK(625, next_exception(first, &info, &exception) && info.type == CROI_EXCP_USER && info.tid == koid_of(thread) &&
+                 sys6(CROI_SYS_OBJECT_GET_INFO, thread, CROI_INFO_THREAD_EXCEPTION_REPORT, (uint64_t)&report,
+                      sizeof report, (uint64_t)&counts[0], (uint64_t)&counts[1]) == 0 &&
+                 report.header.type == CROI_EXCP_USER && report.context.synth_code == CROI_EXCP_USER_CODE_USER0 &&
+                 report.context.synth_data == 42 &&
+                 sys(CROI_SYS_THREAD_READ_STATE, thread, CROI_THREAD_STATE_GENERAL_REGS, (uint64_t)&regs, sizeof regs,
+                     0) == 0 &&
+                 sys6(CROI_SYS_OBJECT_GET_INFO, thread, CROI_INFO_THREAD, (uint64_t)&state, sizeof state,
+                      (uint64_t)&counts[0], (uint64_t)&counts[1]) == 0 &&
+                 state.state == CROI_THREAD_STATE_BLOCKED_EXCEPTION &&
+                 state.wait_exception_channel_type == CROI_EXCEPTION_CHANNEL_TYPE_JOB_DEBUGGER &&
+                 raise.result == -1 &&
+                 sys(CROI_SYS_OBJECT_SET_PROPERTY, exception, CROI_PROP_EXCEPTION_STATE, (uint64_t)&try_next, 4, 0) == 0 &&
+                 sys(CROI_SYS_HANDLE_CLOSE, exception, 0, 0, 0, 0) == 0);
+  // The second gets it next whatever the first replied; then the call
+  // returns OK.
+  CHECK(626, next_exception(second, &info, &exception) && info.type == CROI_EXCP_USER &&
+                 sys(CROI_SYS_HANDLE_CLOSE, exception, 0, 0, 0, 0) == 0);
+  join(thread);
+  uint32_t channels[2] = {first, second};
+  croi_info_job_t job;
+  // Closed, they no longer count as attached, and the next raise prunes
+  // their kernel ends from our job (else they would outlive the test).
+  CHECK(627, raise.result == 0 && sys(CROI_SYS_HANDLE_CLOSE_MANY, (uint64_t)channels, 2, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_THREAD_RAISE_EXCEPTION, CROI_EXCEPTION_TARGET_JOB_DEBUGGER, CROI_EXCP_USER,
+                     (uint64_t)&context, 0, 0) == 0 &&
+                 sys6(CROI_SYS_OBJECT_GET_INFO, s->job, CROI_INFO_JOB, (uint64_t)&job, sizeof job, (uint64_t)&counts[0],
+                      (uint64_t)&counts[1]) == 0 && job.debugger_attached == 0);
+  return 0;
+}
+
 // K14b: a CPU's kernel timers are a list, not 32 slots: timer objects
 // armed from one thread (so on one CPU, mostly) past the old limit all
 // fire, and handle_replace keeps a timer armed (it closed the old handle
@@ -4335,6 +4410,8 @@ static int64_t extensions(const startup_t *s) {
   if (futexes != 0) return futexes;
   int64_t timers = many_timers();
   if (timers != 0) return timers;
+  int64_t raised = user_exceptions(s);
+  if (raised != 0) return raised;
   int64_t reclaimed = reclaim(s);
   if (reclaimed != 0) return reclaimed;
   int64_t random = cprng_checks();

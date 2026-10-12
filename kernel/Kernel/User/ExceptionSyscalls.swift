@@ -8,6 +8,14 @@ extension Syscalls {
                               _ table: borrowing HandleTable) throws(Status) {
         let handle = UInt32(truncatingIfNeeded: a[0])
         switch number {
+        case 236:  // thread_raise_exception(options, type, context): Zircon's checks, one INVALID_ARGS
+            guard a[0] == UInt64(CROI_EXCEPTION_TARGET_JOB_DEBUGGER), a[1] == UInt64(CROI_EXCP_USER), a[2] != 0 else {
+                throw .invalidArgs
+            }
+            var context = croi_exception_context_t()
+            let copied = withUnsafeMutableBytes(of: &context) { unsafe UserCopy.from($0.baseAddress!, a[2], UInt64($0.count)) }
+            guard copied == 0 else { throw .invalidArgs }
+            Exceptions.raiseUser(code: context.synth_code, data: context.synth_data)
         case 100:  // task_create_exception_channel(task, options, out); Zircon's order (K13g)
             guard a[1] & ~UInt64(CROI_EXCEPTION_CHANNEL_DEBUGGER) == 0 else { throw .invalidArgs }
             let debugger = a[1] != 0

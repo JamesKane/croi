@@ -174,6 +174,7 @@ enum : uint64_t {
   CROI_SYS_VMO_SET_SIZE = 233,          // (vmo, size): K13h, a resizable VMO
   CROI_SYS_SMC_CALL = 234,              // (SMC resource, const croi_smc_parameters_t *, croi_smc_result_t *): arm64
   CROI_SYS_SYSTEM_GET_EVENT = 235,      // (root job, kind, out): K14a, CROI_SYSTEM_EVENT_*
+  CROI_SYS_THREAD_RAISE_EXCEPTION = 236,  // (options, type, const croi_exception_context_t *): K14d
   CROI_SYS_SYSTEM_POWERCTL = 180,       // (power resource, cmd, const croi_system_powerctl_arg_t *)
 
   // The kernel's CPRNG (K11b; Zircon's): at most CROI_CPRNG_MAX_LEN bytes.

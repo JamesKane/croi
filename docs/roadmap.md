@@ -834,6 +834,10 @@ THREAD, VMO, maps, handle table) and the NAME property.
   system_get_event, eviction at critical, OOM eviction then reboot),
   KMEM_STATS' reclaim fields, committed_change_events. Not yet: jobkill
   at OOM, compression, zero-page dedupe, page-table reclaim, page loaning.
+- **K14d: thread_raise_exception.** **Done** (2026-10-11): ZX_EXCP_USER
+  to every job debugger up the tree, single shot (each reply ignored),
+  Zircon's checks; closed job debugger channels are now pruned whenever
+  the list is walked, not only at the next attach.
 - **K14c: RELRO.** **Done** (2026-10-11): PT_GNU_RELRO's pages read only
   once relocated, in the kernel's loader and userboot's, checked by the
   programs themselves (user/test/swift, bin/m2: their own mappings through
@@ -887,8 +891,8 @@ from Zircon, see docs/zircon-divergences.md.
 - VM (eviction and reclaim came in K14a): UNBOUNDED VMOs, SNAPSHOT
   (isolated), REFERENCE and
   SNAPSHOT_MODIFIED children, slices of anonymous VMOs.
-- IOB, restricted mode, membarrier, thread_raise_exception (ZX_EXCP_USER
-  to job debuggers), the ktrace/sampler syscalls (croi has its own).
+- IOB, restricted mode, membarrier, the ktrace/sampler syscalls (croi has
+  its own).
 
 **Kernel internals**
 - amd64 5-level paging, KASLR, VHE-only arm64 CPUs, pointer

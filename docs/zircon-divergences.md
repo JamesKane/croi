@@ -205,8 +205,6 @@ matches the pinned tree where upstream docs or expectations say otherwise).
 - **rv64 debugging** — single-step NOT_SUPPORTED, debug registers a u32
   written and ignored. Kind: quirk parity (Zircon's). Impact: none vs the
   pin.
-- **ZX_EXCP_USER** — thread_raise_exception to job debuggers. Kind: not
-  yet. Impact: debuggers using user exceptions.
 - **SError** — kernel SErrors other than corrected ones panic; delivery of
   a recoverable SError to the faulting process is planned (Zircon only
   counts SErrors). Kind: deliberate / not yet. Impact: arm64 hardware

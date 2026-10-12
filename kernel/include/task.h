@@ -51,6 +51,15 @@ enum : uint32_t {
   CROI_EXCP_THREAD_EXITING = 0x8108,    // process debugger only; no registers, reply ignored
   CROI_EXCP_POLICY_ERROR = 0x8208,  // synthetic
   CROI_EXCP_PROCESS_STARTING = 0x8308,  // job debuggers, the initial thread's
+  CROI_EXCP_USER = 0x8309,  // thread_raise_exception (K14d): job debuggers, reply ignored
+
+  // thread_raise_exception's target, and the codes in a user exception's
+  // context.synth_code (below USER0: the system's).
+  CROI_EXCEPTION_TARGET_JOB_DEBUGGER = 1,
+  CROI_EXCP_USER_CODE_PROCESS_NAME_CHANGED = 0x0001,
+  CROI_EXCP_USER_CODE_USER0 = 0xF000,
+  CROI_EXCP_USER_CODE_USER1 = 0xF001,
+  CROI_EXCP_USER_CODE_USER2 = 0xF002,
 
   // task_create_exception_channel's option, and the channel types
   // (croi_info_thread_t.wait_exception_channel_type).
