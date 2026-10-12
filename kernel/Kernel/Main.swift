@@ -51,6 +51,9 @@ func kernel_main(_ handoffAddress: UInt64) -> Never {
     panicConsole = console
     guard Random.selfTest() else { panic("random: ChaCha20 known answer wrong") }
     Random.seed(&bootHandoff, console)
+    // The loader's copy too (review fix: only ours was cleared, and the
+    // handoff page goes back to the PMM at endHandoff). Identity mapped.
+    unsafe UnsafeMutablePointer<croi_handoff_t>(bitPattern: UInt(handoffAddress))!.pointee.entropy = (0, 0, 0, 0)
     arch_init_exceptions()
     console.write("croi kernel (")
     console.write(archName)

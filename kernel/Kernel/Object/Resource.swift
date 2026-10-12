@@ -265,6 +265,9 @@ enum RootFilter {
             // The 8259s (kept masked) and the console UART.
             if base < 0x22 && 0x20 < end { return false }
             if base < 0xA2 && 0xA0 < end { return false }
+            // The reset control register: resets are system_powerctl's
+            // (review round 1). The 8042 stays (keyboard drivers need it).
+            if base <= 0xCF9 && 0xCF9 < end { return false }
             if bootHandoff.uart.kind == UInt32(CROI_UART_NS16550_PIO) {
                 let uart = bootHandoff.uart.base
                 if base < uart + 8 && uart < end { return false }
@@ -275,10 +278,12 @@ enum RootFilter {
             // PSCI calls that change CPU or system state are the kernel's
             // (K13i): CPU_SUSPEND, CPU_OFF, CPU_ON, MIGRATE, SYSTEM_OFF,
             // SYSTEM_RESET, CPU_FREEZE, CPU_DEFAULT_SUSPEND,
-            // SYSTEM_SUSPEND, SYSTEM_RESET2, in either calling convention.
-            let kernels: InlineArray<10, UInt64> = [1, 2, 3, 5, 8, 9, 0xB, 0xC, 0xE, 0x12]
+            // SYSTEM_SUSPEND, SYSTEM_RESET2, and (review round 1)
+            // SET_SUSPEND_MODE, MEM_PROTECT and PSCI 1.3's SYSTEM_OFF2, in
+            // either calling convention.
+            let kernels: InlineArray<13, UInt64> = [1, 2, 3, 5, 8, 9, 0xB, 0xC, 0xE, 0x12, 0xF, 0x13, 0x15]
             for convention in [0x8400_0000, 0xC400_0000] as InlineArray<2, UInt64> {
-                for i in 0..<10 {
+                for i in 0..<13 {
                     let id = convention | kernels[i]
                     if base <= id && id < end { return false }
                 }

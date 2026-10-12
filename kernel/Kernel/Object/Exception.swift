@@ -471,10 +471,12 @@ enum Exceptions {
     }
 
     #if arch(x86_64)
-    /// Bits 63:47 all equal (4-level paging), as FS/GS bases need.
+    /// A user FS/GS base: in the user range (review fix: any canonical
+    /// value was taken, kernel half included, and an NMI or #MC in an entry
+    /// window, which picks GS from the saved CS, could then run on a GS
+    /// base user code chose; Linux's arch_prctl limit).
     static func isCanonical(_ address: UInt64) -> Bool {
-        let top = address >> 47
-        return top == 0 || top == 0x1_FFFF
+        address < UserLayout.top
     }
     #endif
 
@@ -543,6 +545,10 @@ enum Exceptions {
         }
         f.x.30 = r.lr
         f.sp = r.sp
+        // A new PC drops the pending branch type (SPSR.BTYPE, 11:10): it
+        // belonged to the old one, and a guarded page would refuse the new
+        // PC (review fix).
+        if f.elr != r.pc { f.spsr &= ~(UInt64(3) << 10) }
         f.elr = r.pc
         let nzcv: UInt64 = 0xF000_0000
         f.spsr = (f.spsr & ~nzcv) | (r.cpsr & nzcv)

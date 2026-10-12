@@ -1777,8 +1777,9 @@ Randomness, K11b (Kernel/Random.swift, syscalls 181-182; handoff v5):
   CPU's RNG instruction (`arch_hw_random`: amd64 RDSEED, else RDRAND;
   arm64 RNDR when ID_AA64ISAR0_EL1 says so; rv64 none, Zkr's seed CSR
   traps unless M-mode opened it) and counter jitter; the boot line names
-  the sources and warns when jitter is all there was. The handoff's copy
-  of the seed is cleared.
+  the sources and warns when jitter is all there was. The handoff's copies
+  (the kernel's and, since review round 1, the loader's page)
+  of the seed are cleared.
 - `cprng_draw(buffer, length)` (181) and `cprng_add_entropy` (182):
   Zircon's, at most 256 bytes (CROI_CPRNG_MAX_LEN), INVALID_ARGS beyond
   or for a bad buffer. `Random.word()` for kernel use (ASLR).

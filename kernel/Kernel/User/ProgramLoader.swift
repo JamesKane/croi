@@ -91,6 +91,7 @@ enum ProgramLoader {
         let low = UserLayout.base, high = UserLayout.top / 2
         guard size < high - low else { throw .noMemory }
         let pages = (high - low - size) / KernelLayout.pageSize
+        guard pages > 0 else { throw .noMemory }
         for _ in 0..<16 {
             let base = low + (Random.word() % pages) * KernelLayout.pageSize
             let free = try vmStatus { () throws(VmError) -> Bool in

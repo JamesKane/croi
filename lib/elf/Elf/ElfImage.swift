@@ -138,6 +138,9 @@ public struct ElfImage {
             }
             if type == 0x6474_E551 {  // PT_GNU_STACK
                 let size = try file.elfRead(UInt64.self, at: ph + 40, else: badPhdr)
+                // Bounded, so loaders can round it up (review fix: a size
+                // near 2^64 trapped there).
+                guard size <= 256 << 20 else { throw Error("PT_GNU_STACK larger than 256 MiB") }
                 if size != 0 { stackSize = size }
             }
             if type == 0x6474_E553 {  // PT_GNU_PROPERTY
@@ -252,7 +255,10 @@ public struct ElfImage {
             at += 16
         }
         try checkDynamic(rela: rela, relaSize: relaSize, other)
+        // An entry no bigger than the table (review fix: a huge DT_RELAENT
+        // overflowed the walk).
         guard kind == .pie, let rela, relaEntry >= 24, relaSize > 0 else { return }
+        guard relaEntry <= relaSize else { throw bad }
         guard let start = fileOffset(of: rela, length: relaSize) else { throw bad }
         let badReloc = Error("relocation out of bounds")
         var entry = start
@@ -322,7 +328,7 @@ public struct ElfImage {
         }
         try checkDynamic(rela: rela, relaSize: relaSize, other)
         guard kind == .pie, let rela, relaEntry >= 24 else { return }
-        guard rela >= base else { throw bad }
+        guard rela >= base, relaEntry <= max(relaSize, 24) else { throw bad }
 
         let badReloc = Error("relocation out of bounds")
         var entryOffset = rela - base

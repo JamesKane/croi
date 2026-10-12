@@ -883,12 +883,24 @@ THREAD, VMO, maps, handle table) and the NAME property.
     the SError policy. Sound: user-written registers never reach mode or
     privilege bits, sysretq, PAC key loading, rv64's sscratch swap,
     register clearing, debug address limits, the I/O bitmap.
-  - open from part 4, low: NMI/#MC GS choice from CS alone and FS/GS bases
-    in the kernel half; DR7 RW/LEN unvalidated; arm64 user-reachable
-    control registers (CNTKCTL, MDSCR.TDCC, PMUSERENR, SCTLR) not set to
-    known values, the AP EL2 drop doesn't write MDCR_EL2, BTYPE kept when
-    a debugger changes the PC; rv64 sepc +4 applied after a debugger set
-    the PC in a syscall-raised exception.
+  - Part 5, the low items (checks 701-703): FS/GS bases in the user
+    range only (so an NMI/#MC that keeps a user GS can't be pointed at
+    kernel memory), DR7's RW/LEN validated, arm64 CNTKCTL/MDSCR(TDCC)/
+    PMUSERENR/SCTLR.UMA set to known values per CPU and MDCR_EL2 in the
+    AP EL2 drop, BTYPE dropped when a debugger moves the PC, rv64 sepc
+    advanced at syscall entry (restart steps back), the handoff page's
+    seed cleared, ELF stack sizes and DT_RELAENT bounded and the
+    loaders' placement guarded, short PPTT processor nodes skipped, PSCI
+    SET_SUSPEND_MODE/MEM_PROTECT/SYSTEM_OFF2 and port 0xCF9 kept the
+    kernel's, the ITS DISCARDs only mapped events, VT-d bti_create
+    re-checks the claim under the lock it stores with. The AP MDCR_EL2
+    edit first broke every arm64 boot: its numeric label caught an
+    earlier `1f` that skips the EL2 drop (named labels there now).
+  - left, as Zircon does or unverified: NMI/#MC still choose GS from the
+    saved CS (no paranoid entry; NMIs are fatal); REMAP_IRQ resources
+    checked against the ISA number; iommu_create's reserved ranges
+    trusted; HandleTable.add's linear slot search under the lock; an
+    IOMMU's own PCI config space grantable (BAR moves unverified).
 - **K14s: per-process user PAC keys.** **Done** (2026-10-12): each
   address space gets a random APIA key, copied to the CPU's per-CPU
   record at switches and loaded at every return to EL0, so a process

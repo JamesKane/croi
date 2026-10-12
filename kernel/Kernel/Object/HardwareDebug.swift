@@ -114,6 +114,13 @@ enum HardwareDebug {
         for address in [input.dr.0, input.dr.1, input.dr.2, input.dr.3] as InlineArray<4, UInt64> {
             guard address == 0 || address < userTop else { throw .invalidArgs }
         }
+        // Enabled breakpoints: no I/O ones (RW 10b, undefined without
+        // CR4.DE), and execution ones of length 1 (LEN 00), Linux's rule
+        // (review fix: the fields were taken as given).
+        for i in 0..<4 where (input.dr7 >> UInt64(2 * i)) & 3 != 0 {
+            let rw = (input.dr7 >> UInt64(16 + 4 * i)) & 3, len = (input.dr7 >> UInt64(18 + 4 * i)) & 3
+            guard rw != 2, rw != 0 || len == 0 else { throw .invalidArgs }
+        }
         regs.dr6 = 0xFFFF_0FF0 | (input.dr6 & 0xE00F)                      // B0-3, BD, BS, BT
         regs.dr7 = (input.dr7 & 0xFFFF_00FF) | (1 << 10) | (1 << 8) | (1 << 9)  // L/G0-3, RW/LEN; LE, GE
         let s = try unsafe ensureState(thread)

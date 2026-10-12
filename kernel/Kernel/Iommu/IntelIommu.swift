@@ -635,6 +635,10 @@ extension Vtd {
                 unit.flushTables(unit.pointee.rootTable + UInt64(bus) * 16, 16)
                 table = copy
             }
+            // Claimed meanwhile by another bti_create (review fix: the check
+            // above and this store were separate holds of the lock).
+            let current = load(table, entry: entry).low
+            if current & 1 != 0, (current >> 2) & 3 == 0 { throw .alreadyBound }
             // Translated (TT = 00) through the domain's tables.
             store(table, entry: entry, low: root | 1, high: unit.pointee.addressWidth | UInt64(id) << 8)
             unit.flushTables(table + UInt64(entry) * 16, 16)

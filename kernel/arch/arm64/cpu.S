@@ -458,14 +458,23 @@ arch_has_poe:
     ret
 .size arch_has_poe, . - arch_has_poe
 
-// void arch_user_counter_enable(void): CNTKCTL_EL1.EL0VCTEN (bit 1): EL0
-// may read CNTVCT_EL0 (and CNTFRQ_EL0).
+// void arch_user_counter_enable(void): what EL0 may reach on this CPU, set
+// to known values (review fix: CNTKCTL was ORed into, the rest left as
+// firmware or reset had them). CNTKCTL_EL1 = EL0VCTEN (bit 1: CNTVCT_EL0
+// and CNTFRQ_EL0, not the timers themselves); MDSCR_EL1 = TDCC (bit 12:
+// no debug comms channel from EL0); PMUSERENR_EL0 = 0 (the PMU code opens
+// what it needs); SCTLR_EL1.UMA (bit 9) clear (EL0 can't mask interrupts).
 .globl arch_user_counter_enable
 .type arch_user_counter_enable, %function
 arch_user_counter_enable:
-    mrs     x0, cntkctl_el1
-    orr     x0, x0, #(1 << 1)
+    mov     x0, #(1 << 1)
     msr     cntkctl_el1, x0
+    mov     x0, #(1 << 12)
+    msr     mdscr_el1, x0
+    msr     pmuserenr_el0, xzr
+    mrs     x0, sctlr_el1
+    bic     x0, x0, #(1 << 9)
+    msr     sctlr_el1, x0
     isb
     ret
 .size arch_user_counter_enable, . - arch_user_counter_enable
@@ -780,7 +789,8 @@ arch_debug_cpu_init:
 .globl arch_debug_load
 .type arch_debug_load, %function
 arch_debug_load:
-    msr     mdscr_el1, xzr          // off while the pairs change
+    mov     x9, #(1 << 12)          // off while the pairs change (TDCC kept)
+    msr     mdscr_el1, x9
     isb
     cmp     x2, #0
     b.ls    1f
@@ -1134,6 +1144,7 @@ arch_debug_load:
 3:  msr     dbgwcr15_el1, x9
     msr     dbgwvr15_el1, x10
 1:
+    orr     x1, x1, #(1 << 12)      // TDCC always
     msr     mdscr_el1, x1
     isb
     ret

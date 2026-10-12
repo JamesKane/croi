@@ -21,6 +21,7 @@ enum UserTraps {
             return
         }
         if unsafe ExceptionFrame.isSyscall(frame.pointee) {
+            unsafe ExceptionFrame.enteredSyscall(&frame.pointee)
             unsafe Syscalls.dispatch(frame)
             leaving()
             return

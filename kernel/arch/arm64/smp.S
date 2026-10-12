@@ -76,6 +76,19 @@ arch_ap_entry:
 .Lap_el2_no_zt0:
     msr     S3_4_C1_C2_6, x9        // SMCR_EL2
 .Lap_el2_no_sme:
+    // MDCR_EL2 as the loader sets it (review fix: left UNKNOWN here, so
+    // TDE/TDA/TPM could trap debug and PMU use to an EL2 with no vectors):
+    // every PMU counter to EL1 (HPMN = PMCR_EL0.N), no traps.
+    mov     x10, xzr
+    mrs     x9, id_aa64dfr0_el1
+    ubfx    x9, x9, #8, #4          // PMUVer
+    cbz     x9, .Lap_el2_mdcr
+    cmp     x9, #0xf                // IMPLEMENTATION DEFINED PMU
+    b.eq    .Lap_el2_mdcr
+    mrs     x10, pmcr_el0
+    ubfx    x10, x10, #11, #5       // N
+.Lap_el2_mdcr:                      // (named: a "1f" above skips the drop)
+    msr     mdcr_el2, x10
     msr     hstr_el2, xzr
     msr     vttbr_el2, xzr
     mrs     x9, midr_el1

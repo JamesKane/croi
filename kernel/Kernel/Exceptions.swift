@@ -141,6 +141,8 @@ enum ExceptionFrame {
         }
     }
     static func setSyscallResult(_ f: inout arch_exception_frame_t, _ value: UInt64) { f.rax = value }
+    /// The PC is past the syscall instruction from entry on (SYSCALL did it).
+    static func enteredSyscall(_ f: inout arch_exception_frame_t) {}
     /// A new thread's first registers as a frame (THREAD_STARTING, K13g),
     /// and back: pc, sp and the three arguments.
     static func startFrame(_ v: StartValues) -> arch_exception_frame_t {
@@ -264,6 +266,8 @@ enum ExceptionFrame {
         withUnsafeBytes(of: f.x) { unsafe $0.load(fromByteOffset: 8 * i, as: UInt64.self) }
     }
     static func setSyscallResult(_ f: inout arch_exception_frame_t, _ value: UInt64) { f.x.0 = value }
+    /// ELR is past the svc already.
+    static func enteredSyscall(_ f: inout arch_exception_frame_t) {}
     static func startFrame(_ v: StartValues) -> arch_exception_frame_t {
         var f = arch_exception_frame_t()
         f.elr = v.pc; f.sp = v.sp; f.x.0 = v.arg0; f.x.1 = v.arg1; f.x.2 = v.arg2
@@ -374,10 +378,11 @@ enum ExceptionFrame {
         withUnsafeBytes(of: f.x) { unsafe $0.load(fromByteOffset: 8 * (10 + i), as: UInt64.self) }  // a0...
     }
     /// a0, and past the ecall.
-    static func setSyscallResult(_ f: inout arch_exception_frame_t, _ value: UInt64) {
-        f.x.10 = value
-        f.sepc += 4
-    }
+    static func setSyscallResult(_ f: inout arch_exception_frame_t, _ value: UInt64) { f.x.10 = value }
+    /// sepc past the ecall from entry on, as the other arches' PCs are
+    /// (review fix: it moved after the call, so a PC a debugger set during
+    /// a syscall-raised exception resumed 4 bytes late; Linux's order).
+    static func enteredSyscall(_ f: inout arch_exception_frame_t) { f.sepc += 4 }
     static func startFrame(_ v: StartValues) -> arch_exception_frame_t {
         var f = arch_exception_frame_t()
         f.sepc = v.pc; f.x.2 = v.sp; f.x.10 = v.arg0; f.x.11 = v.arg1; f.x.12 = v.arg2
@@ -386,8 +391,8 @@ enum ExceptionFrame {
     static func startValues(_ f: arch_exception_frame_t) -> StartValues {
         StartValues(pc: f.sepc, sp: f.x.2, arg0: f.x.10, arg1: f.x.11, arg2: f.x.12)
     }
-    /// sepc is still at the ecall, a0 the first argument (K13g).
-    static func restartSyscall(_ f: inout arch_exception_frame_t) {}
+    /// Back to the ecall; a0 is still the first argument (K13g).
+    static func restartSyscall(_ f: inout arch_exception_frame_t) { f.sepc -= 4 }
     static func setProgramCounter(_ f: inout arch_exception_frame_t, _ pc: UInt64) { f.sepc = pc }
     static func isInterrupt(_ f: arch_exception_frame_t) -> Bool { f.scause >> 63 != 0 }
 

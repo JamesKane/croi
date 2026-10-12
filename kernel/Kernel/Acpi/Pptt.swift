@@ -93,7 +93,9 @@ enum Pptt {
             let type = table.load(fromByteOffset: offset, as: UInt8.self)
             let length = Int(table.load(fromByteOffset: offset + 1, as: UInt8.self))
             guard length >= 2, offset + length <= table.byteCount else { return }
-            body(offset, type)
+            // A processor node shorter than its fixed fields (20 bytes) is
+            // skipped (review fix: its reads ran past a table's end).
+            if type != 0 || length >= 20 { body(offset, type) }
             offset += length
         }
     }

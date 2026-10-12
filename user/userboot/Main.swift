@@ -187,6 +187,11 @@ struct Userboot {
     /// the root VMAR (ASLR, from cprng_draw), retried where it collides.
     static func randomPlace(in root: UInt32, _ region: croi_info_vmar_t, size: UInt64) throws(Failure)
         -> (vmar: UInt32, base: UInt64) {
+        // Room for it in the lower half, else the subtraction (review fix:
+        // it wrapped) and a modulus by zero pages.
+        guard size < region.len / 2, (region.len / 2 - size) / pageSize > 0 else {
+            throw Failure(what: "placing it", status: -14)  // OUT_OF_RANGE
+        }
         let pages = (region.len / 2 - size) / pageSize
         let canMap = UInt32(CROI_VM_CAN_MAP_READ | CROI_VM_CAN_MAP_WRITE | CROI_VM_CAN_MAP_EXECUTE | CROI_VM_SPECIFIC)
         for _ in 0..<16 {

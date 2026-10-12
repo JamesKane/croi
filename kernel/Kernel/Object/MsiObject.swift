@@ -107,6 +107,10 @@ struct MsiState {
     var ownVector = false
     /// arm64: the device's ITS DeviceID (the event is mapped for it).
     var deviceId: UInt32 = 0
+    /// arm64: MAPTI done, so destroy DISCARDs (review fix: a failed create
+    /// discarded an event never mapped, a command error that may stall
+    /// the ITS queue).
+    var itsMapped = false
 }
 
 @safe struct MsiStatePointer {
@@ -200,6 +204,7 @@ enum MsiInterrupts {
         state.pointee.deviceId = device
         do throws(Status) {
             try Its.map(deviceId: device, lpi: state.pointee.vector, cpu: state.pointee.cpu)
+            state.pointee.itsMapped = true
         } catch {
             object.release()
             throw error
@@ -298,7 +303,7 @@ enum MsiInterrupts {
         DeviceIrqs.setMsiHandler(cpu: state.pointee.cpu, vector: state.pointee.vector, 0)
         DeviceIrqs.releaseMsi(cpu: state.pointee.cpu, vector: state.pointee.vector)
         #if arch(arm64)
-        if state.pointee.deviceId != 0 || Its.ready {
+        if state.pointee.itsMapped {
             Its.unmap(deviceId: state.pointee.deviceId, lpi: state.pointee.vector, cpu: state.pointee.cpu)
         }
         #endif

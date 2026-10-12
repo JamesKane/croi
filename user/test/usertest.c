@@ -5143,6 +5143,42 @@ static void read_tls_and_exit(uint64_t slot) {
 }
 #endif
 
+#if defined(__x86_64__)
+typedef struct {
+  uint32_t self;
+  int64_t result;
+} fs_probe_t;
+
+// Asks for a kernel-half FS base for itself.
+static void kernel_fs_base(uint64_t arg) {
+  fs_probe_t *p = (fs_probe_t *)arg;
+  uint64_t base = 0xffff800000001000ull;
+  p->result = sys(CROI_SYS_OBJECT_SET_PROPERTY, p->self, CROI_PROP_REGISTER_FS, (uint64_t)&base, 8, 0);
+  sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
+}
+#endif
+
+// The low items: FS/GS bases in user space only, the reset control port
+// and PSCI 1.3's SYSTEM_OFF2 the kernel's.
+static int64_t review_low(const startup_t *s) {
+#if defined(__x86_64__)
+  uint64_t sp = 0;
+  fs_probe_t probe = {0, 1};
+  probe.self = unstarted_thread(s, &sp);
+  CHECK(701, sys(CROI_SYS_THREAD_START, probe.self, (uint64_t)kernel_fs_base, sp, (uint64_t)&probe, 0) == 0 &&
+                 ended(probe.self) && probe.result == ERR_INVALID_ARGS);
+  uint32_t reset = 0;
+  CHECK(703, resource_create(s->resource, CROI_RSRC_KIND_IOPORT, 0xCF8, 4, &reset) == ERR_ACCESS_DENIED);
+#elif defined(__aarch64__)
+  uint32_t off2 = 0;
+  CHECK(702, resource_create(s->resource, CROI_RSRC_KIND_SMC, 0xC4000015u, 1, &off2) == ERR_ACCESS_DENIED &&
+                 resource_create(s->resource, CROI_RSRC_KIND_SMC, 0x84000015u, 1, &off2) == ERR_ACCESS_DENIED);
+#else
+  (void)s;
+#endif
+  return 0;
+}
+
 static int64_t review_entry(const startup_t *s) {
   // An entry point outside user space is refused (amd64's iretq faulted
   // in ring 0 on a non-canonical one).
@@ -5407,6 +5443,8 @@ static int64_t extensions(const startup_t *s, uint64_t vdso_base) {
   if (medium != 0) return medium;
   int64_t entry = review_entry(s);
   if (entry != 0) return entry;
+  int64_t low = review_low(s);
+  if (low != 0) return low;
   int64_t signedPointers = pointer_auth(s);
   if (signedPointers != 0) return signedPointers;
   int64_t guardedCode = guarded_pages(s);
