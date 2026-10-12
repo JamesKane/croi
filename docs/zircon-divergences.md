@@ -116,8 +116,10 @@ matches the pinned tree where upstream docs or expectations say otherwise).
   dashboards.
 - **Page loaning** — as Zircon's for decommitted contiguous VMOs (K14f),
   plus croi's boot contiguous pool lending its free pages; on by default
-  (`croi.ppb.loan=off`; Zircon's kernel.ppb.loan defaults off). Kind:
-  deliberate. Impact: none.
+  (`croi.ppb.loan=off`; Zircon's kernel.ppb.loan and borrow-on-mru
+  default off). Borrowing happens at aging passes (Zircon: on the MRU
+  sweep), and taking a page back always evicts (Zircon's
+  replace-on-unloan copy isn't there). Kind: deliberate. Impact: none.
 
 ## Reclamation (K14a)
 
@@ -154,7 +156,7 @@ matches the pinned tree where upstream docs or expectations say otherwise).
   including pages the child has already copied. Kind: deliberate. Impact:
   none.
 - **Not yet**: compression (zram), zero-page dedupe, page-table reclaim,
-  page loaning, high-priority VMOs (`reclaim_disabled_bytes` 0), memory
+  high-priority VMOs (`reclaim_disabled_bytes` 0), memory
   stall watching. Kind: not yet.
 
 ## Pager

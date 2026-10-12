@@ -650,6 +650,7 @@ enum UserAspaces {
         while true {
             // A pager's page to wait for (K13d), or one to make dirty.
             var paged: (vmo: VmoPointer, offset: UInt64, write: Bool)? = nil
+            var stale = false  // K14f: an entry left on a swapped page, removed: again
             resolved = aspace.pointee.lock.withLock { () -> Bool in
                 var found: Mapping? = nil
                 for i in 0..<aspace.pointee.mappings.count where aspace.pointee.mappings[i].contains(page) {
@@ -680,6 +681,14 @@ enum UserAspaces {
                         return true
                     }
                     guard tracked else { return false }
+                    // K14f: an entry still on a page swapped for another (a
+                    // borrowed one and its ordinary copy) is only ever read;
+                    // made writable it would take writes the VMO loses.
+                    if mapping.vmo.lookup(at: offset) != present.physical {
+                        try? aspace.pointee.arch.unmap(virt: page, size: KernelLayout.pageSize)
+                        stale = true
+                        return false
+                    }
                     guard dirty else {
                         mapping.vmo.retain()  // the mapping may go while we wait
                         paged = (mapping.vmo, offset, true)
@@ -722,6 +731,7 @@ enum UserAspaces {
                 }
                 return true
             }
+            if stale { continue }
             guard let (vmo, offset, dirtying) = paged else { break }
             defer { vmo.release() }
             guard mayBlock else { break }

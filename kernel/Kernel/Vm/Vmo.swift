@@ -100,6 +100,9 @@ struct VmoRecord: ~Copyable {
     /// how many; they read as absent until taken back.
     var lent = UniqueArray<UInt64>()
     var lentPages = 0
+    /// Pinned at some point: it never borrows lent pages (K14f; Zircon's
+    /// mitigation against DMA into a page after it is given back).
+    var everPinned = false
 
     var pageCount: Int { Int(size / KernelLayout.pageSize) }
 }
@@ -778,6 +781,13 @@ struct Vmo: ~Copyable {
         let page = KernelLayout.pageSize
         while true {
             Loans.ensure(record, offset, size)  // K14f: lent pages back first
+            if record.pointee.pager != nil {  // and borrowed ones swapped for their own
+                var at = offset
+                while at < offset + size {
+                    guard Loans.unborrow(record, at) else { throw .outOfMemory }
+                    at += page
+                }
+            }
             var at = offset
             while at < offset + size {
                 guard record.commit(at: at) != nil else {
@@ -798,6 +808,16 @@ struct Vmo: ~Copyable {
                     }
                 }
                 if record.pointee.lentPages > 0, record.lentBytesLocked(offset, size) > 0 { return false }
+                // K14f: no borrowed page is pinned (swapped back first).
+                if record.pointee.pager != nil {
+                    var at = offset
+                    while at < offset + size {
+                        let phys = record.pointee.pages.lookup(Int(at / page))
+                        if phys != 0, pmm.isLoaned(phys) { return false }
+                        at += page
+                    }
+                }
+                record.pointee.everPinned = true
                 record.pointee.pins.append(PinRange(offset: offset, size: size))
                 return true
             }

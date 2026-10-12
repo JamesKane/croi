@@ -1772,7 +1772,19 @@ Zircon's physical page borrowing; Todhchai requirement 3):
   slices of a VMO with lent pages are BAD_STATE; the VMO's end takes them
   back first (`endOfLender`). `Loans.mutex` (outermost) serializes lending
   and taking back. Attribution and ZX_INFO_VMO count lent pages out.
-- Mode 17's `page_loaning` (checks 636-643).
+- Borrowers (part 2): only a pager VMO's clean pages (not TRAP_DIRTY, not
+  detached, never pinned: `VmoRecord.everPinned`), swapped onto free lent
+  pages by each aging pass (`Loans.borrow`, Zircon's borrow-on-MRU; age
+  and hints copied, `copyReclaimState`); the originals are freed for
+  anyone. `Loans.unborrow` swaps one back to an ordinary page before
+  `prepareWrite` dirties it, before a pin, and on ALWAYS_NEED. Taking a
+  page back evicts it from its borrower (`unloan` retains the borrower
+  under pmmLock while the backlink is good; the pager supplies the page
+  again). Eviction (K14a) evicts borrowed pages like any. The write-fault
+  path that makes an entry writable first checks it maps the VMO's
+  current page (a read-only entry can outlive a swap until its unmap).
+- Mode 17's `page_loaning` (checks 636-643) and `page_borrowing`
+  (644-649).
 
 Boot budgets, K9f (Kernel/Trace/Budgets.swift, BootOptions.swift's
 `SelfTests`, tools/bench.py):

@@ -359,16 +359,18 @@ let pmmLock = SpinLock()
     }
 
     /// One step of taking a lent page back for its lender: `.back` (it is
-    /// the lender's again, state .vmo), `.evict` (borrowed: the borrower
-    /// must let go of it, whose free then returns it), or `.wait` (in
-    /// transit between a borrower and the PMM; ask again shortly).
+    /// the lender's again, state .vmo), `.evict` (borrowed: the borrower,
+    /// retained here by `retain` while its backlink is still good, must
+    /// let go of it, whose free then returns it), or `.wait` (in transit
+    /// between a borrower and the PMM, or the borrower is going: ask again
+    /// shortly).
     enum Unloan: Equatable {
         case back
         case evict(vmo: UInt64, index: UInt64)
         case wait
     }
 
-    mutating func unloan(_ phys: UInt64) -> Unloan {
+    mutating func unloan(_ phys: UInt64, retaining retain: (UInt64) -> Bool) -> Unloan {
         pmmLock.withLock { () -> Unloan in
             guard let page = unsafe page(for: phys) else { panic("pmm: unloaning a page outside every arena") }
             guard unsafe page.pointee.reclaimFlags & Page.loaned != 0 else { return .back }
@@ -378,8 +380,11 @@ let pmmLock = SpinLock()
                 return .back
             }
             unsafe page.pointee.reclaimFlags |= Page.loanCancelled
+            // A backlink means the page is still in that VMO, whose release
+            // frees its pages (taking this lock) before its record goes.
             let vmo = unsafe page.pointee.next
-            return vmo != 0 ? .evict(vmo: vmo, index: unsafe page.pointee.prev) : .wait
+            guard vmo != 0, retain(vmo) else { return .wait }
+            return .evict(vmo: vmo, index: unsafe page.pointee.prev)
         }
     }
 
@@ -397,6 +402,15 @@ let pmmLock = SpinLock()
             unsafe page.pointee.prev = index
             return unsafe page.pointee.physical
         }
+    }
+
+    /// A page swapped for another keeps its place in reclamation: the old
+    /// one's age and hints (K14a), the new one's loan bits.
+    func copyReclaimState(from old: UInt64, to new: UInt64) {
+        guard let from = unsafe page(for: old), let to = unsafe page(for: new) else { return }
+        let loan = Page.loaned | Page.loanCancelled
+        unsafe to.pointee.reclaimAge = from.pointee.reclaimAge
+        unsafe to.pointee.reclaimFlags = (to.pointee.reclaimFlags & loan) | (from.pointee.reclaimFlags & ~loan)
     }
 
     /// Whether `phys` is a lent page (a borrower asks about its own pages,

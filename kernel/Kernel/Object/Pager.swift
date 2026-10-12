@@ -271,13 +271,25 @@ enum Pagers {
         let page = KernelLayout.pageSize
         let at = offset & ~(page - 1)
         while true {
+            var borrowed = false
             let done = vmo.pointee.lock.withLock { () -> Bool? in
-                guard vmo.pointee.pages.lookup(Int(at / page)) != 0 else { return nil }
+                let phys = vmo.pointee.pages.lookup(Int(at / page))
+                guard phys != 0 else { return nil }
+                // K14f: a borrowed page is swapped for an ordinary one before
+                // it is dirtied (giving it back means dropping it).
+                if pmm.isLoaned(phys) {
+                    borrowed = true
+                    return false
+                }
                 vmo.pointee.modified = true
                 if vmo.dirtLocked(at) == PageDirt.dirty { return true }
                 guard !source.pointee.trapDirty else { return false }
                 vmo.setDirtLocked(at, PageDirt.dirty)
                 return true
+            }
+            if borrowed {
+                guard Loans.unborrow(vmo, at) else { throw .noMemory }
+                continue
             }
             switch done {
             case true: return

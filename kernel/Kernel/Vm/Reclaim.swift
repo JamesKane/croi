@@ -167,6 +167,7 @@ enum Reclaim {
                     if unsafe page.pointee.reclaimAge < maxAge { unsafe page.pointee.reclaimAge += 1 }
                 }
             }
+            Loans.borrow(vmo)  // K14f: clean pager pages onto lent ones
         }
         release(vmos)
         agingPasses.add(1, ordering: .relaxed)
@@ -310,6 +311,14 @@ enum Reclaim {
                 } else if target.dirtLocked(at) == 0, !target.pinnedLocked(at, page) {
                     unsafe record.pointee.reclaimFlags |= dontNeed
                 }
+            }
+        }
+        // K14f: an ALWAYS_NEED page isn't left on a lent one (Zircon's).
+        if always {
+            var at = first
+            while at < end {
+                Loans.unborrow(target, at)
+                at += page
             }
         }
     }

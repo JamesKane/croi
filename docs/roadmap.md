@@ -834,11 +834,14 @@ THREAD, VMO, maps, handle table) and the NAME property.
   system_get_event, eviction at critical, OOM eviction then reboot),
   KMEM_STATS' reclaim fields, committed_change_events. Not yet: jobkill
   at OOM, compression, zero-page dedupe, page-table reclaim, page loaning.
-- **K14f: page loaning.** Part 1 **done** (2026-10-11): lenders (a
+- **K14f: page loaning.** **Done** (2026-10-11), in two parts: lenders (a
   contiguous VMO's decommitted range, the contiguous pool's free pages)
   and taking pages back (faults, COMMIT, pins, accesses, the VMO's end,
-  pool allocation). Part 2: borrowers (a pager VMO's clean pages, swapped
-  onto lent ones by the aging pass) and their eviction.
+  pool allocation); then borrowers (a pager VMO's clean pages, swapped
+  onto lent ones by the aging pass, swapped back before a write, a pin or
+  ALWAYS_NEED) and their eviction when a lender wants its page. On by
+  default (`croi.ppb.loan=off`). Requirement 3's pool no longer holds
+  memory idle.
 - **K14e: scheduling-context handoff on interrupt wakeup (ext 5).**
   **Done** (2026-10-11): object_set_profile with CROI_PROFILE_HANDOFF on
   an interrupt admits a deadline context the object owns; the thread
@@ -892,8 +895,7 @@ What is still open after K13, gathered from the milestones above, CLAUDE.md's
 from Zircon, see docs/zircon-divergences.md.
 
 **Todhchai's requirements and extensions**
-- Requirement 3: page loaning for contiguous VMOs (the Q8B fragmentation
-  answer); ACPI-reclaim memory stays wired.
+- Requirement 3: ACPI-reclaim memory stays wired (page loaning: K14f).
 - Requirement 9: lazy AMX through XFD, SME streaming mode, per-thread SVE
   vector lengths (none available under QEMU TCG).
 - Requirement 1: the GENI UART (Q8B); a text console on the framebuffer.

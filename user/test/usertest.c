@@ -3917,6 +3917,7 @@ static int64_t futex_deadlines(const startup_t *s) {
 // mapping over them faults them back, COMMIT takes them back, both zeroed,
 // and the VMO's end takes back what it lent. Slices refuse lent pages.
 static uint64_t committed_of(uint32_t vmo, uint64_t *events);
+static int64_t reclaim_hook(uint64_t op, uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e);
 
 static int kmem_loaned(const startup_t *s, uint64_t *loaned) {
   croi_info_kmem_stats_t k;
@@ -3967,6 +3968,66 @@ static int64_t page_loaning(const startup_t *s) {
                  kmem_loaned(s, &now) && now == before);
   uint32_t handles[2] = {bti, iommu};
   sys(CROI_SYS_HANDLE_CLOSE_MANY, (uint64_t)handles, 2, 0, 0, 0);
+  return 0;
+}
+
+// K14f, part 2: borrowers. A pager VMO's clean pages move onto lent pages
+// at an aging pass (lent memory goes down by them, contents kept); a
+// write or a pin swaps one back to an ordinary page; the lender taking
+// its pages back evicts the borrowers, whose pager supplies them again.
+// With this the only pager VMO, its pages 0 and 1 borrow the contiguous
+// VMO's two pages (the loaned list hands out the latest lent first).
+static int64_t page_borrowing(const startup_t *s) {
+  uint32_t pg = 0, port = 0, vmo = 0, aux = 0, iommu = 0, bti = 0, contig = 0, pmt = 0;
+  uint8_t desc = 0;
+  char page[PAGE];
+  CHECK(644, sys(CROI_SYS_PAGER_CREATE, 0, (uint64_t)&pg, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_PORT_CREATE, 0, (uint64_t)&port, 0, 0, 0) == 0 &&
+                 sys6(CROI_SYS_PAGER_CREATE_VMO, pg, 0, port, 92, 4 * PAGE, (uint64_t)&vmo) == 0 &&
+                 sys(CROI_SYS_VMO_CREATE, 4 * PAGE, 0, (uint64_t)&aux, 0, 0) == 0 &&
+                 sys(CROI_SYS_IOMMU_CREATE, s->resource, CROI_IOMMU_TYPE_STUB, (uint64_t)&desc, 1, (uint64_t)&iommu) == 0 &&
+                 sys(CROI_SYS_BTI_CREATE, iommu, 0, 0, (uint64_t)&bti, 0) == 0 &&
+                 sys(CROI_SYS_VMO_CREATE_CONTIGUOUS, bti, 2 * PAGE, 0, (uint64_t)&contig, 0) == 0);
+  for (uint64_t i = 0; i < 4; i++) {
+    for (int j = 0; j < PAGE; j++) page[j] = (char)('p' + i);
+    sys(CROI_SYS_VMO_WRITE, aux, (uint64_t)page, i * PAGE, PAGE, 0);
+  }
+  volatile uint64_t slot[8] = {port, pg, vmo, 0, 0, 0, 0, 92};
+  uint64_t lent0 = 0, lent1 = 0, lent2 = 0, lent3 = 0;
+  CHECK(645, sys6(CROI_SYS_PAGER_SUPPLY_PAGES, pg, vmo, 0, 4 * PAGE, aux, 0) == 0 &&
+                 sys6(CROI_SYS_VMO_OP_RANGE, contig, CROI_VMO_OP_DECOMMIT, 0, 2 * PAGE, 0, 0) == 0 &&
+                 kmem_loaned(s, &lent0) && reclaim_hook(6, 1, 0, 0, 0, 0) == 0 && kmem_loaned(s, &lent1) &&
+                 lent0 - lent1 == 4 * PAGE);
+  uint32_t server = start_thread(s, pager_server, (uint64_t)slot);
+  int intact = 1;
+  for (uint64_t i = 0; i < 4; i++) {
+    intact &= sys(CROI_SYS_VMO_READ, vmo, (uint64_t)page, i * PAGE, PAGE, 0) == 0 && page[0] == (char)('p' + i) &&
+              page[PAGE - 1] == (char)('p' + i);
+  }
+  // Borrowed, the pages read as supplied; a write swaps page 2 back to an
+  // ordinary page (its lent one free again).
+  CHECK(646, intact && slot[3] == 0 && sys(CROI_SYS_VMO_WRITE, vmo, (uint64_t)"X", 2 * PAGE, 1, 0) == 0 &&
+                 kmem_loaned(s, &lent2) && lent2 == lent1 + PAGE &&
+                 sys(CROI_SYS_VMO_READ, vmo, (uint64_t)page, 2 * PAGE, PAGE, 0) == 0 && page[0] == 'X' &&
+                 page[1] == 'r');
+  // The contiguous VMO takes its pages back: pages 0 and 1 are evicted
+  // from the pager VMO, then asked of the pager again; page 3 stays.
+  CHECK(647, sys6(CROI_SYS_VMO_OP_RANGE, contig, CROI_VMO_OP_COMMIT, 0, 2 * PAGE, 0, 0) == 0 &&
+                 committed_of(contig, 0) == 2 * PAGE && committed_of(vmo, 0) == 2 * PAGE &&
+                 kmem_loaned(s, &lent3) && lent3 == lent2 &&
+                 sys(CROI_SYS_VMO_READ, contig, (uint64_t)page, PAGE, PAGE, 0) == 0 && page[0] == 0);
+  CHECK(648, sys(CROI_SYS_VMO_READ, vmo, (uint64_t)page, 0, PAGE, 0) == 0 && page[0] == 'A' &&
+                 sys(CROI_SYS_VMO_READ, vmo, (uint64_t)page, PAGE, PAGE, 0) == 0 && page[0] == 'B' &&
+                 slot[3] == 2 && sys(CROI_SYS_VMO_READ, vmo, (uint64_t)page, 3 * PAGE, PAGE, 0) == 0 && page[0] == 's');
+  // A pin swaps the borrowed page 3 back first.
+  uint64_t addr = 0;
+  CHECK(649, bti_pin(bti, CROI_BTI_PERM_READ, vmo, 1, 3 * PAGE, PAGE, &addr, &pmt) == 0 && kmem_loaned(s, &lent0) &&
+                 lent0 == lent3 + PAGE && sys(CROI_SYS_PMT_UNPIN, pmt, 0, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_VMO_READ, vmo, (uint64_t)page, 3 * PAGE, PAGE, 0) == 0 && page[0] == 's');
+  sys(CROI_SYS_PAGER_DETACH_VMO, pg, vmo, 0, 0, 0);
+  wait_for(server, CROI_SIGNAL_TASK_TERMINATED, 3000000000ull);
+  uint32_t handles[] = {server, vmo, aux, port, pg, contig, bti, iommu};
+  for (int i = 0; i < 8; i++) sys(CROI_SYS_HANDLE_CLOSE, handles[i], 0, 0, 0, 0);
   return 0;
 }
 
@@ -4584,6 +4645,8 @@ static int64_t extensions(const startup_t *s) {
   if (raised != 0) return raised;
   int64_t loaning = page_loaning(s);
   if (loaning != 0) return loaning;
+  int64_t borrowing = page_borrowing(s);
+  if (borrowing != 0) return borrowing;
   int64_t reclaimed = reclaim(s);
   if (reclaimed != 0) return reclaimed;
   int64_t random = cprng_checks();

@@ -7,11 +7,16 @@ import Synchronization
 /// wasted while unused). Lenders are a decommitted range of a contiguous
 /// VMO and the contiguous pool's free pages: their pages go on the PMM's
 /// loaned list (`Pmm.lend`), which only borrowers draw from
-/// (`Pmm.allocateLoaned`): pages that can always be given back, a pager
-/// VMO's clean ones (part 2). The lender takes a page back when it needs
-/// it (`reclaim`): free, at once; borrowed, the borrower lets go of it
-/// (evicted: the pager supplies it again). Its physical address never
-/// changes, so a contiguous VMO stays contiguous.
+/// (`Pmm.allocateLoaned`): pages that can always be given back. The only
+/// borrowers are a pager VMO's clean pages (Zircon's rule: not TRAP_DIRTY,
+/// never pinned), swapped onto lent pages by the aging pass (`borrow`,
+/// Zircon's borrow-on-MRU sweep), which frees the originals for anyone. A
+/// borrowed page is swapped back to an ordinary one before it is dirtied,
+/// pinned or hinted ALWAYS_NEED (`unborrow`). The lender takes a page back
+/// when it needs it (`reclaim`): free, at once; borrowed, the borrower
+/// lets go of it (evicted: the pager supplies it again on the next
+/// access). Its physical address never changes, so a contiguous VMO stays
+/// contiguous.
 ///
 /// `croi.ppb.loan=off` turns lending off: contiguous decommit is then
 /// NOT_SUPPORTED (Zircon's kernel.ppb.loan, default off there; on here).
@@ -34,7 +39,7 @@ enum Loans {
         for i in 0..<count {
             let page = phys + UInt64(i) * KernelLayout.pageSize
             while true {
-                switch pmm.unloan(page) {
+                switch pmm.unloan(page, retaining: { VmoPointer(address: $0).tryRetain() }) {
                 case .back:
                     break
                 case .evict(let vmo, let index):
@@ -49,15 +54,11 @@ enum Loans {
         }
     }
 
-    /// A borrower lets go of `phys`, its page `index`: taken out under its
-    /// lock, unmapped, freed (which returns it to its lender). If the VMO
-    /// is going (its release frees the page) or has moved the page on, the
-    /// caller asks the PMM again.
+    /// A borrower (retained by `unloan`) lets go of `phys`, its page
+    /// `index`: taken out under its lock, unmapped, freed (which returns
+    /// it to its lender). If it moved the page on meanwhile, the caller
+    /// asks the PMM again.
     private static func evict(_ vmo: VmoPointer, index: UInt64, phys: UInt64) {
-        guard vmo.tryRetain() else {
-            Scheduler.sleep(until: Clock.now() + 50_000)
-            return
-        }
         defer { vmo.release() }
         let taken = vmo.pointee.lock.withLock { () -> Bool in
             guard vmo.pointee.pages.lookup(Int(index)) == phys else { return false }
@@ -72,8 +73,93 @@ enum Loans {
         evictions.add(1, ordering: .relaxed)
     }
 
-    /// Borrowed pages made to go back to their lenders.
+    /// Borrowed pages made to go back to their lenders, pages swapped onto
+    /// lent ones, and borrowed pages swapped back.
     static let evictions = Atomic<UInt64>(0)
+    static let borrowed = Atomic<UInt64>(0)
+    static let unborrowed = Atomic<UInt64>(0)
+
+    // MARK: Borrowers
+
+    /// The aging pass's sweep over a reclaimable VMO: a pager VMO's clean,
+    /// unpinned pages that aren't ALWAYS_NEED move onto free lent pages
+    /// (copied; their age and hints kept), and the originals are freed.
+    /// Clean pager pages are mapped read only, so a mapping left on an old
+    /// page until the unmap below can only be read (and the write fault
+    /// path checks it maps the current page).
+    static func borrow(_ vmo: VmoPointer) {
+        guard enabled, pmm.freeLoanedPages > 0, !vmo.pointee.everPinned, let source = vmo.pointee.pager else { return }
+        guard source.pointee.lock.withLock({ !source.pointee.trapDirty && !source.pointee.detached }) else { return }
+        let page = KernelLayout.pageSize
+        var swapped = UniqueArray<UInt64>()  // index, old page pairs
+        vmo.pointee.lock.withLock {
+            var candidates = UniqueArray<UInt64>()
+            vmo.pointee.pages.forEach { index, phys in
+                let offset = UInt64(index) * page
+                guard !pmm.isLoaned(phys), vmo.dirtLocked(offset) == 0, !vmo.pinnedLocked(offset, page),
+                      let record = unsafe pmm.page(for: phys),
+                      unsafe record.pointee.reclaimFlags & Reclaim.alwaysNeed == 0 else { return }
+                candidates.append(UInt64(index))
+                candidates.append(phys)
+            }
+            var i = 0
+            while i < candidates.count {
+                let index = candidates[i], old = candidates[i + 1]
+                i += 2
+                guard let new = pmm.allocateLoaned(for: vmo.address, index: index) else { break }
+                copyPage(from: old, to: new)
+                pmm.copyReclaimState(from: old, to: new)
+                _ = vmo.pointee.pages.set(Int(index), new)  // an existing slot: nothing to allocate
+                swapped.append(index)
+                swapped.append(old)
+            }
+        }
+        var i = 0
+        while i < swapped.count {
+            vmo.unmapEverywhere(swapped[i] * page, page)
+            pmm.free(swapped[i + 1])
+            i += 2
+        }
+        borrowed.add(UInt64(swapped.count / 2), ordering: .relaxed)
+    }
+
+    /// A borrowed page of `vmo` at `offset` (if it is one) becomes an
+    /// ordinary page with the same contents, before it is dirtied, pinned
+    /// or hinted ALWAYS_NEED; the lent one goes back to the loaned list
+    /// (or its lender). False if there was no memory for the copy.
+    @discardableResult
+    static func unborrow(_ vmo: VmoPointer, _ offset: UInt64) -> Bool {
+        let page = KernelLayout.pageSize
+        let index = Int(offset / page)
+        let borrowed = vmo.pointee.lock.withLock { () -> Bool in
+            let phys = vmo.pointee.pages.lookup(index)
+            return phys != 0 && pmm.isLoaned(phys)
+        }
+        guard borrowed else { return true }
+        guard let new = pmm.allocatePage(.vmo) else { return false }
+        let old = vmo.pointee.lock.withLock { () -> UInt64 in
+            let phys = vmo.pointee.pages.lookup(index)
+            guard phys != 0, pmm.isLoaned(phys) else { return 0 }
+            copyPage(from: phys, to: new)
+            pmm.copyReclaimState(from: phys, to: new)
+            _ = vmo.pointee.pages.set(index, new)
+            return phys
+        }
+        guard old != 0 else {
+            pmm.free(new)
+            return true
+        }
+        vmo.unmapEverywhere(UInt64(index) * page, page)
+        pmm.free(old)
+        unborrowed.add(1, ordering: .relaxed)
+        return true
+    }
+
+    private static func copyPage(from source: UInt64, to destination: UInt64) {
+        unsafe UnsafeMutableRawPointer(bitPattern: UInt(KernelLayout.physmap(destination)))!
+            .copyMemory(from: UnsafeRawPointer(bitPattern: UInt(KernelLayout.physmap(source)))!,
+                        byteCount: Int(KernelLayout.pageSize))
+    }
 
     // MARK: Contiguous VMOs
 
