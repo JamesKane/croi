@@ -870,8 +870,25 @@ THREAD, VMO, maps, handle table) and the NAME property.
     userboot/ElfImage overflow traps on malformed ELFs; PPTT short
     nodes; SMC filter misses SYSTEM_OFF2; arm64 msi_create cleanup
     DISCARDs unmapped events; VT-d bti_create double bind race.
-  - not reviewed: the rest of the arch entry code (privileged bits via
-    thread_write_state, sysret canonical checks, swapgs paths).
+  - Part 4, the entry/exit code (three per-arch readers; checks 698-700,
+    each seen to fail without its fix): thread and process entry points
+    must be user addresses (amd64's iretq faulted in ring 0), amd64's
+    32-bit user code segment not present plus CSTAR on a refusing stub
+    and SYSENTER zeroed (AMD's compat-mode SYSCALL went to an unset
+    CSTAR), thread_read/write_state and the debug-state calls work under
+    the thread object's lock (`Exceptions.withStopped`; the frame was used
+    after it), clac at amd64 interrupt/exception entry, SUM cleared at
+    rv64 trap entry, a new thread's TLS loaded in setAspace (it inherited
+    the last user thread's on its CPU), arm64 SError/FIQ from EL0 through
+    the SError policy. Sound: user-written registers never reach mode or
+    privilege bits, sysretq, PAC key loading, rv64's sscratch swap,
+    register clearing, debug address limits, the I/O bitmap.
+  - open from part 4, low: NMI/#MC GS choice from CS alone and FS/GS bases
+    in the kernel half; DR7 RW/LEN unvalidated; arm64 user-reachable
+    control registers (CNTKCTL, MDSCR.TDCC, PMUSERENR, SCTLR) not set to
+    known values, the AP EL2 drop doesn't write MDCR_EL2, BTYPE kept when
+    a debugger changes the PC; rv64 sepc +4 applied after a debugger set
+    the PC in a syscall-raised exception.
 - **K14s: per-process user PAC keys.** **Done** (2026-10-12): each
   address space gets a random APIA key, copied to the CPU's per-CPU
   record at switches and loaded at every return to EL0, so a process

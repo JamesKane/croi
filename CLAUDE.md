@@ -209,6 +209,16 @@ User address spaces and VMOs (K4a, Kernel/Vm/):
   them after `flushOthers`; a failed eager map in `insert` unmaps what it
   mapped; `process_read_memory` retains the VMO under the aspace lock and
   `privatize` returns its child retained.
+- Review round 1, part 4 (entry/exit): `Processes.start` refuses entry
+  points at or above `UserLayout.top` (UserTraps.enter kills as a
+  backstop); amd64 GDT 0x18 (USER_CS32, only STAR's sysret base) is not
+  present, CSTAR is `syscall_compat_refused` (sysretl with -2, no stack
+  or GS), SYSENTER MSRs are 0; `isr_common` executes clac (with SMAP)
+  before anything; rv64 trap entry clears SUM after saving sstatus;
+  `setAspace` loads the thread's TLS (FS/GS, TPIDR_EL0); register and
+  debug-state access go through `Exceptions.withStopped` (under the
+  thread object's lock); arm64 SError/FIQ from EL0 take the SError policy
+  (contained or restartable ones become the process's exception).
 - Review round 1, part 3: Zircon's resource limits raise POLICY_ERROR
   with the code as synth_code (`Policy.limitException`, task.h
   CROI_EXCP_POLICY_CODE_*): a channel write leaving more than

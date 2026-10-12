@@ -128,6 +128,9 @@ enum UserTraps {
                       arg1: UInt64, arg2: UInt64 = 0) -> Never {
         let thread = Scheduler.current
         thread.pointee.handleTable = handles
+        // Never return to a kernel or non-canonical PC (Processes.start and
+        // the debugger paths check it; this is the backstop).
+        if pc >= UserLayout.top, thread.pointee.object != 0 { Processes.exitThread(Int(TaskReturnCode.exceptionKill)) }
         // Started while its thread or process is suspended (K13g): parks first.
         if thread.pointee.object != 0,
            ThreadObjectPointer(object: ObjectPointer(address: thread.pointee.object)).pointee.suspendCount.load(ordering: .acquiring) > 0 {

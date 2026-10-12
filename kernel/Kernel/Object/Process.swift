@@ -434,6 +434,9 @@ enum Processes {
     /// the vDSO's base in the third.
     static func start(thread object: ObjectPointer, pc: UInt64, sp: UInt64, arg0: UInt64, arg1: UInt64,
                       first: Bool) throws(Status) {
+        // A user address (Zircon's is_user_accessible; review fix: amd64's
+        // iretq to a non-canonical one faulted in ring 0, a panic).
+        guard pc < UserLayout.top else { throw .invalidArgs }
         let thread = ThreadObjectPointer(object: object)
         let process = thread.pointee.process
         let p = ProcessPointer(object: process)

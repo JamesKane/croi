@@ -68,7 +68,9 @@ trap_entry:
     sd      t0, FRAME_SEPC(sp)
     csrr    t0, sstatus
     sd      t0, FRAME_SSTATUS(sp)
-    csrr    t0, scause
+    li      t0, (1 << 18)           // SUM off in the handler (review fix: an
+    csrc    sstatus, t0             // interrupt in a user copy could switch
+    csrr    t0, scause              // threads with it on); sret restores it
     sd      t0, FRAME_SCAUSE(sp)
     csrr    t0, stval
     sd      t0, FRAME_STVAL(sp)
@@ -107,7 +109,9 @@ trap_entry:
     sd      t0, FRAME_SEPC(sp)
     csrr    t0, sstatus
     sd      t0, FRAME_SSTATUS(sp)
-    csrr    t0, scause
+    li      t0, (1 << 18)           // SUM off in the handler (review fix: an
+    csrc    sstatus, t0             // interrupt in a user copy could switch
+    csrr    t0, scause              // threads with it on); sret restores it
     sd      t0, FRAME_SCAUSE(sp)
     csrr    t0, stval
     sd      t0, FRAME_STVAL(sp)

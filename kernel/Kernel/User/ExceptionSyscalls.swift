@@ -177,14 +177,18 @@ extension Syscalls {
             guard a[3] >= UInt64(size) else { throw .bufferTooSmall }
             try check(a[2], size)
             let thread = try table.get(handle, type: .thread, rights: .read)
-            let frame = try unsafe Exceptions.frame(of: thread.object)
-            let running = Exceptions.runningThread(thread.object)
+            // Read under the thread's lock, copied out after it.
             if a[1] == UInt64(CROI_THREAD_STATE_DEBUG_REGS) {
-                var regs = HardwareDebug.readRegisters(running)
+                var regs = try unsafe Exceptions.withStopped(thread.object) { (_, running) throws(Status) in
+                    HardwareDebug.readRegisters(running)
+                }
                 let failed = withUnsafeBytes(of: &regs) { unsafe UserCopy.to(a[2], $0.baseAddress!, UInt64($0.count)) }
                 guard failed == 0 else { throw .invalidArgs }
             } else {
-                try put(try unsafe HardwareDebug.singleStep(running, frame), a[2])
+                let stepping = try unsafe Exceptions.withStopped(thread.object) { (frame, running) throws(Status) -> UInt32 in
+                    try unsafe HardwareDebug.singleStep(running, frame)
+                }
+                try put(stepping, a[2])
             }
         case 106 where a[1] == UInt64(CROI_THREAD_STATE_DEBUG_REGS) || a[1] == UInt64(CROI_THREAD_STATE_SINGLE_STEP):
             // Gated as Zircon's (a bit test: DEBUG_REGS and SINGLE_STEP).
@@ -196,16 +200,18 @@ extension Syscalls {
                 let copied = withUnsafeMutableBytes(of: &regs) { unsafe UserCopy.from($0.baseAddress!, a[2], UInt64(size)) }
                 guard copied == 0 else { throw .invalidArgs }
                 let thread = try table.get(handle, type: .thread, rights: .write)
-                _ = try unsafe Exceptions.frame(of: thread.object)  // stopped
-                try HardwareDebug.writeRegisters(Exceptions.runningThread(thread.object), regs)
+                try unsafe Exceptions.withStopped(thread.object) { (_, running) throws(Status) in
+                    try HardwareDebug.writeRegisters(running, regs)
+                }
             } else {
                 var value: UInt32 = 0
                 let copied = withUnsafeMutableBytes(of: &value) { unsafe UserCopy.from($0.baseAddress!, a[2], 4) }
                 guard copied == 0 else { throw .invalidArgs }
                 let thread = try table.get(handle, type: .thread, rights: .write)
-                let frame = try unsafe Exceptions.frame(of: thread.object)
-                guard value <= 1 else { throw .invalidArgs }
-                try unsafe HardwareDebug.setSingleStep(Exceptions.runningThread(thread.object), frame, value == 1)
+                try unsafe Exceptions.withStopped(thread.object) { (frame, running) throws(Status) in
+                    guard value <= 1 else { throw .invalidArgs }
+                    try unsafe HardwareDebug.setSingleStep(running, frame, value == 1)
+                }
             }
         case 105:  // thread_read_state(thread, kind, buffer, size)
             guard a[1] == UInt64(CROI_THREAD_STATE_GENERAL_REGS) else { throw .invalidArgs }

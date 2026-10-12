@@ -92,7 +92,10 @@ gdt:
     .quad   0
     .quad   0x00af9a000000ffff      // 0x08 KERNEL_CS: ring 0, long mode code
     .quad   0x00cf92000000ffff      // 0x10 KERNEL_DS: ring 0 data
-    .quad   0x00cffa000000ffff      // 0x18 USER_CS32: ring 3, 32-bit code (sysret)
+    // 0x18 USER_CS32: STAR's base for sysret, never used (sysretq takes
+    // 0x28), so not present: user code can't far-jump into 32-bit mode,
+    // whose SYSCALL enters at CSTAR on AMD (review fix).
+    .quad   0x00cf7a000000ffff
     .quad   0x00cff2000000ffff      // 0x20 USER_DS: ring 3 data
     .quad   0x00affa000000ffff      // 0x28 USER_CS64: ring 3, long mode code
 .globl gdt_tss

@@ -40,7 +40,14 @@ isr_common:
     testb   $3, 24(%rsp)            // the interrupted CS: from user mode?
     jz      1f
     swapgs
-1:  pushq   %rax
+1:  // AC off in the handler (review fix: interrupt and exception gates
+    // don't clear it, so user code that set AC, or an interrupt inside a
+    // stac window, ran the kernel with SMAP off, and a switch from there
+    // carried it to the next thread). iretq restores the interrupted AC.
+    cmpb    $0, croi_user_protection(%rip)
+    je      2f
+    clac
+2:  pushq   %rax
     pushq   %rbx
     pushq   %rcx
     pushq   %rdx
@@ -192,6 +199,19 @@ arch_syscall_init:
     mov     %rax, %rdx
     shr     $32, %rdx
     wrmsr
+    mov     $0xc0000083, %ecx       // CSTAR: SYSCALL from 32-bit mode (AMD)
+    lea     syscall_compat_refused(%rip), %rax
+    mov     %rax, %rdx
+    shr     $32, %rdx
+    wrmsr
+    mov     $0x174, %ecx            // SYSENTER_CS 0: SYSENTER raises #GP
+    xor     %eax, %eax
+    xor     %edx, %edx
+    wrmsr
+    mov     $0x175, %ecx            // SYSENTER_ESP, SYSENTER_EIP: 0
+    wrmsr
+    mov     $0x176, %ecx
+    wrmsr
     mov     $0xc0000084, %ecx       // FMASK
     mov     $((1 << 9) | (1 << 10) | (1 << 8) | (1 << 18)), %eax
     xor     %edx, %edx
@@ -204,6 +224,15 @@ arch_syscall_init:
     wrmsr
     ret
 .size arch_syscall_init, . - arch_syscall_init
+
+// CSTAR's target: there is no 32-bit user mode (its code segment isn't
+// present), so this only runs if something got there anyway. It touches
+// neither the stack (the user's) nor GS: NOT_SUPPORTED, back to the
+// caller (Linux's ignore_sysret).
+.section .text.syscall_compat_refused, "ax", @progbits
+syscall_compat_refused:
+    mov     $-2, %eax
+    sysretl
 
 // void arch_init_exceptions(void)
 .section .text.arch_init_exceptions, "ax", @progbits

@@ -5,7 +5,14 @@ import Fmt
 /// the instruction; anything else is unexpected this early and is fatal.
 @c @implementation
 func arch_exception(_ frame: UnsafeMutablePointer<arch_exception_frame_t>) {
-    if unsafe ExceptionFrame.fromUser(frame.pointee) {
+    #if arch(arm64)
+    // SError and FIQ from EL0 are the system's first (review fix: they went
+    // to the process as its own exception, past the SError policy).
+    let asynchronous = unsafe frame.pointee.slot & 3 >= 2
+    #else
+    let asynchronous = false
+    #endif
+    if unsafe ExceptionFrame.fromUser(frame.pointee), !asynchronous {
         unsafe UserTraps.handle(frame)
         return
     }
@@ -21,8 +28,12 @@ func arch_exception(_ frame: UnsafeMutablePointer<arch_exception_frame_t>) {
             SErrorPolicy.corrected += 1
             return
         }
-        // Recoverable kinds will go to the faulting process once there is
-        // user mode; from the kernel they are fatal like the rest.
+        // Contained or restartable errors from user mode go to the process
+        // (its exception); from the kernel they are fatal like the rest.
+        if unsafe ExceptionFrame.fromUser(frame.pointee), kind == .recoverable || kind == .restartable {
+            unsafe UserTraps.handle(frame)
+            return
+        }
         if let console = panicConsole {
             console.write("\ncroi kernel: SError: ")
             console.write(SErrorPolicy.describe(kind))

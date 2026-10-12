@@ -5112,6 +5112,87 @@ static int64_t review_medium(const startup_t *s) {
   return 0;
 }
 
+// Review round 1, the entry/exit code.
+#if defined(__x86_64__)
+static void far_return_to_32bit(uint64_t unused) {
+  (void)unused;
+  __asm__ volatile("pushq $0x1b\n"
+                   "leaq 1f(%%rip), %%rax\n"
+                   "pushq %%rax\n"
+                   "lretq\n"
+                   "1: ud2\n" ::: "rax", "memory");
+}
+#endif
+
+#if defined(__aarch64__)
+// Leaves `marker` in this CPU's TPIDR_EL0 (spinning a while so that the
+// markers spread over every CPU).
+static void mark_tls_and_exit(uint64_t marker) {
+  __asm__ volatile("msr tpidr_el0, %0" ::"r"(marker));
+  uint64_t until = now_ns() + 30000000;
+  while (now_ns() < until) {
+  }
+  sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
+}
+
+static void read_tls_and_exit(uint64_t slot) {
+  uint64_t tls;
+  __asm__ volatile("mrs %0, tpidr_el0" : "=r"(tls));
+  *(volatile uint64_t *)slot = tls;
+  sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
+}
+#endif
+
+static int64_t review_entry(const startup_t *s) {
+  // An entry point outside user space is refused (amd64's iretq faulted
+  // in ring 0 on a non-canonical one).
+  uint64_t sp = 0;
+  uint32_t bad = unstarted_thread(s, &sp);
+  CHECK(698, sys(CROI_SYS_THREAD_START, bad, 0x0000800000000000ull, sp, 0, 0) == ERR_INVALID_ARGS);
+  sys(CROI_SYS_HANDLE_CLOSE, bad, 0, 0, 0, 0);
+#if defined(__x86_64__)
+  // The 32-bit user code segment isn't present: a far return to it faults
+  // on the segment (it reached 32-bit mode, whose SYSCALL went to an unset
+  // CSTAR on AMD).
+  uint32_t far = unstarted_thread(s, &sp), channel = exception_channel(far), exception = 0, thread = 0;
+  uint32_t exit = CROI_EXCEPTION_STATE_THREAD_EXIT;
+  croi_exception_info_t info = {};
+  croi_exception_report_t report = {};
+  uint64_t counts[2];
+  CHECK(699, sys(CROI_SYS_THREAD_START, far, (uint64_t)far_return_to_32bit, sp, 0, 0) == 0 &&
+                 next_exception(channel, &info, &exception) && info.type == CROI_EXCP_GENERAL &&
+                 sys(CROI_SYS_EXCEPTION_GET_THREAD, exception, (uint64_t)&thread, 0, 0, 0) == 0 &&
+                 sys6(CROI_SYS_OBJECT_GET_INFO, thread, CROI_INFO_THREAD_EXCEPTION_REPORT, (uint64_t)&report,
+                      sizeof report, (uint64_t)&counts[0], (uint64_t)&counts[1]) == 0 &&
+                 report.context.arch.vector == 11 &&  // #NP
+                 sys(CROI_SYS_OBJECT_SET_PROPERTY, exception, CROI_PROP_EXCEPTION_STATE, (uint64_t)&exit, 4, 0) == 0);
+  sys(CROI_SYS_HANDLE_CLOSE, thread, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, exception, 0, 0, 0, 0);
+  CHECK(699, ended(far));
+  sys(CROI_SYS_HANDLE_CLOSE, channel, 0, 0, 0, 0);
+#endif
+#if defined(__aarch64__)
+  // A new thread starts with its own TLS register (0), not the one the
+  // last user thread on its CPU left (ours, here).
+  // Spinners leave a marker in every CPU's register first.
+  uint64_t saved, slots[8];
+  const uint64_t marker = 0x5a5a5a5a00000000ull;
+  __asm__ volatile("mrs %0, tpidr_el0" : "=r"(saved));
+  __asm__ volatile("msr tpidr_el0, %0" ::"r"(marker));
+  uint32_t spinners[8];
+  int all = 1;
+  for (int i = 0; i < 8; i++) spinners[i] = start_thread(s, mark_tls_and_exit, marker);
+  for (int i = 0; i < 8; i++) all &= ended(spinners[i]);
+  for (int i = 0; i < 8; i++) {
+    slots[i] = 1;
+    all &= ended(start_thread(s, read_tls_and_exit, (uint64_t)&slots[i])) && slots[i] == 0;
+  }
+  __asm__ volatile("msr tpidr_el0, %0" ::"r"(saved));
+  CHECK(700, all);
+#endif
+  return 0;
+}
+
 static uint64_t pac_sign(uint64_t value, uint64_t modifier) {
 #if defined(__aarch64__)
   register uint64_t x17 __asm__("x17") = value;
@@ -5324,6 +5405,8 @@ static int64_t extensions(const startup_t *s, uint64_t vdso_base) {
   if (fixes != 0) return fixes;
   int64_t medium = review_medium(s);
   if (medium != 0) return medium;
+  int64_t entry = review_entry(s);
+  if (entry != 0) return entry;
   int64_t signedPointers = pointer_auth(s);
   if (signedPointers != 0) return signedPointers;
   int64_t guardedCode = guarded_pages(s);

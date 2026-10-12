@@ -2177,6 +2177,16 @@ enum Scheduler {
             thread.pointee.pkru = aspace == nil ? 0 : Jit.defaultUserPkru
             loadPkru(thread.pointee.pkru, me)
             if let aspace { loadPacKey(aspace) }  // a new thread's first entry
+            if aspace != nil {
+                // Its own TLS (review fix: the switch to a new thread, which has
+                // no address space yet, loaded none, so it started with the
+                // last user thread's on this CPU).
+                #if arch(x86_64)
+                loadUserTls(fs: thread.pointee.tls, gs: thread.pointee.gs, me)
+                #elseif arch(arm64)
+                arch_user_tls_write(thread.pointee.tls)
+                #endif
+            }
         }
     }
 

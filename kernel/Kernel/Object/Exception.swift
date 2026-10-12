@@ -440,40 +440,34 @@ enum Exceptions {
     /// The registers of `thread`, which must be waiting in an exception
     /// (so its TLS registers are in its record: Thread.tls).
     static func readState(_ thread: ObjectPointer) throws(Status) -> croi_thread_state_general_regs_t {
-        let frame = try unsafe frame(of: thread)
-        var registers = unsafe generalRegisters(frame.pointee)
-        let running = runningThread(thread)
-        #if arch(x86_64)
-        registers.fs_base = running.pointee.tls
-        registers.gs_base = running.pointee.gs
-        #elseif arch(arm64)
-        registers.tpidr = running.pointee.tls
-        #endif
-        return registers
-    }
-
-    static func writeState(_ thread: ObjectPointer, _ registers: croi_thread_state_general_regs_t) throws(Status) {
-        let frame = try unsafe frame(of: thread)
-        #if arch(x86_64)
-        guard isCanonical(registers.fs_base), isCanonical(registers.gs_base) else { throw .invalidArgs }
-        #endif
-        try unsafe setGeneralRegisters(&frame.pointee, registers)
-        let running = runningThread(thread)
-        // Loaded when it next switches in.
-        Scheduler.locked {
+        try unsafe withStopped(thread) { (frame, running) throws(Status) -> croi_thread_state_general_regs_t in
+            var registers = unsafe generalRegisters(frame.pointee)
             #if arch(x86_64)
-            running.pointee.tls = registers.fs_base
-            running.pointee.gs = registers.gs_base
+            registers.fs_base = running.pointee.tls
+            registers.gs_base = running.pointee.gs
             #elseif arch(arm64)
-            running.pointee.tls = registers.tpidr
+            registers.tpidr = running.pointee.tls
             #endif
+            return registers
         }
     }
 
-    /// The scheduler thread of a thread object in an exception (`frame`
-    /// found it there, and it can't exit while waiting).
-    static func runningThread(_ thread: ObjectPointer) -> ThreadPointer {
-        ThreadPointer(address: thread.header.lock.withLock { ThreadObjectPointer(object: thread).pointee.thread })
+    static func writeState(_ thread: ObjectPointer, _ registers: croi_thread_state_general_regs_t) throws(Status) {
+        #if arch(x86_64)
+        guard isCanonical(registers.fs_base), isCanonical(registers.gs_base) else { throw .invalidArgs }
+        #endif
+        try unsafe withStopped(thread) { (frame, running) throws(Status) in
+            try unsafe setGeneralRegisters(&frame.pointee, registers)
+            // Loaded when it next switches in (object -> scheduler: the order).
+            Scheduler.locked {
+                #if arch(x86_64)
+                running.pointee.tls = registers.fs_base
+                running.pointee.gs = registers.gs_base
+                #elseif arch(arm64)
+                running.pointee.tls = registers.tpidr
+                #endif
+            }
+        }
     }
 
     #if arch(x86_64)
@@ -484,22 +478,31 @@ enum Exceptions {
     }
     #endif
 
-    /// Its registers: in an exception, or parked suspended (K13g: the frame
-    /// at its kernel stack top); else BAD_STATE.
-    static func frame(of thread: ObjectPointer) throws(Status) -> UnsafeMutablePointer<arch_exception_frame_t> {
-        let address = try thread.header.lock.withLock { () throws(Status) -> UInt64 in
+    /// Runs `body` on a stopped thread's registers (in an exception, or
+    /// parked suspended: K13g's frame at its kernel stack top) and its
+    /// scheduler thread, all under the thread object's lock (review fix:
+    /// the frame was used after the lock, while the thread could resume,
+    /// exit and have its stack freed; the thread leaves either state only
+    /// under this lock). BAD_STATE if it isn't stopped.
+    static func withStopped<R>(_ thread: ObjectPointer,
+                               _ body: (UnsafeMutablePointer<arch_exception_frame_t>, ThreadPointer) throws(Status) -> R)
+        throws(Status) -> R {
+        try thread.header.lock.withLock { () throws(Status) -> R in
             let t = ThreadObjectPointer(object: thread)
-            if t.pointee.exceptionFrame != 0 { return t.pointee.exceptionFrame }
-            if t.pointee.inException { throw .notSupported }  // THREAD_EXITING: no registers (Zircon's)
-            guard t.pointee.suspended, t.pointee.thread != 0 else { return 0 }
+            guard t.pointee.thread != 0 else { throw .badState }
             let scheduled = ThreadPointer(address: t.pointee.thread)  // alive: exit clears `thread` under this lock
-            guard scheduled.pointee.enteredUser else { return 0 }  // parked before its first entry: no frame yet
-            return UInt64(UInt(bitPattern: unsafe UserTraps.userFrame(of: scheduled)))
+            let address: UInt64
+            if t.pointee.exceptionFrame != 0 {
+                address = t.pointee.exceptionFrame
+            } else {
+                if t.pointee.inException { throw .notSupported }  // THREAD_EXITING: no registers (Zircon's)
+                // Parked before its first entry has no frame yet.
+                guard t.pointee.suspended, scheduled.pointee.enteredUser else { throw .badState }
+                address = UInt64(UInt(bitPattern: unsafe UserTraps.userFrame(of: scheduled)))
+            }
+            let frame = unsafe UnsafeMutablePointer<arch_exception_frame_t>(bitPattern: UInt(address))!
+            return try unsafe body(frame, scheduled)
         }
-        guard let frame = unsafe UnsafeMutablePointer<arch_exception_frame_t>(bitPattern: UInt(address)) else {
-            throw .badState
-        }
-        return unsafe frame
     }
 
     #if arch(x86_64)
