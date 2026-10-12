@@ -905,6 +905,15 @@ THREAD, VMO, maps, handle table) and the NAME property.
     spreads that reach 100+ us on single boots (not enforced). Accepted:
     boot.userboot_start_selftests +4% (3.40 vs 3.28 s), the review's 16
     new mode 17 checks; self-tests only.
+  - Todhchai check (2026-10-12): tools/todhchai-check.py, ctest
+    `todhchai-check`: Todhchai's --next test programs on this tree's
+    kernel before a commit (it catches the 0xCF9 regression).
+  - Open: once, under heavy parallel load (four TCG boots plus KVM boots),
+    amd64's boot-amd-iommu-xt panicked in the sampler self-test with no
+    kernel samples at all in the spinner's 80 ms (0 of 0, nothing
+    foreign), not reproduced in 5 quiet runs. A stalled vCPU for 80 ms, or
+    a sampling timer not armed on some switch path: look before
+    loosening the check.
   - left, as Zircon does or unverified: NMI/#MC still choose GS from the
     saved CS (no paranoid entry; NMIs are fatal); REMAP_IRQ resources
     checked against the ISA number; iommu_create's reserved ranges

@@ -37,6 +37,19 @@ One CMake/Ninja tree per arch, `build/<arch>/`. Toolchain is pinned by
 QEMU uses the edk2 firmware in `/usr/share/edk2` (`-DCROI_EDK2_DIR=` to
 override); `build/<arch>/esp/` is served to it as a FAT drive.
 
+## Todhchai's programs (todhchai-check)
+
+`tools/todhchai-check.py <arch>` (ctest `todhchai-check`, label
+`todhchai`) boots Todhchai's `td boot --next` test programs (sys-test,
+pthread-test, tls-test, services-test) from its newest bootfs
+(../todhchai or ../todhchai-c0, read only, copied) on this tree's loader
+and kernel, with td boot's QEMU command (KVM on amd64). td ci builds croi
+only from commits, so this is the pre-commit check of what croi changes
+under Todhchai: review round 1's port 0xCF9 refusal passed every croi test
+and failed sys-test (the check catches it). Launcher-manifest boots aren't
+covered (their bootfs is assembled per test). Skipped (77) with no bootfs;
+consoles in build/<arch>/todhchai/.
+
 ## Timing discipline (after Todhchai's docs/performance.md)
 
 Tests judge correctness; timings are judged by the bench, against this

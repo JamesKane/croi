@@ -145,6 +145,16 @@ if(CROI_ARCH STREQUAL arm64 OR CROI_ARCH STREQUAL rv64)
   set_tests_properties(boot-lean-icount PROPERTIES TIMEOUT 120)
 endif()
 
+# Todhchai's --next test programs (sys-test, pthread-test, tls-test,
+# services-test) from its newest bootfs, on this tree's loader and kernel,
+# booted as td boot boots them (tools/todhchai-check.py): its td ci builds
+# croi only from commits, and a root-filter change broke sys-test once with
+# every test here passing. Skipped (77) where no Todhchai tree has a bootfs.
+add_test(NAME todhchai-check
+  COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/todhchai-check.py ${CROI_ARCH}
+          --build ${CMAKE_BINARY_DIR})
+set_tests_properties(todhchai-check PROPERTIES TIMEOUT 600 SKIP_RETURN_CODE 77 LABELS todhchai)
+
 # Reboot (K10e): the machine resets; -no-reboot makes QEMU exit on it.
 set(_esp_reboot ${CMAKE_BINARY_DIR}/esp-reboot)
 file(CONFIGURE OUTPUT ${CMAKE_BINARY_DIR}/cmdline-reboot
