@@ -832,7 +832,7 @@ extension VmError {
         case .dead, .pinned, .badState: .badState
         case .notFound: .notFound
         case .alreadyMapped: .alreadyExists
-        case .denied: .accessDenied
+        case .denied, .accessDenied: .accessDenied
         case .unaligned, .outOfRange, .invalidArgument: .invalidArgs
         case .notSupported: .notSupported
         }

@@ -18,6 +18,8 @@ enum VmError: Error, Equatable {
     case denied(UInt64)
     /// The address space was torn down (its process died).
     case dead
+    /// More rights than the mapping may have (vmar_protect past its ceiling).
+    case accessDenied
     /// Pages of the range are pinned for DMA (K9e).
     case pinned
     /// Not for this kind of VMO (a snapshot of a physical one; decommit

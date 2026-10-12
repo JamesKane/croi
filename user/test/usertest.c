@@ -4905,6 +4905,30 @@ static int64_t zero_intervals(const startup_t *s) {
 // K14p: user code's pointer authentication key isn't the kernel's. User
 // code signs a value with PACIA1716 (hint-space: unchanged where PAC is off)
 // and asks the kernel for its own key's signature of the same value.
+// Review fixes: a mapping's rights never grow past what its VMO handle
+// allowed (the vDSO's code and a read-only handle's mapping can't be
+// protected writable), and a physical range that wraps is refused.
+static int64_t mapping_ceilings(const startup_t *s, uint64_t vdso_base) {
+  uint32_t vmo = 0, readOnly = 0, physical = 0;
+  uint64_t at = 0;
+  CHECK(686, sys(CROI_SYS_VMO_CREATE, PAGE, 0, (uint64_t)&vmo, 0, 0) == 0 &&
+                 sys(CROI_SYS_HANDLE_DUPLICATE, vmo, RIGHT_READ | RIGHT_MAP, (uint64_t)&readOnly, 0, 0) == 0 &&
+                 sys6(CROI_SYS_VMAR_MAP, s->vmar | (uint64_t)CROI_VM_PERM_READ << 32, 0, readOnly, 0, PAGE,
+                      (uint64_t)&at) == 0 &&
+                 sys(CROI_SYS_VMAR_PROTECT, s->vmar | (uint64_t)(CROI_VM_PERM_READ | CROI_VM_PERM_WRITE) << 32, at,
+                     PAGE, 0, 0) == ERR_ACCESS_DENIED &&
+                 sys(CROI_SYS_VMAR_PROTECT, s->vmar | (uint64_t)CROI_VM_PERM_READ << 32, at, PAGE, 0, 0) == 0);
+  CHECK(687, sys(CROI_SYS_VMAR_PROTECT, s->vmar | (uint64_t)(CROI_VM_PERM_READ | CROI_VM_PERM_WRITE) << 32,
+                 vdso_base, PAGE, 0, 0) == ERR_ACCESS_DENIED &&
+                 sys(CROI_SYS_VMAR_PROTECT, s->vmar | (uint64_t)(CROI_VM_PERM_READ | CROI_VM_PERM_EXECUTE) << 32,
+                     vdso_base, PAGE, 0, 0) == 0);
+  CHECK(688, sys(CROI_SYS_VMO_CREATE_PHYSICAL, s->resource, PAGE, 0ull - PAGE, (uint64_t)&physical, 0) != 0);
+  sys(CROI_SYS_VMAR_UNMAP, s->vmar, at, PAGE, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, readOnly, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, vmo, 0, 0, 0, 0);
+  return 0;
+}
+
 static uint64_t pac_sign(uint64_t value, uint64_t modifier) {
 #if defined(__aarch64__)
   register uint64_t x17 __asm__("x17") = value;
@@ -5015,7 +5039,7 @@ static int64_t cprng_checks(void) {
   return 0;
 }
 
-static int64_t extensions(const startup_t *s) {
+static int64_t extensions(const startup_t *s, uint64_t vdso_base) {
   // A thread's trace id: task << 12 | index, distinct per thread.
   // They spin until told to stop (5 s at most): on a slow emulator a fixed
   // 20 ms ran out before the deadline profile below could overrun.
@@ -5111,6 +5135,8 @@ static int64_t extensions(const startup_t *s) {
   if (unbound != 0) return unbound;
   int64_t zeroed = zero_intervals(s);
   if (zeroed != 0) return zeroed;
+  int64_t ceilings = mapping_ceilings(s, vdso_base);
+  if (ceilings != 0) return ceilings;
   int64_t signedPointers = pointer_auth(s);
   if (signedPointers != 0) return signedPointers;
   int64_t guardedCode = guarded_pages(s);
@@ -5238,7 +5264,7 @@ __attribute__((section(".text.start"))) [[noreturn]] void _start(uint64_t mode, 
             : mode == 14 ? counters((const startup_t *)handle)
             : mode == 15 ? timelines((const startup_t *)handle)
             : mode == 16 ? deadline_wakeups((const startup_t *)handle)
-            : mode == 17 ? extensions((const startup_t *)handle)
+            : mode == 17 ? extensions((const startup_t *)handle, vdso_base)
 #if defined(__x86_64__) || defined(__aarch64__) || defined(__riscv)
             : mode == 18 ? iommu_test((const startup_t *)handle)
 #endif

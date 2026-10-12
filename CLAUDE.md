@@ -204,6 +204,12 @@ User address spaces and VMOs (K4a, Kernel/Vm/):
   faulting context's interrupt state, so a CPU waiting for the aspace
   lock still answers the holder's TLB shootdown (it deadlocked masked).
   `vm` trace category: fault (resolved or refused) and commit records.
+- Mapping ceilings (review round 1): each `Mapping` keeps `ceiling`, the
+  rights it may ever have (vmar_map: the VMO handle's read/write/execute;
+  kernel mappings: what they were mapped with; a `sharedReadOnly` VMO:
+  read), and `protect` refuses more with ACCESS_DENIED (`VmError.
+  accessDenied`). Before, a root-VMAR handle could protect the shared
+  vDSO writable. Mode 17's checks 686-687 (686 failed without it).
 - Regions (K4b): each aspace keeps `regions` (sub-regions, sorted, with a
   parent; region 0 is the root) and non-overlapping `mappings`. A
   reservation's range is held for views: `mapView`/`unmapView` replace
@@ -441,7 +447,9 @@ in User/IpcSyscalls.swift):
   `croi_flow_id(channel id, txid)` (ipc.h, splitmix64 finalizer), which
   user space computes from `object_get_info(HANDLE_BASIC)` koids and the
   txid, so a call and its reply share one flow.
-- Test-only syscall 6 (`TestHooks.profile`): bind to / report a deadline
+- Test-only syscall 6 (`TestHooks.profile`; NOT_SUPPORTED unless
+  `croi.test=1` or `croi.debug_syscalls=on`, since review round 1: its
+  hooks reboot, evict and sign with the kernel's key): bind to / report a deadline
   context a self-test provides, until profiles are objects.
 
 Futexes and timers (K7c, Kernel/Object/Futex.swift, TimerObject.swift,
@@ -621,6 +629,9 @@ User/IoPorts.swift, include/resource.h, include/vmo.h; Todhchai M3):
   parent | options << 32) follows Zircon's checks in order (WRITE on the
   parent; a child inside its parent; EXCLUSIVE only from a ranged root
   and no children of it; overlaps with an exclusive one NOT_FOUND).
+  A ranged root refuses a range whose end (rounded to pages) wraps past
+  2^64 (OUT_OF_RANGE, review round 1: the wrapped end passed every
+  overlap test, so the MMIO root mapped all of RAM; check 688).
   `Resources.validate` is Zircon's validate_ranged_resource (non-strict:
   an MMIO resource grants the pages it touches); `check(system:)` uses
   it. `RootFilter` is the root filter: RAM (`PhysicalMap`; firmware

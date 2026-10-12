@@ -164,6 +164,11 @@ enum Resources {
         let resource = unsafe pointer(object)
         let page = KernelLayout.pageSize
         if unsafe resource.pointee.isRangedRoot(kind) {
+            // A range that wraps (or would on rounding to pages) would pass
+            // every overlap test below with its wrapped end (review fix).
+            guard !base.addingReportingOverflow(size).overflow, base + size <= UInt64.max - (page - 1) else {
+                throw .outOfRange
+            }
             var checkBase = base, checkSize = size
             if kind == UInt32(CROI_RSRC_KIND_MMIO) {
                 checkBase = base & ~(page - 1)
@@ -246,7 +251,8 @@ enum RootFilter {
     }
 
     static func allows(_ kind: UInt32, _ base: UInt64, _ size: UInt64) -> Bool {
-        let end = base &+ size
+        guard !base.addingReportingOverflow(size).overflow else { return false }
+        let end = base + size
         switch kind {
         case UInt32(CROI_RSRC_KIND_MMIO):
             if PhysicalMap.overlapsDenied(base, size) { return false }

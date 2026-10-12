@@ -159,11 +159,18 @@ extension Syscalls {
         }
         let vmo = try VmoObject.forMapping(table, UInt32(truncatingIfNeeded: a[2]), rights)
         defer { vmo.release() }
+        // What a later vmar_protect may grant: the VMO handle's rights.
+        let vmoRights = try table.rights(of: UInt32(truncatingIfNeeded: a[2]))
+        var ceiling = VmRights()
+        if vmoRights.contains(.read) { ceiling.insert(.read) }
+        if vmoRights.contains(.write) { ceiling.insert(.write) }
+        if vmoRights.contains(.execute) { ceiling.insert(.execute) }
         if options & UInt32(CROI_VM_REQUIRE_NON_RESIZABLE) != 0, vmo.pointee.resizable { throw .notSupported }  // K13h
         let mapped = try vm { () throws(VmError) -> UInt64 in
             try Vmo.withBorrowed(vmo) { (borrowed: borrowing Vmo) throws(VmError) -> UInt64 in
                 try UserAspace.withView(v.aspace) { (aspace: borrowing UserAspace) throws(VmError) -> UInt64 in
-                    try aspace.map(borrowed, offset: a[3], size: a[4], at: at, in: v.region, rights: rights)
+                    try aspace.map(borrowed, offset: a[3], size: a[4], at: at, in: v.region, rights: rights,
+                                   ceiling: ceiling)
                 }
             }
         }

@@ -58,6 +58,10 @@ struct Mapping {
     /// Byte offset into `vmo` of `base`.
     var offset: UInt64
     var rights: VmRights
+    /// The most `rights` may ever be (review fix): what the VMO handle
+    /// allowed when it was mapped, read only for a shared read-only VMO.
+    /// `protect` refuses more (Zircon keeps the same ceiling per mapping).
+    let ceiling: VmRights
     let region: UInt32
     /// Its region's JIT protection key (0: none).
     var key: UInt8 = 0
@@ -66,18 +70,20 @@ struct Mapping {
     let holder: VmoPointer
 
     /// `vmo` at `offset` as mapped; an alias resolves to its root.
-    init(base: UInt64, size: UInt64, vmo: VmoPointer, offset: UInt64, rights: VmRights, region: UInt32,
-         key: UInt8 = 0) {
+    init(base: UInt64, size: UInt64, vmo: VmoPointer, offset: UInt64, rights: VmRights, ceiling: VmRights,
+         region: UInt32, key: UInt8 = 0) {
         let (pages, shift) = vmo.target
-        self.init(base: base, size: size, vmo: pages, offset: offset + shift, rights: rights, region: region,
-                  key: key, holder: vmo)
+        let most = vmo.pointee.sharedReadOnly ? ceiling.intersection(.read) : ceiling
+        self.init(base: base, size: size, vmo: pages, offset: offset + shift, rights: rights, ceiling: most,
+                  region: region, key: key, holder: vmo)
     }
 
     /// A piece of an existing mapping (already resolved).
-    init(base: UInt64, size: UInt64, vmo: VmoPointer, offset: UInt64, rights: VmRights, region: UInt32,
-         key: UInt8, holder: VmoPointer) {
+    init(base: UInt64, size: UInt64, vmo: VmoPointer, offset: UInt64, rights: VmRights, ceiling: VmRights,
+         region: UInt32, key: UInt8, holder: VmoPointer) {
         self.base = base
         self.size = size
+        self.ceiling = ceiling
         self.vmo = vmo
         self.offset = offset
         self.rights = rights
@@ -298,8 +304,9 @@ struct UserAspace: ~Copyable {
     /// see `mapView`), at `at` or first fit with a guard page each side.
     /// Physical and contiguous VMOs are mapped at once (large pages where
     /// aligned); anonymous ones page in on first touch. Returns the base.
+    /// `ceiling` bounds later `protect`s (nil: `rights`, without guarded).
     func map(_ vmo: borrowing Vmo, offset: UInt64 = 0, size: UInt64, at fixed: UInt64? = nil,
-             in id: UInt32 = root, rights: VmRights) throws(VmError) -> UInt64 {
+             in id: UInt32 = root, rights: VmRights, ceiling: VmRights? = nil) throws(VmError) -> UInt64 {
         try checkMapping(vmo, offset, size, rights)
         let pointer = vmo.record
         return try record.pointee.lock.withLock { () throws(VmError) -> UInt64 in
@@ -313,7 +320,8 @@ struct UserAspace: ~Copyable {
             } else {
                 base = try findGap(size, KernelLayout.pageSize, in: container)
             }
-            try insert(Mapping(base: base, size: size, vmo: pointer, offset: offset, rights: rights, region: id))
+            try insert(Mapping(base: base, size: size, vmo: pointer, offset: offset, rights: rights,
+                               ceiling: ceiling ?? rights.subtracting(.guarded), region: id))
             return base
         }
     }
@@ -332,8 +340,8 @@ struct UserAspace: ~Copyable {
             guard reservation.reservation, base % KernelLayout.pageSize == 0, reservation.contains(base, size),
                   Jit.allows(rights, key: reservation.jitKey) else { throw .invalidArgument }
             try removeMappings(base, size, collecting: &released)
-            try insert(Mapping(base: base, size: size, vmo: pointer, offset: offset, rights: rights, region: id,
-                               key: reservation.jitKey))
+            try insert(Mapping(base: base, size: size, vmo: pointer, offset: offset, rights: rights,
+                               ceiling: rights.subtracting(.guarded), region: id, key: reservation.jitKey))
         }
         release(released)
     }
@@ -430,6 +438,11 @@ struct UserAspace: ~Copyable {
             for i in 0..<record.pointee.mappings.count where record.pointee.mappings[i].overlaps(base, size) {
                 key = record.pointee.mappings[i].key
                 guard Jit.allows(rights, key: key) else { throw .invalidArgument }  // W^X
+                // Never past what the mapping was allowed (the vDSO, shared
+                // pages, a VMO mapped through a read-only handle).
+                guard record.pointee.mappings[i].ceiling.contains(rights.subtracting(.guarded)) else {
+                    throw .accessDenied
+                }
             }
             try split(at: base)
             try split(at: base + size)
@@ -565,7 +578,8 @@ struct UserAspace: ~Copyable {
             m.vmo.addMapper(record.address)
             record.pointee.mappings.insert(Mapping(base: at, size: m.base + m.size - at, vmo: m.vmo,
                                                    offset: m.offset + (at - m.base), rights: m.rights,
-                                                   region: m.region, key: m.key, holder: m.holder), at: i + 1)
+                                                   ceiling: m.ceiling, region: m.region, key: m.key,
+                                                   holder: m.holder), at: i + 1)
             return
         }
     }
@@ -636,7 +650,7 @@ extension UserAspacePointer {
                     let old = pointee.mappings[i]
                     guard old.vmo == mapping.vmo, old.size == mapping.size else { break }
                     let fresh = Mapping(base: old.base, size: old.size, vmo: child, offset: 0, rights: old.rights,
-                                        region: old.region, key: old.key)
+                                        ceiling: old.ceiling, region: old.region, key: old.key)
                     child.addMapper(address)
                     pointee.mappings[i] = fresh
                     pointee.mapGeneration.add(1, ordering: .releasing)
