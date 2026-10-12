@@ -842,6 +842,16 @@ THREAD, VMO, maps, handle table) and the NAME property.
   ALWAYS_NEED) and their eviction when a lender wants its page. On by
   default (`croi.ppb.loan=off`). Requirement 3's pool no longer holds
   memory idle.
+- **K15a: memory accounts in user space (Todhchai ext 6, F-109).**
+  Agreed with Todhchai 2026-10-12: an account object per process budget
+  (warning and critical levels, a pressure port, a limit that never
+  shrinks below what is charged), inherited from the creating process
+  unless process_set_account replaces it before start, CROI_VMO_CHARGE_TO
+  for allocations on a client's behalf (the GPU driver host's blobs, the
+  buffer-collection allocator), physical slices charged as device-local
+  memory, the file service charged for its page cache (pager VMOs are
+  v1-uncharged). Later: hierarchy, Vulkan memory priority mapped to
+  purgeable memory and an eviction order.
 - **Review round 1 (2026-10-12): adversarial review, seven readers by
   area.** Part 1: mapping ceilings for vmar_protect (the vDSO and
   read-only handles' mappings could be made writable), syscall 6 gated to

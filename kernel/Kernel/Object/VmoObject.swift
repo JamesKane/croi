@@ -45,14 +45,16 @@ struct VmoObject: ~Copyable {
     /// first): the VMO is `Vmos.maxSize` and `size` is its content size.
     /// Zircon's order (parse_create_syscall_flags): RESIZABLE with
     /// UNBOUNDED, the size, then unknown options.
-    static func create(size: UInt64, options: UInt64 = 0) throws(Status) -> (ObjectPointer, Rights) {
+    /// K15a: `account` (not consumed) is charged as its pages commit.
+    static func create(size: UInt64, options: UInt64 = 0, account: MemoryAccountPointer? = nil) throws(Status)
+        -> (ObjectPointer, Rights) {
         let resizable = UInt64(CROI_VMO_CREATE_RESIZABLE), unbounded = UInt64(CROI_VMO_CREATE_UNBOUNDED)
         let discardable: UInt64 = 1 << 2
         let vmoSize = try Vmos.createSize(size, unbounded: options & unbounded != 0, resizable: options & resizable != 0)
         guard options & ~(resizable | unbounded | discardable) == 0 else { throw .invalidArgs }
         let vmo: Vmo
         do throws(VmError) {
-            vmo = try Vmo(anonymous: vmoSize)
+            vmo = try Vmo(anonymous: vmoSize, account: account)
         } catch {
             throw error == .invalidArgument ? .invalidArgs : .noMemory
         }
@@ -97,8 +99,13 @@ struct VmoObject: ~Copyable {
     /// The syscall.
     static func createChildCall(_ a: InlineArray<6, UInt64>, _ table: borrowing HandleTable) throws(Status) {
         try Syscalls.check(a[4], MemoryLayout<UInt32>.size)
+        // K15a: CROI_VMO_CHARGE_TO's account in the sixth argument.
+        let chargeTo = UInt32(truncatingIfNeeded: a[1]) & UInt32(CROI_VMO_CHARGE_TO) != 0
+        let explicit = chargeTo ? try Accounts.account(table, UInt32(truncatingIfNeeded: a[5]), rights: .charge) : nil
+        defer { explicit?.release() }
         let (child, rights) = try createChild(table, UInt32(truncatingIfNeeded: a[0]),
-                                              options: UInt32(truncatingIfNeeded: a[1]), offset: a[2], size: a[3])
+                                              options: UInt32(truncatingIfNeeded: a[1]) & ~UInt32(CROI_VMO_CHARGE_TO),
+                                              offset: a[2], size: a[3], chargeTo: explicit)
         try Syscalls.put(try table.add(child, rights: rights), a[4])
     }
 
@@ -114,8 +121,11 @@ struct VmoObject: ~Copyable {
     /// Rights: the parent handle's less RESIZE, plus RESIZE for RESIZABLE,
     /// plus GET/SET_PROPERTY; NO_WRITE removes WRITE, else a snapshot gains
     /// WRITE and loses EXECUTE (how a loader keeps code executable).
+    /// K15a: snapshots charge `chargeTo` or else the caller's process's
+    /// account; a physical SLICE charges `chargeTo` in full (device-local);
+    /// a REFERENCE, owning no pages, takes none.
     static func createChild(_ table: borrowing HandleTable, _ handle: UInt32, options: UInt32, offset: UInt64,
-                            size: UInt64) throws(Status) -> (ObjectPointer, Rights) {
+                            size: UInt64, chargeTo: MemoryAccountPointer? = nil) throws(Status) -> (ObjectPointer, Rights) {
         let noWrite = UInt32(CROI_VMO_CHILD_NO_WRITE), resizableChild = UInt32(CROI_VMO_CHILD_RESIZABLE)
         let slice = UInt32(CROI_VMO_CHILD_SLICE), reference = UInt32(CROI_VMO_CHILD_REFERENCE)
         let full = UInt32(CROI_VMO_CHILD_SNAPSHOT), onWrite = UInt32(CROI_VMO_CHILD_SNAPSHOT_AT_LEAST_ON_WRITE)
@@ -136,12 +146,12 @@ struct VmoObject: ~Copyable {
         do throws(VmError) {
             if kind & slice != 0 {
                 guard kind == slice else { throw .invalidArgument }
-                child = try Vmo(sliceOf: parent, offset: offset, size: rounded)
+                child = try Vmo(sliceOf: parent, offset: offset, size: rounded, account: chargeTo)
             } else if kind & reference != 0 {
                 kind &= ~reference
                 let resizable = kind & resizableChild != 0
                 kind &= ~resizableChild
-                guard kind == 0 else { throw .invalidArgument }
+                guard kind == 0, chargeTo == nil else { throw .invalidArgument }
                 if case .physical = parent.pointee.kind { throw .notSupported }  // Zircon's VmObject default
                 guard offset == 0, size == 0 else { throw .invalidArgument }
                 child = try Vmo(referenceOf: parent, resizable: resizable)
@@ -162,7 +172,8 @@ struct VmoObject: ~Copyable {
                 kind &= ~resizableChild
                 guard kind == 0 else { throw .invalidArgument }
                 snapshot = true
-                child = try Vmo.snapshot(of: parent, type, offset: offset, size: rounded)
+                child = try Vmo.snapshot(of: parent, type, offset: offset, size: rounded,
+                                         account: chargeTo ?? Accounts.current())
                 if options & resizableChild != 0 { child.record.pointee.resizable = true }
             }
         } catch {

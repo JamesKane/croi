@@ -83,6 +83,7 @@ add_library(kernel-swift OBJECT
   Kernel/Iommu/RiscvIommu.swift
   Kernel/Object/KernelMemory.swift
   Kernel/Object/Counter.swift
+  Kernel/Object/AccountObject.swift
   Kernel/Object/Timeline.swift
   Kernel/Object/ProcessSelfTest.swift
   Kernel/Object/VmoObject.swift

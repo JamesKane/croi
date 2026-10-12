@@ -262,14 +262,15 @@ enum Dma {
 
     /// vmo_create_contiguous(bti, ...): inside the BTI's window and width,
     /// with its memory type.
-    static func createContiguous(_ object: ObjectPointer, size: UInt64, alignLog2: Int) throws(Status) -> Vmo {
+    static func createContiguous(_ object: ObjectPointer, size: UInt64, alignLog2: Int,
+                                 account: MemoryAccountPointer? = nil) throws(Status) -> Vmo {
         let p = properties(object)
         // Behind an IOMMU the window constrains I/O addresses, not where
         // the pages are.
         let (base, end) = BtiPointer(object: object).pointee.domain == 0 ? window(p) : (0, .max)
         let cache: CachePolicy = p.memory_type == UInt32(CROI_BTI_MEMORY_NONCOHERENT) ? .uncached : .cached
         do throws(VmError) {
-            return try Vmo(contiguous: size, alignLog2: alignLog2, cache: cache, floor: base, limit: end)
+            return try Vmo(contiguous: size, alignLog2: alignLog2, cache: cache, floor: base, limit: end, account: account)
         } catch {
             throw error == .outOfMemory ? .noMemory : .invalidArgs
         }

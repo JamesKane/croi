@@ -116,15 +116,21 @@ enum PortSelfTest {
             // Ext 6: memory pressure reports to the port.
             let account = MemoryAccount(limit: 8 * KernelLayout.pageSize, pressurePercent: 50)
             try account.bindPressurePort(try table.get(port), key: 0x0E6)
+            // Read while the VMO lives: its release is a level change too
+            // (K15a), which would update the unread packet to normal.
+            let vmo: Vmo
             do throws(VmError) {
-                let vmo = try Vmo(anonymous: 8 * KernelLayout.pageSize, account: account.record)
+                vmo = try Vmo(anonymous: 8 * KernelLayout.pageSize, account: account.record)
                 try vmo.commit(offset: 0, size: 6 * KernelLayout.pageSize)
             } catch {
                 panic("port self-test: out of memory")
             }
             packet = try Ports.wait(table, port, deadline: Clock.now() + ms)
+            _ = consume vmo
             guard packet.type == PortPacket.memoryPressure, packet.key == 0x0E6,
-                  packet.payload[1] == 4 * KernelLayout.pageSize else { panic("port self-test: pressure packet") }
+                  packet.payload[1] == 4 * KernelLayout.pageSize, packet.payload[3] == 1 else {
+                panic("port self-test: pressure packet")
+            }
         } catch {
             panic("port self-test: unexpected status")
         }

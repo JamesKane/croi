@@ -76,6 +76,9 @@ struct ProcessObject: ~Copyable {
     var deadQueue: UInt64 = 0
     /// Retained.
     let job: ObjectPointer
+    /// K15a: the memory account its VMOs charge (a reference), or nil.
+    /// Its creator's at creation; process_set_account before it starts.
+    var account: MemoryAccountPointer? = nil
     var state = State.initial
     var aspace: UserAspace?
     var handles: HandleTable?
@@ -323,6 +326,11 @@ enum Processes {
             throw .noMemory
         }
         live.add(1, ordering: .relaxed)
+        // K15a: its creator's account, unless process_set_account replaces it.
+        if let inherited = Accounts.current() {
+            inherited.retain()
+            ProcessPointer(object: process).pointee.account = inherited
+        }
         let added = job.header.lock.withLock { () -> Bool in
             guard !JobPointer(object: job).pointee.dead else { return false }
             JobPointer(object: job).pointee.children.append(process.address)
@@ -357,6 +365,7 @@ enum Processes {
         }
         removeChild(object, from: process.pointee.job)
         process.pointee.job.release()
+        process.pointee.account?.release()
         process.pointee.aspaceRecord.release()
         Objects.free(object, as: ProcessObject.self)
         live.subtract(1, ordering: .relaxed)

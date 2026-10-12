@@ -20,6 +20,7 @@ module CroiAbi {
   header "timeline.h"
   header "power.h"
   header "clock.h"
+  header "account.h"
   export *
 }
 

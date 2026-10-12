@@ -263,6 +263,13 @@ extension Syscalls {
                 try put(croi_info_thread_trace_t(trace_id: Processes.traceId(thread.object), reserved: 0), a[2])
                 return
             }
+            if a[1] == UInt64(CROI_INFO_MEMORY_ACCOUNT) {  // K15a
+                guard a[3] >= UInt64(MemoryLayout<croi_info_memory_account_t>.size) else { throw .bufferTooSmall }
+                try check(a[2], MemoryLayout<croi_info_memory_account_t>.size)
+                let account = try table.get(handle, type: .memoryAccount, rights: .inspect)
+                try put(Accounts.info(account.object), a[2])
+                return
+            }
             if a[1] == UInt64(CROI_INFO_DEBUGLOG) {  // K10d
                 guard a[3] >= UInt64(MemoryLayout<croi_info_debuglog_t>.size) else { throw .bufferTooSmall }
                 try check(a[2], MemoryLayout<croi_info_debuglog_t>.size)

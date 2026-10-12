@@ -40,11 +40,16 @@ extension Syscalls {
             try check(a[3], MemoryLayout<UInt32>.size)
             let page = KernelLayout.pageSize
             guard a[1] > 0, a[1] % page == 0 else { throw .invalidArgs }
-            let alignLog2 = a[2] == 0 ? 12 : a[2]
+            // K15a: an account handle (CHARGE) in bits 63:32 charges it the
+            // whole size; else the caller's process's account.
+            let low = a[2] & 0xFFFF_FFFF, chargeTo = UInt32(truncatingIfNeeded: a[2] >> 32)
+            let alignLog2 = low == 0 ? 12 : low
             guard alignLog2 >= 12, alignLog2 < 64 else { throw .invalidArgs }
             try Policy.check(UInt32(CROI_POL_NEW_VMO))
             let bti = try table.get(handle, type: .bti, rights: .map)
-            let vmo = try Dma.createContiguous(bti.object, size: a[1], alignLog2: Int(alignLog2))
+            let account = try Accounts.forNewVmo(table, chargeTo: chargeTo != 0 ? chargeTo : nil)
+            defer { account?.release() }
+            let vmo = try Dma.createContiguous(bti.object, size: a[1], alignLog2: Int(alignLog2), account: account)
             try addAndPut(try VmoObject.wrap(vmo.record), rights: VmoObject.defaultRights, a[3], table)
         case 156:  // bti_set_properties(bti, const croi_bti_properties_t *)
             let bti = try table.get(handle, type: .bti, rights: .setProperty)

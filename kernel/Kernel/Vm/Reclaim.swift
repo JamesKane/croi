@@ -240,6 +240,8 @@ enum Reclaim {
             pmm.free(taken[i])
             i += 2
         }
+        // Pager VMOs carry no account in v1 (K15a); kept balanced if one does.
+        vmo.pointee.account?.uncharge(UInt64(taken.count / 2) * page)
         return UInt64(taken.count / 2)
     }
 

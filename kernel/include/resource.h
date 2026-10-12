@@ -34,7 +34,8 @@ enum : uint32_t {
   CROI_RSRC_SYSTEM_TRACING_BASE = 14,
   CROI_RSRC_SYSTEM_SAMPLING_BASE = 15,
   CROI_RSRC_SYSTEM_DISPLAY_BASE = 16,  // croi's: display timelines (K10b)
-  CROI_RSRC_SYSTEM_COUNT = 17,
+  CROI_RSRC_SYSTEM_MEMORY_BASE = 17,   // croi's: memory accounts (K15a, account.h)
+  CROI_RSRC_SYSTEM_COUNT = 18,
 
   // object_get_info topic.
   CROI_INFO_RESOURCE = 18,

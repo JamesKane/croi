@@ -83,6 +83,8 @@ struct Rights: BitFlags {
     static var resize: Rights { Rights(rawValue: 1 << 22) }
     static var attachVmo: Rights { Rights(rawValue: 1 << 23) }
     static var manageVmo: Rights { Rights(rawValue: 1 << 24) }
+    /// croi's (K15a): VMOs may be charged to this memory account.
+    static var charge: Rights { Rights(rawValue: 1 << 25) }
     /// duplicate/replace: keep the source handle's rights.
     static var sameRights: Rights { Rights(rawValue: 1 << 31) }
 
@@ -137,4 +139,5 @@ enum ObjectType: UInt32 {
     case msi = 32
     case counter = 34
     case timeline = 48  // croi's (K10b)
+    case memoryAccount = 49  // croi's (K15a)
 }

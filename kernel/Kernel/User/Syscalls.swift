@@ -316,7 +316,13 @@ enum Syscalls {
         case 40:  // vmo_create
             try Policy.check(UInt32(CROI_POL_NEW_VMO))
             try check(a[2], MemoryLayout<UInt32>.size)
-            let (vmo, rights) = try VmoObject.create(size: a[0], options: a[1])
+            // K15a: charged to the caller's process's account, or with
+            // CROI_VMO_CHARGE_TO to the account handle in the fourth argument.
+            let chargeTo = a[1] & UInt64(CROI_VMO_CHARGE_TO) != 0
+            let account = try Accounts.forNewVmo(table, chargeTo: chargeTo ? UInt32(truncatingIfNeeded: a[3]) : nil)
+            defer { account?.release() }
+            let (vmo, rights) = try VmoObject.create(size: a[0], options: a[1] & ~UInt64(CROI_VMO_CHARGE_TO),
+                                                     account: account)
             try put(try table.add(vmo, rights: rights), a[2])
         case 48:  // vmo_create_child(vmo, options, offset, size, uint32_t *out), K11a
             try VmoObject.createChildCall(a, table)
@@ -416,6 +422,8 @@ enum Syscalls {
             try VmoObject.setSize(table, handle, a[1])
         case 230...232:
             try debugCall(number, a, table)
+        case 240...243:
+            try accountCall(number, a, table)  // K15a
         case 216...219:
             try clockCall(number, a, table)
         case 202...208:

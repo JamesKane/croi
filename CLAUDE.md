@@ -1073,6 +1073,35 @@ CROI_IOMMU_TYPE_RISCV = 0x10001, descriptor { register_base }):
   (intremap=off: no MSI_FLAT) covers base contexts; test
   `boot-riscv-iommu-base`.
 
+Memory accounts, K15a (Kernel/Object/AccountObject.swift,
+Vm/MemoryAccount.swift, include/account.h, syscalls 240-243; Todhchai ext 6,
+its F-109; agreed with Todhchai 2026-10-12; croi's, Zircon has none):
+- An account object (type 49; BASIC, WRITE and croi's CHARGE right, 1 <<
+  25) over a `MemoryAccountRecord`: a limit, warning and critical levels
+  (percent of it; entered at the threshold, left below 80% of it), one
+  coalescing pressure packet (type 0x81: payload[0] limit, [1] charged,
+  [2] changes, [3] level) on every level change. account_create needs the
+  MEMORY system resource (base 17) or root; account_set_limit never goes
+  below what is charged (BAD_STATE); CROI_INFO_MEMORY_ACCOUNT (0x10003).
+- A process charges its `ProcessObject.account`: its creator's at
+  process_create (`Accounts.current()`), replaced by process_set_account
+  (process WRITE, account CHARGE) only before it starts. Charged: the
+  VMOs it creates (vmo_create, snapshot children, vmo_create_contiguous);
+  CROI_VMO_CHARGE_TO (1 << 30) names another account (CHARGE): vmo_create's
+  fourth argument, vmo_create_child's sixth (a physical SLICE then charges
+  its whole size, never evicted: device-local), vmo_create_contiguous's
+  alignment argument bits 63:32. A VMO keeps its account wherever its
+  handles go. Not charged: physical VMOs, aliases, pager VMOs (v1),
+  kernel memory and page tables. Launchers pass a process its own account
+  as CROI_PA_MEMORY_ACCOUNT (0x41).
+- Charge follows `committedPages` everywhere pages enter or leave an
+  anonymous VMO: commit, decommit, `take`, resize, snapshot copies (charged
+  per page as they copy in), discard and eviction, release. Over the
+  limit a commit fails: NO_MEMORY from syscalls, a fatal page fault from a
+  fault.
+- Mode 17's `memory_accounts` (checks 713-721; child submode 12; 717
+  and 721 fail without the before-start rule and snapshot charging).
+
 Counters, K10a (Kernel/Object/Counter.swift, User/CounterSyscalls.swift,
 include/counter.h, syscalls 160-165):
 - Zircon's counter (type 34; create, add, read, write; POSITIVE /

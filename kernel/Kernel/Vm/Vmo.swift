@@ -601,10 +601,12 @@ struct Vmo: ~Copyable {
     /// from `offset` (zero past its end), each page copied in at its first
     /// touch. Holds a parent reference; counted as a child of `owner` if
     /// given (K14g: the alias it was created through), else of `parent`.
-    init(childOf parent: VmoPointer, offset: UInt64, size: UInt64, owner: VmoPointer? = nil) throws(VmError) {
+    init(childOf parent: VmoPointer, offset: UInt64, size: UInt64, owner: VmoPointer? = nil,
+         account: MemoryAccountPointer? = nil) throws(VmError) {
         guard case .anonymous = parent.pointee.kind else { throw .notSupported }
         guard offset % KernelLayout.pageSize == 0 else { throw .invalidArgument }
         let made = try Self.make(.anonymous, size: size, cache: .cached)
+        if let account { Self.attach(made, account) }  // K15a: its own pages, as it copies them in
         made.pointee.readsFromPager = parent.pointee.pager != nil || parent.pointee.readsFromPager
         made.pointee.clone = true
         Self.link(made, parent: parent, at: offset, owner: owner)
@@ -632,7 +634,8 @@ struct Vmo: ~Copyable {
     /// - modified of a pager VMO's child: the child's own pages copied, the
     ///   rest read through to the pager VMO as at least on write;
     /// - modified of a pager VMO itself: at least on write.
-    static func snapshot(of holder: VmoPointer, _ type: Snapshot, offset: UInt64, size: UInt64) throws(VmError) -> Vmo {
+    static func snapshot(of holder: VmoPointer, _ type: Snapshot, offset: UInt64, size: UInt64,
+                         account: MemoryAccountPointer? = nil) throws(VmError) -> Vmo {
         switch holder.pointee.kind {
         case .physical: throw .notSupported
         case .contiguous: throw .invalidArgument
@@ -657,10 +660,11 @@ struct Vmo: ~Copyable {
         }
         let owner = holder == source ? nil : holder
         if type == .atLeastOnWrite || unidirectional {
-            return try Vmo(childOf: source, offset: start, size: size, owner: owner)
+            return try Vmo(childOf: source, offset: start, size: size, owner: owner, account: account)
         }
         let made = try make(.anonymous, size: size, cache: .cached)
         made.pointee.clone = true
+        if let account { attach(made, account) }  // charged per page copied (K15a)
         if pagerTree {
             // Modified of a pager VMO's child: its own pages now, the rest
             // through to its parent, up to where it stops reading through.
@@ -728,7 +732,14 @@ struct Vmo: ~Copyable {
                 level.pointee.pages.forEach { index, phys in
                     guard !failed, index >= first, index < last,
                           made.pointee.pages.lookup(index - first) == 0 else { return }  // a nearer level's
+                    // Charged to the new VMO's account, if it has one (K15a:
+                    // committedPages and the charge move together).
+                    if let account = made.pointee.account, !account.charge(page) {
+                        failed = true
+                        return
+                    }
                     guard let copy = pmm.allocatePage(.vmo) else {
+                        made.pointee.account?.uncharge(page)
                         failed = true
                         return
                     }
@@ -736,6 +747,7 @@ struct Vmo: ~Copyable {
                         .copyMemory(from: UnsafeRawPointer(bitPattern: UInt(KernelLayout.physmap(phys)))!, byteCount: Int(page))
                     guard made.pointee.pages.set(index - first, copy) else {
                         pmm.free(copy)
+                        made.pointee.account?.uncharge(page)
                         failed = true
                         return
                     }
@@ -761,7 +773,11 @@ struct Vmo: ~Copyable {
     /// root (resizable: NOT_SUPPORTED; uncached: BAD_STATE, Zircon's). A
     /// slice of a slice is one of the root, counted as the slice's child
     /// (Zircon's parent). Holds a reference to the root (and the slice).
-    init(sliceOf holder: VmoPointer, offset: UInt64, size: UInt64) throws(VmError) {
+    /// K15a: `account` (CROI_VMO_CHARGE_TO) charges a slice of a physical
+    /// VMO its whole size, never evicted (device-local memory: a BAR or VRAM
+    /// window handed to a client); refused for other kinds (no pages of
+    /// their own, or charged already).
+    init(sliceOf holder: VmoPointer, offset: UInt64, size: UInt64, account: MemoryAccountPointer? = nil) throws(VmError) {
         let page = KernelLayout.pageSize
         let anonymous = holder.pointee.kind == .anonymous
         guard offset % page == 0, size % page == 0, size > 0 || anonymous,
@@ -786,7 +802,21 @@ struct Vmo: ~Copyable {
             (root.pointee.cache, root.pointee.cachedFirmware, root.pointee.sharedReadOnly)
         }
         if anonymous, cache != .cached { throw .badState }
-        let made = try Self.make(kind, size: size, cache: cache)
+        if let account {
+            guard case .physical = kind else { throw .invalidArgument }
+            guard account.charge(size) else { throw .outOfMemory }
+        }
+        let made: VmoPointer
+        do throws(VmError) {
+            made = try Self.make(kind, size: size, cache: cache)
+        } catch {
+            account?.uncharge(size)
+            throw error
+        }
+        if let account {
+            Self.attach(made, account)
+            made.pointee.neverEvict = true  // released: uncharged in full
+        }
         made.pointee.slice = true
         made.pointee.cachedFirmware = firmware
         made.pointee.sharedReadOnly = readOnly

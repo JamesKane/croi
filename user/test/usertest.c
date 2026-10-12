@@ -485,6 +485,15 @@ static int64_t child(uint32_t self, uint64_t submode, uint64_t vdso) {
     return sys(CROI_SYS_PROCESS_EXIT, 0x0000000001234560ll, 0, 0, 0, 0);
 #endif
   }
+  case 12: {  // K15a: commits a 2-page VMO (charging its account), then waits to be killed
+    uint32_t vmo = 0, event = 0, observed = 0;
+    if (sys(CROI_SYS_VMO_CREATE, 2 * 4096, 0, (uint64_t)&vmo, 0, 0) != 0 ||
+        croi_syscall6(CROI_SYS_VMO_OP_RANGE, vmo, CROI_VMO_OP_COMMIT, 0, 2 * 4096, 0, 0) != 0 ||
+        sys(CROI_SYS_EVENT_CREATE, 0, (uint64_t)&event, 0, 0, 0) != 0)
+      return 90;
+    sys(CROI_SYS_OBJECT_WAIT_ONE, event, SIGNALED, ~0ull, (uint64_t)&observed, 0);
+    return 89;
+  }
   case 9: {  // in a job with reserved CPUs: exit with the CPUs it ran on
     uint64_t seen = 0;
     for (int i = 0; i < 300; i++) {
@@ -5321,6 +5330,102 @@ static int64_t review_pager(const startup_t *s) {
   return 0;
 }
 
+// K15a: memory accounts (account.h).
+static croi_info_memory_account_t account_info(uint32_t account) {
+  croi_info_memory_account_t info;
+  zero_bytes(&info, sizeof info);
+  uint64_t counts[2];
+  sys6(CROI_SYS_OBJECT_GET_INFO, account, CROI_INFO_MEMORY_ACCOUNT, (uint64_t)&info, sizeof info, (uint64_t)&counts[0],
+       (uint64_t)&counts[1]);
+  return info;
+}
+
+static int pressure_packet(uint32_t port, uint64_t level, uint64_t charged) {
+  croi_port_packet_t packet;
+  zero_bytes(&packet, sizeof packet);
+  return sys(CROI_SYS_PORT_WAIT, port, now_ns() + 1000000000ull, (uint64_t)&packet, 0, 0) == 0 &&
+         packet.type == CROI_PKT_TYPE_MEMORY_PRESSURE && packet.key == 0xACC && packet.payload[3] == level &&
+         packet.payload[1] == charged && packet.payload[0] == 8 * PAGE;
+}
+
+static int64_t memory_accounts(const startup_t *s) {
+  uint32_t account = 0, port = 0, vmo = 0;
+  // 8 pages; warning at 50% (4 pages), critical at 75% (6), left below 80%.
+  CHECK(713, sys(CROI_SYS_ACCOUNT_CREATE, s->resource, 8 * PAGE, 50 | 75ull << 32, (uint64_t)&account, 0) == 0 &&
+                 sys(CROI_SYS_ACCOUNT_CREATE, s->resource, PAGE, 101, (uint64_t)&port, 0) == ERR_INVALID_ARGS &&
+                 account_info(account).limit == 8 * PAGE && account_info(account).warning_bytes == 4 * PAGE &&
+                 account_info(account).critical_bytes == 6 * PAGE && account_info(account).charged == 0);
+  // Charged as pages commit, to the account CHARGE_TO names; NO_MEMORY past it.
+  CHECK(714, sys(CROI_SYS_PORT_CREATE, 0, (uint64_t)&port, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_ACCOUNT_BIND_PRESSURE_PORT, account, port, 0xACC, 0, 0) == 0 &&
+                 sys(CROI_SYS_VMO_CREATE, 16 * PAGE, CROI_VMO_CHARGE_TO, (uint64_t)&vmo, account, 0) == 0 &&
+                 sys6(CROI_SYS_VMO_OP_RANGE, vmo, CROI_VMO_OP_COMMIT, 0, 3 * PAGE, 0, 0) == 0 &&
+                 account_info(account).charged == 3 * PAGE && account_info(account).level == 0 &&
+                 sys6(CROI_SYS_VMO_OP_RANGE, vmo, CROI_VMO_OP_COMMIT, 0, 9 * PAGE, 0, 0) == ERR_NO_MEMORY);
+  // The levels, each change a packet: up to warning and critical, then
+  // down to normal (decommitted to 2 pages, below 80% of both).
+  sys6(CROI_SYS_VMO_OP_RANGE, vmo, CROI_VMO_OP_DECOMMIT, 0, 16 * PAGE, 0, 0);
+  // The failed commit crossed both levels on its way to the limit: drain
+  // that packet first.
+  croi_port_packet_t stale;
+  while (sys(CROI_SYS_PORT_WAIT, port, 0, (uint64_t)&stale, 0, 0) == 0) {}
+  CHECK(715, sys6(CROI_SYS_VMO_OP_RANGE, vmo, CROI_VMO_OP_COMMIT, 0, 4 * PAGE, 0, 0) == 0 &&
+                 pressure_packet(port, CROI_MEMORY_LEVEL_WARNING, 4 * PAGE));
+  CHECK(719, sys6(CROI_SYS_VMO_OP_RANGE, vmo, CROI_VMO_OP_COMMIT, 0, 6 * PAGE, 0, 0) == 0 &&
+                 pressure_packet(port, CROI_MEMORY_LEVEL_CRITICAL, 6 * PAGE));
+  // Two entries into pressure: the failed commit's, and this one.
+  CHECK(720, sys6(CROI_SYS_VMO_OP_RANGE, vmo, CROI_VMO_OP_DECOMMIT, 2 * PAGE, 4 * PAGE, 0, 0) == 0 &&
+                 pressure_packet(port, CROI_MEMORY_LEVEL_NORMAL, 2 * PAGE) &&
+                 account_info(account).pressure_events == 2);
+  // The limit never drops below what is charged.
+  CHECK(716, sys(CROI_SYS_ACCOUNT_SET_LIMIT, account, PAGE, 0, 0, 0) == ERR_BAD_STATE &&
+                 sys(CROI_SYS_ACCOUNT_SET_LIMIT, account, 8 * PAGE, 0, 0, 0) == 0);
+  sys(CROI_SYS_HANDLE_CLOSE, vmo, 0, 0, 0, 0);
+  CHECK(716, account_info(account).charged == 0);
+  // A snapshot charges the pages it copies in, and gives them back.
+  uint32_t source = 0, copy = 0;
+  CHECK(721, sys(CROI_SYS_VMO_CREATE, 2 * PAGE, 0, (uint64_t)&source, 0, 0) == 0 &&
+                 sys6(CROI_SYS_VMO_OP_RANGE, source, CROI_VMO_OP_COMMIT, 0, 2 * PAGE, 0, 0) == 0 &&
+                 sys6(CROI_SYS_VMO_CREATE_CHILD, source, CROI_VMO_CHILD_SNAPSHOT | CROI_VMO_CHARGE_TO, 0, 2 * PAGE,
+                      (uint64_t)&copy, account) == 0 &&
+                 account_info(account).charged == 2 * PAGE &&
+                 sys(CROI_SYS_HANDLE_CLOSE, copy, 0, 0, 0, 0) == 0 && account_info(account).charged == 0);
+  sys(CROI_SYS_HANDLE_CLOSE, source, 0, 0, 0, 0);
+  // A process charges the account it was given (before it starts).
+  uint32_t thread = 0, child = make_child(s, s->job, &thread);
+  CHECK(717, sys(CROI_SYS_PROCESS_SET_ACCOUNT, child, account, 0, 0, 0) == 0);
+  start_child(child, thread, 12);
+  uint64_t until = now_ns() + 3000000000ull;
+  while (account_info(account).charged != 2 * PAGE && now_ns() < until) sleep_ns(1000000);
+  CHECK(717, account_info(account).charged == 2 * PAGE &&
+                 sys(CROI_SYS_PROCESS_SET_ACCOUNT, child, account, 0, 0, 0) == ERR_BAD_STATE &&
+                 sys(CROI_SYS_TASK_KILL, child, 0, 0, 0, 0) == 0 &&
+                 (wait_terminated(child) & CROI_SIGNAL_TASK_TERMINATED));
+  sys(CROI_SYS_HANDLE_CLOSE, child, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, thread, 0, 0, 0, 0);
+  until = now_ns() + 3000000000ull;
+  while (account_info(account).charged != 0 && now_ns() < until) sleep_ns(1000000);
+  CHECK(717, account_info(account).charged == 0);
+  // Device-local: a physical VMO's slice charged in full, until it goes; a
+  // reference takes no account.
+  if (s->ecam) {
+    uint32_t physical = 0, slice = 0, anon = 0, reference = 0;
+    CHECK(718, sys(CROI_SYS_VMO_CREATE_PHYSICAL, s->resource, s->ecam, 4 * PAGE, (uint64_t)&physical, 0) == 0 &&
+                   sys6(CROI_SYS_VMO_CREATE_CHILD, physical, CROI_VMO_CHILD_SLICE | CROI_VMO_CHARGE_TO, 0, 2 * PAGE,
+                        (uint64_t)&slice, account) == 0 &&
+                   account_info(account).charged == 2 * PAGE &&
+                   sys(CROI_SYS_HANDLE_CLOSE, slice, 0, 0, 0, 0) == 0 && account_info(account).charged == 0 &&
+                   sys(CROI_SYS_VMO_CREATE, PAGE, 0, (uint64_t)&anon, 0, 0) == 0 &&
+                   sys6(CROI_SYS_VMO_CREATE_CHILD, anon, CROI_VMO_CHILD_REFERENCE | CROI_VMO_CHARGE_TO, 0, 0,
+                        (uint64_t)&reference, account) == ERR_INVALID_ARGS);
+    sys(CROI_SYS_HANDLE_CLOSE, physical, 0, 0, 0, 0);
+    sys(CROI_SYS_HANDLE_CLOSE, anon, 0, 0, 0, 0);
+  }
+  sys(CROI_SYS_HANDLE_CLOSE, port, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, account, 0, 0, 0, 0);
+  return 0;
+}
+
 static uint64_t pac_sign(uint64_t value, uint64_t modifier) {
 #if defined(__aarch64__)
   register uint64_t x17 __asm__("x17") = value;
@@ -5541,6 +5646,8 @@ static int64_t extensions(const startup_t *s, uint64_t vdso_base) {
   if (queues != 0) return queues;
   int64_t pagerReview = review_pager(s);
   if (pagerReview != 0) return pagerReview;
+  int64_t accounts = memory_accounts(s);
+  if (accounts != 0) return accounts;
   int64_t signedPointers = pointer_auth(s);
   if (signedPointers != 0) return signedPointers;
   int64_t guardedCode = guarded_pages(s);

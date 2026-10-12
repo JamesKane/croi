@@ -475,9 +475,12 @@ struct PacketSource: ~Copyable {
         return PacketSourcePointer(address: address)
     }
 
-    /// Reports an event (value in payload[1]). Any context.
-    func fire(value: UInt64, schedulerLocked: Bool = false) {
+    /// Reports an event (value in payload[1]; `word0` and `word3`, if
+    /// given, in payload[0] and [3]). Any context.
+    func fire(value: UInt64, word0: UInt64? = nil, word3: UInt64? = nil, schedulerLocked: Bool = false) {
         let queue = pointee.lock.withLock { () -> Bool in
+            if let word0 { pointee.record.pointee.packet.payload[0] = word0 }
+            if let word3 { pointee.record.pointee.packet.payload[3] = word3 }
             pointee.record.pointee.packet.payload[1] = value
             pointee.record.pointee.packet.payload[2] += 1
             if pointee.queued { return false }

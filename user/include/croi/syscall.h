@@ -174,7 +174,11 @@ enum : uint64_t {
   CROI_SYS_VMO_SET_SIZE = 233,          // (vmo, size): K13h, a resizable VMO
   CROI_SYS_SMC_CALL = 234,              // (SMC resource, const croi_smc_parameters_t *, croi_smc_result_t *): arm64
   CROI_SYS_SYSTEM_GET_EVENT = 235,      // (root job, kind, out): K14a, CROI_SYSTEM_EVENT_*
-  CROI_SYS_THREAD_RAISE_EXCEPTION = 236,  // (options, type, const croi_exception_context_t *): K14d
+  CROI_SYS_THREAD_RAISE_EXCEPTION = 236,
+  CROI_SYS_ACCOUNT_CREATE = 240,        // (resource, limit, warning | critical << 32, out): account.h
+  CROI_SYS_ACCOUNT_SET_LIMIT = 241,     // (account, limit)
+  CROI_SYS_ACCOUNT_BIND_PRESSURE_PORT = 242,  // (account, port, key)
+  CROI_SYS_PROCESS_SET_ACCOUNT = 243,   // (process, account)  // (options, type, const croi_exception_context_t *): K14d
   CROI_SYS_SYSTEM_POWERCTL = 180,       // (power resource, cmd, const croi_system_powerctl_arg_t *)
 
   // The kernel's CPRNG (K11b; Zircon's): at most CROI_CPRNG_MAX_LEN bytes.
@@ -206,6 +210,7 @@ enum : uint32_t {  // timer_create options (Zircon's ZX_TIMER_SLACK_*)
 #include "timeline.h" // display timelines, their page
 #include "power.h"    // system_powerctl commands, croi_system_powerctl_arg_t
 #include "clock.h"    // clock objects (K13f)
+#include "account.h"  // memory accounts (K15a)
 
 enum : uint64_t {  // CROI_SYS_TRACE_CONFIGURE ops
   CROI_TRACE_OP_START = 0,   // a: categories, b: pages per CPU, c: mode;
