@@ -81,6 +81,7 @@ enum Bench {
         results.nullSyscall = try nullSyscall()
         results.channelCall = try channelCall(resource: resource, thread: thread)
         (results.portWakeMedian, results.portWakeP99) = try portWake(resource: resource, thread: thread)
+        if profilePortWake { try portWakeProfile() }
         (results.counterWakeMedian, results.counterWakeP99) = try counterWake(resource: resource, thread: thread)
         results.wakeErrorP99 = try wakeError(resource: resource, thread: thread)
         (results.timelineWakeMedian, results.timelineWakeP99) = try timelineWake(resource: resource)
@@ -407,6 +408,75 @@ enum Bench {
         latencies.sort()
         guard !latencies.isEmpty else { throw Failure(what: "measuring port wakes", status: -1) }
         return (latencies[latencies.count / 2], latencies[latencies.count * 99 / 100])
+    }
+
+    /// `m2.portwake_profile=1` (K14o): the port wake again, traced, each
+    /// wake's records from both CPUs merged in time from the signal's
+    /// entry to port_wait's exit; the most common sequence's median gap
+    /// before each record.
+    nonisolated(unsafe) static var profilePortWake = false
+
+    static func portWakeProfile() throws(Failure) {
+        wakeEvent = try Sys.event()
+        readyEvent = try Sys.event()
+        goEvent = try Sys.event()
+        try Sys.check("creating a port", Sys.call(CROI_SYS_PORT_CREATE, 0, Sys.address(&wakePort)))
+        try Tracing.start(UInt32(CROI_TRACE_SYSCALL | CROI_TRACE_SCHED | CROI_TRACE_IRQ | CROI_TRACE_IPC | CROI_TRACE_MARK),
+                          pages: 256)
+        let worker = try Sys.spawn(waiter, 0)
+        let waiterProfile = try Sys.profile(Tracing.resource, priority: Int32(CROI_PRIORITY_DEFAULT), mask: cpus.waiter)
+        try Sys.apply(waiterProfile, to: worker)
+        Sys.close(waiterProfile)
+        Sys.signal(goEvent, set: UInt32(CROI_SIGNAL_SIGNALED))
+        for _ in 0..<wakes {
+            Sys.take(readyEvent)
+            _ = Sys.call(CROI_SYS_NANOSLEEP, Sys.now() + 100_000)
+            Sys.signal(wakeEvent, set: UInt32(CROI_SIGNAL_SIGNALED))
+        }
+        var observed: UInt32 = 0
+        _ = Sys.call(CROI_SYS_OBJECT_WAIT_ONE, UInt64(worker), UInt64(CROI_SIGNAL_TASK_TERMINATED), .max,
+                     Sys.address(&observed))
+        Tracing.stop()
+        for handle in [worker, wakeEvent, readyEvent, goEvent, wakePort] { Sys.close(handle) }
+        var (records, frequency) = try Tracing.records()
+        records.sort { $0.time < $1.time }
+        var sequences: [[croi_trace_record_t]] = []
+        var current: [croi_trace_record_t]? = nil
+        for r in records where (1 << UInt64(r.cpu)) & (cpus.client | cpus.waiter) != 0 {
+            if r.kind == UInt16(CROI_TK_SYSCALL_ENTER), r.a == CROI_SYS_OBJECT_SIGNAL, r.b == UInt64(wakeEvent),
+               (1 << UInt64(r.cpu)) == cpus.client {
+                current = [r]
+            } else if current != nil {
+                current!.append(r)
+                if r.kind == UInt16(CROI_TK_SYSCALL_EXIT), r.a == CROI_SYS_PORT_WAIT, (1 << UInt64(r.cpu)) == cpus.waiter {
+                    sequences.append(current!)
+                    current = nil
+                }
+            }
+        }
+        func signature(_ seq: [croi_trace_record_t]) -> [UInt64] {
+            seq.map { UInt64($0.cpu) << 48 | UInt64($0.kind) << 32 | ($0.kind == UInt16(CROI_TK_SYSCALL_ENTER) || $0.kind == UInt16(CROI_TK_SYSCALL_EXIT) || $0.kind == UInt16(CROI_TK_MARK) || $0.kind == UInt16(CROI_TK_IRQ_ENTER) ? $0.a : 0) }
+        }
+        var best: [UInt64] = [], bestCount = 0
+        for seq in sequences {
+            let shape = signature(seq)
+            var count = 0
+            for other in sequences where signature(other) == shape { count += 1 }
+            if count > bestCount { best = shape; bestCount = count }
+        }
+        let kept = sequences.filter { signature($0) == best }
+        guard !kept.isEmpty else { throw Failure(what: "finding port wakes", status: -25) }
+        print("m2: port wake profile: \(kept.count) of \(sequences.count) wakes share \(best.count) records, median gap before each:")
+        for i in 0..<best.count {
+            var gaps: [UInt64] = []
+            for seq in kept { gaps.append(i == 0 ? 0 : Tracing.ns(seq[i].time &- seq[i - 1].time, frequency)) }
+            gaps.sort()
+            let r = kept[0][i]
+            print("m2: port wake profile:   +\(gaps[gaps.count / 2]) ns  cpu \(r.cpu) kind \(r.kind) a \(r.kind == UInt16(CROI_TK_SYSCALL_ENTER) || r.kind == UInt16(CROI_TK_SYSCALL_EXIT) || r.kind == UInt16(CROI_TK_MARK) || r.kind == UInt16(CROI_TK_IRQ_ENTER) ? r.a : 0)")
+        }
+        var totals = kept.map { Tracing.ns($0[$0.count - 1].time &- $0[0].time, frequency) }
+        totals.sort()
+        print("m2: port wake profile: signal entry to port_wait exit, median \(totals[totals.count / 2]) ns")
     }
 
     // MARK: Counter wake from another core (K10a)

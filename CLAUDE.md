@@ -585,6 +585,9 @@ include/profile.h):
   port every 5 ms (Todhchai's executor), printed as lateness (deadline to
   user space by the vDSO clock) split into the timer interrupt arriving
   late and the kernel's interrupt-to-user path, plus a few wakes' records.
+- `m2.portwake_profile=1` (K14o): the port wake bench again, traced,
+  each wake's records from both CPUs merged in time (signal entry to
+  port_wait exit), median gap before each.
 - Timed wakes under KVM (K14n): every VM exit cost ~4-5 us on this host.
   `LocalApic.endOfInterrupt` uses KVM's PV EOI where offered (per-CPU
   words in one page, MSR 0x4B564D04; `croi.pv_eoi=off`), testing and

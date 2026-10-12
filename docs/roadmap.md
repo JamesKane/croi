@@ -842,6 +842,16 @@ THREAD, VMO, maps, handle table) and the NAME property.
   ALWAYS_NEED) and their eviction when a lender wants its page. On by
   default (`croi.ppb.loan=off`). Requirement 3's pool no longer holds
   memory idle.
+- **K14o: cross-CPU port wake, looked at.** (2026-10-12) m2's port wake
+  profile (`m2.portwake_profile=1`) puts the ~1.65 us in a dozen steps of
+  100-250 ns: the signaller's handle lookup and object retain (cache lines
+  the waiter's CPU just wrote: the process's handle-table lock, the
+  event's header), the observer, port queue and wake (~350 ns), the
+  waiter's switch bookkeeping (~260 ns), XSAVE restore (~110 ns), the
+  packet record's release (~140 ns) and copy out. No single cost like
+  K14l's or K14n's; keeping user tables loaded across idle measured
+  worse, and a lock-free handle lookup needs safe reclamation croi lacks.
+  Left as is: ~3.5x Zircon's on this host and under its 2 us budget.
 - **K14n: timed wakes under KVM.** **Done** (2026-10-12), from Todhchai's
   report (a 5 ms Task.sleep 20-60 us late; their executor's workers time
   out on one port). m2's wake profile split it: the timer interrupt ~14-20
