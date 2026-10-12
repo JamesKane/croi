@@ -180,9 +180,8 @@ matches the pinned tree where upstream docs or expectations say otherwise).
   its port. Kind: deliberate. Impact: the port lives as long as the
   source.
 - **DECOMMIT on a pager VMO** — NOT_SUPPORTED. Kind: not yet. Impact: low.
-- **Eviction** — clean pages are never evicted (dropped only at detach);
-  ALWAYS_NEED / DONT_NEED hints have no effect. Kind: not yet. Impact:
-  page-cache memory isn't reclaimed under pressure.
+- **Eviction** — clean pager pages are evicted and the hints honoured
+  since K14a; its differences are under "Reclamation (K14a)".
 
 ## Clocks and time
 

@@ -911,7 +911,9 @@ What is still open after K13, gathered from the milestones above, CLAUDE.md's
 from Zircon, see docs/zircon-divergences.md.
 
 **Todhchai's requirements and extensions**
-- Requirement 3: ACPI-reclaim memory stays wired (page loaning: K14f).
+- Requirement 3: done (the contiguous pool, and since K14f page loaning,
+  which lends its idle pages). Left: ACPI-reclaim memory stays wired, as
+  user space reads the firmware tables there for good (K9b).
 - Requirement 9: lazy AMX through XFD, SME streaming mode, per-thread SVE
   vector lengths (none available under QEMU TCG).
 - Requirement 1: the GENI UART (Q8B); a text console on the framebuffer.
