@@ -600,28 +600,48 @@ arch_pmu_sysreg_read:
     cmp     w0, #9
     b.hi    9f
     adr     x1, 1f
-    add     x1, x1, x0, lsl #3
+    add     x1, x1, x0, lsl #4    // 16-byte entries: bti j first (K14q)
     br      x1
-1:  mrs     x0, pmcr_el0
+1:  hint    #36                         // bti j
+    mrs     x0, pmcr_el0
     ret
+    nop
+    hint    #36                         // bti j
     mrs     x0, pmcntenset_el0
     ret
+    nop
+    hint    #36                         // bti j
     mrs     x0, pmcntenclr_el0
     ret
+    nop
+    hint    #36                         // bti j
     mrs     x0, pmintenset_el1
     ret
+    nop
+    hint    #36                         // bti j
     mrs     x0, pmintenclr_el1
     ret
+    nop
+    hint    #36                         // bti j
     mrs     x0, pmovsclr_el0
     ret
+    nop
+    hint    #36                         // bti j
     mrs     x0, pmceid0_el0
     ret
+    nop
+    hint    #36                         // bti j
     mrs     x0, pmccfiltr_el0
     ret
+    nop
+    hint    #36                         // bti j
     mrs     x0, pmuserenr_el0
     ret
+    nop
+    hint    #36                         // bti j
     mrs     x0, id_aa64dfr0_el1
     ret
+    nop
 9:  mov     x0, #0
     ret
 .size arch_pmu_sysreg_read, . - arch_pmu_sysreg_read
@@ -633,26 +653,44 @@ arch_pmu_sysreg_write:
     cmp     w0, #8
     b.hi    9f
     adr     x2, 1f
-    add     x2, x2, x0, lsl #3
+    add     x2, x2, x0, lsl #4    // 16-byte entries: bti j first (K14q)
     br      x2
-1:  msr     pmcr_el0, x1
+1:  hint    #36                         // bti j
+    msr     pmcr_el0, x1
     b       8f
+    nop
+    hint    #36                         // bti j
     msr     pmcntenset_el0, x1
     b       8f
+    nop
+    hint    #36                         // bti j
     msr     pmcntenclr_el0, x1
     b       8f
+    nop
+    hint    #36                         // bti j
     msr     pmintenset_el1, x1
     b       8f
+    nop
+    hint    #36                         // bti j
     msr     pmintenclr_el1, x1
     b       8f
+    nop
+    hint    #36                         // bti j
     msr     pmovsclr_el0, x1
     b       8f
+    nop
+    hint    #36                         // bti j
     nop                                     // PMCEID0 is read only
     b       8f
+    nop
+    hint    #36                         // bti j
     msr     pmccfiltr_el0, x1
     b       8f
+    nop
+    hint    #36                         // bti j
     msr     pmuserenr_el0, x1
     b       8f
+    nop
 8:  isb
 9:  ret
 .size arch_pmu_sysreg_write, . - arch_pmu_sysreg_write
@@ -1231,3 +1269,61 @@ arch_pac_strip:
     mov     x30, x9
     ret
 .size arch_pac_strip, . - arch_pac_strip
+
+// Branch target identification (K14q): the kernel's text is mapped
+// guarded (GP), so an indirect branch must land on a BTI (or PACIxSP)
+// instruction; the compiler puts them where its code is reached that way,
+// and the jump tables above have theirs.
+
+// uint64_t arch_bti_supported(void): ID_AA64PFR1_EL1.BT.
+.section .text.arch_bti, "ax", %progbits
+.globl arch_bti_supported
+.type arch_bti_supported, %function
+arch_bti_supported:
+    mrs     x0, id_aa64pfr1_el1
+    and     x0, x0, #0xf
+    ret
+.size arch_bti_supported, . - arch_bti_supported
+
+// void arch_bti_enable(void): SCTLR_EL1.BT1 (PACIxSP is a landing pad for
+// calls only, as BTI c).
+.globl arch_bti_enable
+.type arch_bti_enable, %function
+arch_bti_enable:
+    mrs     x9, sctlr_el1
+    orr     x9, x9, #(1 << 36)
+    msr     sctlr_el1, x9
+    isb
+    ret
+.size arch_bti_enable, . - arch_bti_enable
+
+// uint64_t arch_bti_probe(void): branches (br) to an instruction that is
+// no landing pad. Guarded, that is a branch target exception, which
+// arch_exception sends on to the recovery point (1); unguarded it runs (0).
+.globl arch_bti_probe
+.type arch_bti_probe, %function
+arch_bti_probe:
+    adr     x9, croi_bti_probe_target
+    br      x9
+croi_bti_probe_target:
+    mov     x0, #0
+    ret
+croi_bti_probe_recovery:
+    mov     x0, #1
+    ret
+.size arch_bti_probe, . - arch_bti_probe
+
+// uint64_t arch_bti_probe_target(void) / arch_bti_probe_recovery(void)
+.globl arch_bti_probe_target
+.type arch_bti_probe_target, %function
+arch_bti_probe_target:
+    adr     x0, croi_bti_probe_target
+    ret
+.size arch_bti_probe_target, . - arch_bti_probe_target
+
+.globl arch_bti_probe_recovery
+.type arch_bti_probe_recovery, %function
+arch_bti_probe_recovery:
+    adr     x0, croi_bti_probe_recovery
+    ret
+.size arch_bti_probe_recovery, . - arch_bti_probe_recovery

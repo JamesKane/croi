@@ -842,6 +842,11 @@ THREAD, VMO, maps, handle table) and the NAME property.
   ALWAYS_NEED) and their eviction when a lender wants its page. On by
   default (`croi.ppb.loan=off`). Requirement 3's pool no longer holds
   memory idle.
+- **K14q: arm64 branch target identification.** **Done** (2026-10-12):
+  kernel text guarded where FEAT_BTI exists, landing pads from the
+  compiler (pac-ret+bti) and in the PMU jump tables, BT1, a self-test that
+  takes and recovers a branch target exception. Not yet: guarded user
+  pages (an ELF opt-in), per-process user PAC keys.
 - **K14p: arm64 pointer authentication.** **Done** (2026-10-12): the
   kernel signs return addresses (pac-ret, APIA) with a random per-boot key,
   user space gets another (swapped at every entry and return), EL2 drops
@@ -997,7 +1002,8 @@ from Zircon, see docs/zircon-divergences.md.
 
 **Kernel internals**
 - amd64 5-level paging, VHE-only arm64 CPUs. (Kernel pointer
-  authentication came in K14p; per-process user keys and BTI not yet.)
+  authentication came in K14p, BTI for the kernel in K14q; per-process
+  user keys and guarded user pages not yet.)
 - IOMMUs: ATS, two-level SMMUv3 stream tables, stage 2, posted
   interrupts, source verification for MSI-X, identity-level MSI isolation
   on rv64; SMMUv2 and every unit unverified on hardware.

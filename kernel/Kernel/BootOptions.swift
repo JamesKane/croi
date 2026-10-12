@@ -18,11 +18,14 @@ enum BootOptions {
     nonisolated(unsafe) private static var storage = InlineArray<1024, UInt8>(repeating: 0)
     nonisolated(unsafe) private(set) static var length = 0
 
-    /// Copies the command line from the handoff (still physmap-reachable).
-    static func capture(_ handoff: croi_handoff_t) {
+    /// Copies the command line from the handoff (still physmap-reachable;
+    /// `identity`: through the loader's identity map, before the kernel's
+    /// own tables, K14q).
+    static func capture(_ handoff: croi_handoff_t, identity: Bool = false) {
         guard handoff.cmdline != 0 else { return }
         let count = min(Int(handoff.cmdline_size), capacity)
-        let bytes = unsafe UnsafePointer<UInt8>(bitPattern: UInt(KernelLayout.physmap(handoff.cmdline)))!
+        let address = identity ? handoff.cmdline : KernelLayout.physmap(handoff.cmdline)
+        let bytes = unsafe UnsafePointer<UInt8>(bitPattern: UInt(address))!
         for i in 0..<count {
             let byte = unsafe bytes[i]
             if byte == UInt8(ascii: "\n") || byte == UInt8(ascii: "\r") || byte == 0 { break }

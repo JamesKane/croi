@@ -140,6 +140,13 @@ void arch_pac_load_kernel_key(void);
 void arch_pac_load_user_key(void);
 uint64_t arch_pac_sign(uint64_t pointer, uint64_t modifier);
 uint64_t arch_pac_strip(uint64_t pointer);
+
+// Branch target identification (K14q, arch/arm64/cpu.S).
+uint64_t arch_bti_supported(void);
+void arch_bti_enable(void);
+uint64_t arch_bti_probe(void);
+uint64_t arch_bti_probe_target(void);
+uint64_t arch_bti_probe_recovery(void);
 #endif
 
 #if defined(__x86_64__)

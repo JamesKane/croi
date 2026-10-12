@@ -2233,6 +2233,23 @@ The boot self-test checks signing and that the keys differ; mode 17's
 check 676 that user code's signature isn't the kernel's (it failed with
 the return path's key load removed). User programs aren't built with it
 (their own choice; the user key is per boot, not per process).
+
+Branch target identification, arm64 (K14q; Main.swift `BranchTargets`,
+cpu.S `arch_bti_*`, PageTableFormat `guardedKernelText`): built with
+-mbranch-protection=pac-ret+bti (croi-rt with bti), so compiled code
+carries a landing pad (BTI, or the PACIASP already there) wherever it is
+reached by an indirect branch; hand-written assembly reached by `br`/`blr`
+must start with `bti j`/`bti c` (today only the PMU sysreg jump tables,
+16-byte entries; direct `bl`, `ret` and `eret` need none). With FEAT_BTI
+(ID_AA64PFR1_EL1.BT) and no `croi.bti=off`, executable kernel leaves get
+the guarded-page bit (50; decided before the kernel's tables are built,
+the command line read through the loader's identity map) and
+SCTLR_EL1.BT1 is set. A stray indirect branch is EC 0x0D, "branch target
+exception". The boot self-test branches to a non-pad instruction
+(`arch_bti_probe`) and arch_exception sends it on to a recovery point,
+clearing SPSR.BTYPE (else the recovery instruction is checked too); with
+the jump tables' pads removed the PMU self-test faults. User pages aren't
+guarded (no ELF GNU-property opt-in yet).
 - `ld/image.ld` Shared linker script: one PT_LOAD per permission (W^X).
 - `cmake/`    Toolchain file, per-arch settings, `croi_image()` helper.
 

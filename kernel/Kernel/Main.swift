@@ -78,6 +78,9 @@ func kernel_main(_ handoffAddress: UInt64) -> Never {
     // Move off the loader's page tables onto our own.
     let tables: KernelPageTables
     do throws(MapError) {
+        #if arch(arm64)
+        BranchTargets.configure(handoff)  // before the tables: they map the text guarded
+        #endif
         tables = try buildKernelPageTables(handoff, allocator: BootAllocator(handoff))
     } catch {
         console.write("croi kernel: building page tables failed: ")
@@ -161,6 +164,32 @@ func kernel_main(_ handoffAddress: UInt64) -> Never {
 }
 
 #if arch(arm64)
+/// Branch target identification (K14q): the kernel is built with
+/// -mbranch-protection=pac-ret+bti, so the compiler puts a landing pad (BTI,
+/// or the PACIASP already there) wherever its code is reached by an
+/// indirect branch, and assembly jump tables carry `bti j`; with FEAT_BTI
+/// the kernel's text is mapped guarded (GP), so an indirect branch anywhere
+/// else (a corrupted function pointer, a jump into the middle of a
+/// function) is a branch target exception. SCTLR_EL1.BT1: PACIASP counts as
+/// BTI c only. User pages aren't guarded (no ELF opt-in yet). `croi.bti=off`.
+enum BranchTargets {
+    nonisolated(unsafe) private(set) static var enabled = false
+
+    static func configure(_ handoff: croi_handoff_t) {
+        BootOptions.capture(handoff, identity: true)
+        guard arch_bti_supported() != 0, !BootOptions.has("croi.bti=off") else { return }
+        PageTableFormat.guardedKernelText = true
+        arch_bti_enable()
+        enabled = true
+    }
+
+    /// A branch to an instruction that isn't a landing pad is refused (the
+    /// exception handler sends it on to the probe's recovery point).
+    static func selfTest() -> Bool {
+        arch_bti_probe() == (enabled ? 1 : 0)
+    }
+}
+
 /// Pointer authentication (K14p): the kernel is built with
 /// -mbranch-protection=pac-ret, so every non-leaf function signs its return
 /// address with the APIA key on entry and authenticates it before
@@ -229,6 +258,9 @@ func kernel_main_continue() -> Never {
         kernelStackSelfTest()
         #if arch(arm64)
         guard PointerAuth.selfTest() else { panic("pac self-test: signing or the key swap") }
+        guard BranchTargets.selfTest() else { panic("bti self-test: a stray branch wasn't refused") }
+        console.write(BranchTargets.enabled ? "  branch: kernel text guarded (BTI), a stray indirect branch refused\n"
+                                            : "  branch: BTI off (croi.bti=off, or no FEAT_BTI)\n")
         console.write(PointerAuth.enabled ? "  pac:    return addresses signed (APIA), user and kernel keys apart\n"
                                           : "  pac:    off (croi.pac=off, or no address authentication)\n")
         #endif

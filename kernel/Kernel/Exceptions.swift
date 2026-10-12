@@ -59,6 +59,16 @@ func arch_exception(_ frame: UnsafeMutablePointer<arch_exception_frame_t>) {
         return
     }
     if unsafe HardwareDebug.kernelTrap(frame) { return }  // a user watchpoint hit by a user copy (K13g)
+    #if arch(arm64)
+    // The BTI self-test's stray branch (K14q): on to its recovery point,
+    // BTYPE cleared (else the recovery instruction is checked again).
+    if unsafe ExceptionFrame.exceptionClass(frame.pointee) == 0x0D, unsafe !ExceptionFrame.fromUser(frame.pointee),
+       unsafe frame.pointee.elr == arch_bti_probe_target() {
+        unsafe frame.pointee.elr = arch_bti_probe_recovery()
+        unsafe frame.pointee.spsr &= ~(3 << 10)
+        return
+    }
+    #endif
     if unsafe ExceptionFrame.isBreakpoint(frame.pointee) {
         unsafe ExceptionFrame.skipBreakpoint(&frame.pointee)
         breakpointsHandled += 1
@@ -297,6 +307,7 @@ enum ExceptionFrame {
         switch ec {
         case 0x00: "unknown reason"
         case 0x07: "FP/SIMD access"
+        case 0x0D: "branch target exception"  // BTI (K14q)
         case 0x0E: "illegal execution state"
         case 0x15: "SVC"
         case 0x1C: "pointer authentication failure"  // FEAT_FPAC (K14p)

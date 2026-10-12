@@ -122,7 +122,13 @@ public enum PageTableFormat {
     @inlinable static var notGlobal: UInt64 { 1 << 11 }
     @inlinable static var privilegedNoExecute: UInt64 { 1 << 53 }
     @inlinable static var unprivilegedNoExecute: UInt64 { 1 << 54 }
+    @inlinable static var guardedPage: UInt64 { 1 << 50 }
     @inlinable static var addressMask: UInt64 { 0x0000_FFFF_FFFF_F000 }
+
+    /// K14q: executable kernel leaves are guarded pages (BTI: indirect
+    /// branches into them must land on a landing pad). Set by the kernel
+    /// when the CPUs have FEAT_BTI (the bit is reserved otherwise).
+    nonisolated(unsafe) public static var guardedKernelText = false
 
     @inlinable public static func leafAllowed(level: Int) -> Bool { level >= 1 }
     @inlinable public static func table(_ phys: UInt64) -> UInt64 { phys | valid | tableOrPage }
@@ -141,7 +147,7 @@ public enum PageTableFormat {
             if !a.executable || a.cache == .device { e |= unprivilegedNoExecute }
         } else {
             e |= unprivilegedNoExecute
-            if !a.executable || a.cache == .device { e |= privilegedNoExecute }
+            if !a.executable || a.cache == .device { e |= privilegedNoExecute } else if guardedKernelText { e |= guardedPage }
             if !a.global { e |= notGlobal }
         }
         return e

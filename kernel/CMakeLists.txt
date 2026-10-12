@@ -142,10 +142,11 @@ add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/no-optionset.stamp
 add_custom_target(kernel-no-optionset DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/no-optionset.stamp)
 add_dependencies(kernel-swift kernel-no-optionset)
 
-# K14p: arm64 return addresses signed (pac-ret). Hint-space instructions,
-# NOPs where pointer authentication isn't implemented or enabled.
+# K14p/K14q: arm64 return addresses signed (pac-ret) and landing pads for
+# indirect branches (bti). Hint-space instructions, NOPs where the CPU
+# lacks the feature or it is off.
 if(CROI_ARCH STREQUAL "arm64")
-  target_compile_options(kernel-swift PRIVATE "SHELL:-Xcc -mbranch-protection=pac-ret")
+  target_compile_options(kernel-swift PRIVATE "SHELL:-Xcc -mbranch-protection=pac-ret+bti")
 endif()
 
 add_executable(kernel
@@ -160,7 +161,7 @@ add_executable(kernel
   trace.c)
 target_include_directories(kernel PRIVATE include)
 if(CROI_ARCH STREQUAL "arm64")
-  target_compile_options(kernel PRIVATE $<$<COMPILE_LANGUAGE:C>:-mbranch-protection=pac-ret>)
+  target_compile_options(kernel PRIVATE $<$<COMPILE_LANGUAGE:C>:-mbranch-protection=pac-ret+bti>)
 endif()
 target_link_libraries(kernel PRIVATE kernel-swift croi-rt)
 set_target_properties(kernel PROPERTIES OUTPUT_NAME kernel.elf)
