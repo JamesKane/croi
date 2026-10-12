@@ -139,6 +139,7 @@ struct M2 {
     static var spawnToMainLimit: UInt64 { 200_000 }
 
     static func measure(resource: UInt32, thread: UInt32, entered: UInt64) throws(Failure) {
+        Bench.profileCalls = environmentHas("m2.ipc_profile=1")
         let r = try Bench.run(resource: resource, thread: thread)
         print("m2: null syscall \(r.nullSyscall) ns (budget \(budgets.nullSyscall))")
         print("m2: channel_call round trip, one core, deadline donation: \(r.channelCall) ns (budget \(budgets.channelCall), ceiling \(channelCallCeiling))")

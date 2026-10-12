@@ -6,9 +6,9 @@ import CroiRuntime
 enum Tracing {
     nonisolated(unsafe) static var resource: UInt32 = 0
 
-    static func start(_ categories: UInt32) throws(Failure) {
+    static func start(_ categories: UInt32, pages: UInt64 = 64, sampleHz: UInt64 = 0) throws(Failure) {
         try Sys.check("starting the trace", Sys.call(CROI_SYS_TRACE_CONFIGURE, UInt64(resource), CROI_TRACE_OP_START,
-                                                     UInt64(categories), 64, UInt64(CROI_TRACE_ONESHOT), 0))
+                                                     UInt64(categories), pages, UInt64(CROI_TRACE_ONESHOT), sampleHz))
     }
 
     static func stop() {
@@ -68,6 +68,12 @@ enum Bench {
     }
 
     static var cpus: (client: UInt64, waiter: UInt64, sleeper: UInt64) { (1 << 1, 1 << 2, 1 << 3) }
+
+    /// `m2.ipc_profile=1`: after the channel_call batches, one more traced
+    /// with syscall, scheduler and IPC records, printed as a call's events
+    /// and the median time between each and the one before (the probes
+    /// themselves cost ~20 ns each; read the shares, not the sum).
+    nonisolated(unsafe) static var profileCalls = false
 
     static func run(resource: UInt32, thread: UInt32) throws(Failure) -> Results {
         Tracing.resource = resource
@@ -156,9 +162,20 @@ enum Bench {
             Tracing.mark(11, batch)
         }
         Tracing.stop()
+        let (records, frequency) = try Tracing.records()
+        if profileCalls {
+            try Tracing.start(UInt32(CROI_TRACE_SYSCALL | CROI_TRACE_SCHED | CROI_TRACE_IPC | CROI_TRACE_MARK), pages: 256)
+            for _ in 0..<200 { try Sys.check("a profiled call", call()) }
+            Tracing.stop()
+            try profile()
+            // Where the time goes: PC samples (10 kHz) over many calls.
+            try Tracing.start(UInt32(CROI_TRACE_SAMPLE), pages: 1024, sampleHz: 10_000)
+            for _ in 0..<300_000 { try Sys.check("a sampled call", call()) }
+            Tracing.stop()
+            try samples()
+        }
         Sys.close(client)  // the server sees PEER_CLOSED and exits
         Sys.close(worker)
-        let (records, frequency) = try Tracing.records()
         var means: [UInt64] = []
         for batch in 0..<batches {
             guard let start = records.first(where: { $0.kind == UInt16(CROI_TK_MARK) && $0.a == 10 && $0.b == batch }),
@@ -168,6 +185,70 @@ enum Bench {
         }
         means.sort()
         return means[means.count / 2]
+    }
+
+    /// Splits the traced calls at each channel_call entry, keeps those
+    /// with the most common sequence of events, and prints the median gap
+    /// before each event.
+    static func profile() throws(Failure) {
+        let (records, frequency) = try Tracing.records()
+        let callNumber = UInt64(CROI_SYS_CHANNEL_CALL)
+        var calls: [[croi_trace_record_t]] = []
+        for record in records {
+            if record.kind == UInt16(CROI_TK_SYSCALL_ENTER), record.a == callNumber {
+                calls.append([record])
+            } else if !calls.isEmpty {
+                calls[calls.count - 1].append(record)
+            }
+        }
+        guard calls.count > 2 else { throw Failure(what: "finding profiled calls", status: -25) }
+        calls.removeLast()  // may be cut short
+        func signature(_ call: [croi_trace_record_t]) -> [UInt64] {
+            call.map { UInt64($0.kind) << 32 | ($0.kind == UInt16(CROI_TK_SYSCALL_ENTER) || $0.kind == UInt16(CROI_TK_SYSCALL_EXIT) || $0.kind == UInt16(CROI_TK_MARK) ? $0.a : 0) }
+        }
+        var best: [UInt64] = []
+        var bestCount = 0
+        for call in calls {
+            let shape = signature(call)
+            var count = 0
+            for other in calls where signature(other) == shape { count += 1 }
+            if count > bestCount {
+                best = shape
+                bestCount = count
+            }
+        }
+        let kept = calls.filter { signature($0) == best }
+        print("m2: ipc profile: \(kept.count) of \(calls.count) calls share \(best.count) events (kind, syscall), median gap before each:")
+        for i in 0..<best.count {
+            var gaps: [UInt64] = []
+            for call in kept {
+                let previous = i == 0 ? call[call.count - 1].time : call[i - 1].time
+                gaps.append(i == 0 ? 0 : Tracing.ns(call[i].time &- previous, frequency))
+            }
+            gaps.sort()
+            let event = kept[0][i]
+            let detail = event.kind == UInt16(CROI_TK_SYSCALL_ENTER) || event.kind == UInt16(CROI_TK_SYSCALL_EXIT) || event.kind == UInt16(CROI_TK_MARK) ? " \(event.a)" : ""
+            print("m2: ipc profile:   +\(gaps[gaps.count / 2]) ns  kind \(event.kind)\(detail)  thread \(event.thread)")
+        }
+        var totals: [UInt64] = kept.map { Tracing.ns($0[$0.count - 1].time &- $0[0].time, frequency) }
+        totals.sort()
+        print("m2: ipc profile: first to last event, median \(totals[totals.count / 2]) ns")
+    }
+
+    /// The sampled PCs, most frequent first (kernel ones as image offsets
+    /// with bit 63 set: llvm-symbolizer --obj=kernel.elf <link + offset>).
+    static func samples() throws(Failure) {
+        let (records, _) = try Tracing.records()
+        var pcs: [UInt64] = []
+        for record in records where record.kind == UInt16(CROI_TK_SAMPLE) && record.cpu == 1 { pcs.append(record.a) }
+        pcs.sort()
+        var counts: [(UInt64, Int)] = []
+        for pc in pcs {
+            if let last = counts.last, last.0 == pc { counts[counts.count - 1].1 += 1 } else { counts.append((pc, 1)) }
+        }
+        counts.sort { $0.1 > $1.1 }
+        print("m2: ipc samples: \(pcs.count) on CPU 1, top PCs:")
+        for (pc, count) in counts.prefix(40) { print("m2: ipc samples:   \(count) \(String(pc, radix: 16))") }
     }
 
     // MARK: Port wake from another core

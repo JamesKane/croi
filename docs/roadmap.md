@@ -842,6 +842,16 @@ THREAD, VMO, maps, handle table) and the NAME property.
   ALWAYS_NEED) and their eviction when a lender wants its page. On by
   default (`croi.ppb.loan=off`). Requirement 3's pool no longer holds
   memory idle.
+- **K14l: channel_call, part 1.** **Done** (2026-10-12): m2's IPC profile
+  mode (`m2.ipc_profile=1`: per-event gaps and PC samples) found each heap
+  free spending ~190 ns in `pmm.page(for:)`, which copied the whole Pmm
+  (850 bytes) and then its arena table per arena; the lookups are
+  `mutating` now. Interleaved (5 boots): channel_call 1563 -> 1352 ns,
+  counter.wake_median 1804 -> 1144 ns, boot.userboot_start 78.9 -> 65.3 ms.
+  Left in the call (probes, KVM): three out-pointer checks each taking the
+  address space's lock (~150 ns), the XSAVE switch (~130 ns per switch;
+  lazy switching is out, LazyFP), and IPI paths with the same kind of copy
+  (`Ipi.call`, `LocalApic.sendCommand`).
 - **K14k: zero intervals.** **Done** (2026-10-12): pager VMOs keep
   Zircon's zero intervals (dirty, awaiting clean, untracked): ZERO, a
   grow and a stream size cut make them, reads copy zeros without

@@ -340,6 +340,7 @@ extension Syscalls {
             }
             return message
         }
+        if handleCount == 0 { return message }  // no 256-byte buffer to clear
         var values = InlineArray<64, UInt32>(repeating: 0)
         if handleCount > 0 {
             var span = values.mutableSpan

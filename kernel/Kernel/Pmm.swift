@@ -75,7 +75,12 @@ nonisolated(unsafe) var pmm = Pmm()
 /// Guards `pmm`'s free list and page states. Innermost lock (see SpinLock).
 let pmmLock = SpinLock()
 
-@safe struct Pmm {
+/// Lookups on the global `pmm` are `mutating` although they change nothing:
+/// a non-mutating method got a copy of the whole struct (850 bytes, `rep
+/// movsb`, ~150 ns per `page(for:)`, most of a heap free and so of each
+/// channel call), and indexing `arenas` there copied the array again per
+/// arena; a mutating one gets the global's address (K14l).
+@safe struct Pmm: ~Copyable {
     private var arenas = InlineArray<32, Arena>(repeating: Arena())
     private(set) var arenaCount = 0
     /// Physmap address of the first free `Page`, 0 if none.
@@ -406,7 +411,7 @@ let pmmLock = SpinLock()
 
     /// A page swapped for another keeps its place in reclamation: the old
     /// one's age and hints (K14a), the new one's loan bits.
-    func copyReclaimState(from old: UInt64, to new: UInt64) {
+    mutating func copyReclaimState(from old: UInt64, to new: UInt64) {
         guard let from = unsafe page(for: old), let to = unsafe page(for: new) else { return }
         let loan = Page.loaned | Page.loanCancelled
         unsafe to.pointee.reclaimAge = from.pointee.reclaimAge
@@ -415,7 +420,7 @@ let pmmLock = SpinLock()
 
     /// Whether `phys` is a lent page (a borrower asks about its own pages,
     /// under its lock: the bit doesn't change while it holds the page).
-    func isLoaned(_ phys: UInt64) -> Bool {
+    mutating func isLoaned(_ phys: UInt64) -> Bool {
         guard let page = unsafe page(for: phys) else { return false }
         return unsafe page.pointee.reclaimFlags & Page.loaned != 0
     }
@@ -489,18 +494,18 @@ let pmmLock = SpinLock()
     // MARK: Lookup
 
     /// The `Page` describing physical address `phys`, if the PMM manages it.
-    func page(for phys: UInt64) -> UnsafeMutablePointer<Page>? {
+    mutating func page(for phys: UInt64) -> UnsafeMutablePointer<Page>? {
         for a in 0..<arenaCount where arenas[a].contains(phys) {
             return unsafe page(arenas[a], (phys - arenas[a].base) / KernelLayout.pageSize)
         }
         return nil
     }
 
-    func state(of phys: UInt64) -> PageState? {
+    mutating func state(of phys: UInt64) -> PageState? {
         pmmLock.withLock { unsafe page(for: phys)?.pointee.state }
     }
 
-    func arena(_ i: Int) -> Arena { arenas[i] }
+    mutating func arena(_ i: Int) -> Arena { arenas[i] }
 
     // MARK: Free list
 

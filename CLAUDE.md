@@ -570,6 +570,13 @@ include/profile.h):
 - Under a hypervisor an idle CPU polls for `croi.idle_poll_us` (default
   200, 0 on hardware) before halting, announced in `pollingCpus`, so a
   cross-core wake skips the IPI (and its VM exits).
+- `m2.ipc_profile=1` on the command line (K14l): after the channel_call
+  batches m2 traces 200 more with syscall, scheduler and IPC records (and
+  any kernel `CROI_TK_MARK` probes added while chasing something) and
+  prints a call's events with the median gap before each, then samples PCs
+  at 10 kHz over 300,000 calls and prints the top ones (kernel ones as
+  image offsets with bit 63 set; samples land where interrupts come back
+  on, so masked stretches show at their end).
 - Hot-path notes from the budget work: `Scheduler.locked` drops the lock
   through `cancelTimeout` (one round trip); `Timers.arm` writes the
   hardware only for a sooner timer and `cancel` leaves it armed (the
@@ -2230,6 +2237,12 @@ kernel must not use PAC until it does.
   don't support `~Copyable` types.
 - `discard self` in Embedded Swift needs `@frozen` (public types only) or
   `@export(interface)` on the method; croi uses the latter.
+- A non-mutating method called on a large global struct gets a copy of
+  the whole struct (a bitwise `rep movsb`, even for a `~Copyable` one),
+  and indexing an `InlineArray` field inside it can copy the array again:
+  `pmm.page(for:)` copied ~1.6 KB per call (K14l). Make lookups on big
+  globals `mutating` (the global's address is passed), and check hot paths
+  with `llvm-objdump -d` for `rep movsb` of a struct's size.
 - Swift precedence trap: `<<`/`>>` bind tighter than `*`, so write
   `(pages * pageSize) >> 20`, never `pages * pageSize >> 20`.
 - C constants Swift must see are typed C23 enums (`enum : uint64_t {...}`),
