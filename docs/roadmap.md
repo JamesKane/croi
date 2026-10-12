@@ -834,6 +834,21 @@ THREAD, VMO, maps, handle table) and the NAME property.
   system_get_event, eviction at critical, OOM eviction then reboot),
   KMEM_STATS' reclaim fields, committed_change_events. Not yet: jobkill
   at OOM, compression, zero-page dedupe, page-table reclaim, page loaning.
+- **K14b: timer queues.** **Done** (2026-10-11): each CPU's timers are a
+  list (owned nodes for thread timeouts, timer objects and timelines, so
+  arming those never fails; 32 slots stay for the kernel's fixed timers),
+  cancellable from any CPU; timer objects cancelled when their last handle
+  closes (Zircon's on_zero_handles). Fixed: a 33rd thread blocking with a
+  deadline on one CPU panicked the kernel; a superseded timeline timer
+  stayed queued until it fired. Interleaved bench (2 x 7 boots per
+  profile against 798fff3): everything within noise but
+  counter.wake_median, +18% (1449 against 1224 ns). That budget is bimodal
+  per boot in both trees with the same modes (~1.2 and ~1.75 us); this
+  tree landed in the fast one in 6 boots of 14, 798fff3 in 10. The waiter
+  arms no timer (its deadline is infinite), so it looks like a per-boot
+  placement or layout effect, not path cost; the recorded history is 1.68
+  us and the limit 2 us. Accepted; to be looked at if the slow mode
+  dominates in recorded runs.
 - **K13j: load balancing.** **Done** (2026-10-11): idle-time work
   stealing of fair threads (Zircon's), from a CPU going idle and an idle
   CPU waking. Interleaved bench: irq.wait_wake_median -60%..-67%, the rest
@@ -870,8 +885,6 @@ from Zircon, see docs/zircon-divergences.md.
   SNAPSHOT_MODIFIED children, slices of anonymous VMOs.
 - IOB, restricted mode, membarrier, thread_raise_exception (ZX_EXCP_USER
   to job debuggers), the ktrace/sampler syscalls (croi has its own).
-- Timers: cancel on the last handle's close; the per-CPU queue's
-  32-entry limit.
 
 **Kernel internals**
 - PT_GNU_RELRO enforcement in the loaders.

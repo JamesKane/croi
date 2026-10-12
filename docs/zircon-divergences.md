@@ -54,9 +54,6 @@ matches the pinned tree where upstream docs or expectations say otherwise).
 - **Interrupt object lifetime** — destroyed with its last reference
   (listed under "Differences from Zircon", K9c). Kind: deliberate. Impact:
   low.
-- **Timer objects** — not cancelled on the last handle's close; the
-  per-CPU kernel timer queue holds 32 entries (NO_RESOURCES beyond). Kind:
-  not yet. Impact: programs with many armed timers.
 - **Missing families** — IOB, restricted mode, membarrier, the
   ktrace/sampler syscalls (croi has its own trace and PMU calls). Kind:
   not yet. Impact: ports of Fuchsia code using them.

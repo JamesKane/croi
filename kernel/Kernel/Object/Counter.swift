@@ -89,14 +89,7 @@ enum Counters {
             waiter.byValue = true
             waiter.atValue = target
             let added = try Observers.add(object, waiter)
-            if object.header.type == .timeline {
-                do throws(Status) {
-                    try Timelines.watchLocked(object)
-                } catch {
-                    Observers.remove(object, added)
-                    throw error
-                }
-            }
+            if object.header.type == .timeline { Timelines.watchLocked(object) }
             return added
         }
         guard let observer else { return }
@@ -139,15 +132,8 @@ enum Counters {
                                         trigger: 0, table: table.address, handle: handle)
                 observer.byValue = true
                 observer.atValue = target
-                let added = try Observers.add(object.object, observer)
-                if object.object.header.type == .timeline {
-                    do throws(Status) {
-                        try Timelines.watchLocked(object.object)
-                    } catch {
-                        Observers.remove(object.object, added)  // its packet is freed below
-                        throw error
-                    }
-                }
+                _ = try Observers.add(object.object, observer)
+                if object.object.header.type == .timeline { Timelines.watchLocked(object.object) }
             }
         } catch {
             record.free()

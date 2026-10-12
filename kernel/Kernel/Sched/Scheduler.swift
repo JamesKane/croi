@@ -481,23 +481,18 @@ enum Scheduler {
         // Zircon's ZX_TIME_INFINITE is INT64_MAX: as good as never, and
         // no timer (each one held a slot in the CPU's queue for good).
         let never = deadline >= UInt64(Int64.max)
-        if never || thread.pointee.timeoutTimer == 0 || thread.pointee.timeoutDeadline != deadline {
-            dropTimeout(thread, me)
+        if never || !thread.pointee.timeoutArmed || thread.pointee.timeoutDeadline != deadline {
+            dropTimeout(thread)
             thread.pointee.waitGeneration &+= 1
             if !never {
-                guard let id = Timers.arm(deadline: deadline, timeoutFired, thread.address,
-                                          context: thread.pointee.waitGeneration) else {
-                    panic("sched: no timer slot for a timeout")
-                }
-                thread.pointee.timeoutTimer = id
+                Timers.arm(thread.timeoutNode, deadline: deadline, timeoutFired, thread.address,
+                           context: thread.pointee.waitGeneration)
+                thread.pointee.timeoutArmed = true
                 thread.pointee.timeoutCpu = me
                 thread.pointee.timeoutDeadline = deadline
             }
         }
         switchAway()
-        if thread.pointee.waitResult == .timedOut {
-            thread.pointee.timeoutTimer = 0  // it fired: nothing to cancel
-        }
         return thread.pointee.waitResult
     }
 
@@ -596,7 +591,7 @@ enum Scheduler {
         // This wait's timer is gone now, whatever the thread is doing: if
         // it was woken first and blocks again for the same deadline, it
         // must arm a new one (keeping this id lost the timeout for good).
-        if thread.pointee.waitGeneration == generation { thread.pointee.timeoutTimer = 0 }
+        if thread.pointee.waitGeneration == generation { thread.pointee.timeoutArmed = false }
         if thread.pointee.state == .blocked, thread.pointee.waitGeneration == generation {
             if let queue = thread.pointee.waitQueue {
                 queue.pointee.remove(thread)
@@ -609,47 +604,44 @@ enum Scheduler {
         lock.unlockMasked()
     }
 
-    /// Forgets a thread's armed timeout: cancelled now if it is on this
-    /// CPU, else queued for `cancelTimeout`. Lock held.
-    private static func dropTimeout(_ thread: ThreadPointer, _ me: Int) {
-        let id = thread.pointee.timeoutTimer
-        guard id != 0 else { return }
-        thread.pointee.timeoutTimer = 0
-        if thread.pointee.timeoutCpu == me {
-            Timers.cancel(id)
-            return
+    /// Forgets a thread's armed timeout, wherever it was armed. One that
+    /// already fired on another CPU may have a callback on its way there
+    /// (waiting for this lock): `cancelTimeout` waits it out. On this CPU a
+    /// fired timer's callback has finished. Lock held.
+    private static func dropTimeout(_ thread: ThreadPointer) {
+        guard thread.pointee.timeoutArmed else { return }
+        thread.pointee.timeoutArmed = false
+        let cpu = thread.pointee.timeoutCpu
+        if !Timers.cancel(thread.timeoutNode, on: cpu), cpu != Int(Cpu.current) {
+            thread.pointee.timeoutStragglers |= 1 << UInt64(cpu)
         }
-        let count = thread.pointee.staleTimerCount
-        guard count < 4 else { panic("sched: too many timeouts left on other CPUs") }
-        thread.pointee.staleTimers[count] = UInt64(thread.pointee.timeoutCpu) << 32 | UInt64(id)
-        thread.pointee.staleTimerCount = count + 1
     }
 
-    /// Cancels the running thread's leftover timeouts and drops the lock
-    /// (held on entry, interrupts masked): a timer firing after its thread
-    /// is freed would touch freed memory. Ones on other CPUs are cancelled
-    /// by IPI once the lock is dropped. (It used to take the lock again for
-    /// this, a second round trip at the end of every `locked`.)
+    /// Cancels the running thread's timeout and drops the lock (held on
+    /// entry, interrupts masked): a timer callback running after its thread
+    /// is freed would touch freed memory. A callback still on its way on
+    /// another CPU is waited out by IPI once the lock is dropped (it needs
+    /// the lock to finish).
     private static func cancelTimeout() {
         let me = Int(Cpu.current)  // afresh: `body` may have switched CPUs
         guard let thread = cpus[me].current else {
             lock.unlockMasked()
             return
         }
-        dropTimeout(thread, me)
-        var stale = thread.pointee.staleTimers
-        let count = thread.pointee.staleTimerCount
-        thread.pointee.staleTimerCount = 0
+        dropTimeout(thread)
+        var stragglers = thread.pointee.timeoutStragglers
+        thread.pointee.timeoutStragglers = 0
         lock.unlockMasked()
-        for i in 0..<count {
-            Ipi.call(onCpu: Int(stale[i] >> 32), cancelTimer, stale[i] & 0xFFFF_FFFF)
-            stale[i] = 0
+        while stragglers != 0 {
+            let cpu = stragglers.trailingZeroBitCount
+            stragglers &= stragglers - 1
+            Ipi.call(onCpu: cpu, timerBarrier, 0)
         }
     }
 
-    private static let cancelTimer: Ipi.Function = { id in
-        Timers.cancel(UInt32(id))
-    }
+    /// Nothing: an IPI is taken with interrupts on, so after the timer
+    /// interrupt (and its callbacks) on that CPU has finished.
+    private static let timerBarrier: Ipi.Function = { _ in }
 
     // MARK: Profiles and inheritance (lock held)
 
@@ -1973,12 +1965,11 @@ enum Scheduler {
             out.write(" queue ")
             out.write(hex: thread.pointee.waitQueue?.address ?? 0)
             out.write(" timer ")
-            out.write(decimal: UInt64(thread.pointee.timeoutTimer))
+            out.write(thread.pointee.timeoutArmed ? "armed" : "none")
             out.write("@")
             out.write(decimal: UInt64(thread.pointee.timeoutCpu))
-            if thread.pointee.timeoutTimer != 0 {
-                let state = Timers.inspect(cpu: thread.pointee.timeoutCpu, id: thread.pointee.timeoutTimer)
-                out.write(state.deadline != nil ? " (pending)" : " (not in its queue)")
+            if thread.pointee.timeoutArmed {
+                out.write(Timers.pendingDeadline(thread.timeoutNode) != nil ? " (pending)" : " (not in its queue)")
             }
             out.write(" deadline ")
             out.write(decimal: thread.pointee.timeoutDeadline)

@@ -126,10 +126,10 @@ struct HandleTable: ~Copyable {
             table.pointee.slots[index].object = 0
             table.pointee.slots[index].generation = (table.pointee.slots[index].generation + 1) & 0xFF
             table.pointee.count -= 1
-            object.header.handleCount.subtract(1, ordering: .relaxed)
             return object
         }
         Observers.handleClosed(object, table: table.address, handle: handle)
+        object.handleGone()
         object.release()
     }
 
@@ -171,15 +171,23 @@ struct HandleTable: ~Copyable {
         let have = try self.rights(of: handle)
         let wanted = rights.contains(.sameRights) ? have : rights
         let ref = try get(handle)
-        try close(handle)
-        guard have.isSuperset(of: wanted) else { throw .invalidArgs }
+        guard have.isSuperset(of: wanted) else {
+            try close(handle)
+            throw .invalidArgs
+        }
+        // The new handle first: the count never passes through zero, which
+        // would run the last handle's hook (a timer would be cancelled).
         ref.object.retain()
+        let added: UInt32
         do throws(Status) {
-            return try add(ref.object, rights: wanted)
+            added = try add(ref.object, rights: wanted)
         } catch {
             ref.object.release()
+            try close(handle)
             throw error
         }
+        try? close(handle)  // closed meanwhile by another thread: gone either way
+        return added
     }
 
     typealias Entry = (value: UInt32, object: UInt64, rights: Rights)

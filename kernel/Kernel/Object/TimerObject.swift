@@ -2,27 +2,24 @@ import CKernel
 import Synchronization
 
 /// Timer objects (K7c, requirement 10; Zircon's TimerDispatcher): an
-/// absolute deadline plus slack, SIGNALED when it fires. A set arms a
-/// per-CPU kernel timer on the calling CPU, holding a reference to the
-/// object; a generation number makes a callback from an older set
-/// harmless, and a cancel reaches the arming CPU by IPI. Threads on a
-/// deadline profile always get zero slack ("RT profiles get zero slack").
-///
-/// Not yet: an armed timer whose last handle closes stays until it fires
-/// (Zircon cancels on zero handles), and the per-CPU kernel timer queue is
-/// a fixed 32 entries (NO_RESOURCES when full) until K3's intrusive queue.
+/// absolute deadline plus slack, SIGNALED when it fires. A set arms the
+/// object's own kernel timer node on the calling CPU (so it never fails),
+/// holding a reference to the object; a generation number makes a callback
+/// from an older set harmless, and a cancel takes the node out of the
+/// arming CPU's queue from wherever it runs. Threads on a deadline profile
+/// always get zero slack ("RT profiles get zero slack"). The last handle's
+/// close cancels it, as Zircon's on_zero_handles does.
 struct TimerObject: ~Copyable {
     var header = ObjectHeader(type: .timer)
     /// Zircon's ZX_TIMER_SLACK_CENTER (0), EARLY (1), LATE (2).
     let slackPolicy: UInt32
     var generation: UInt64 = 0
-    var armedId: UInt32 = 0
+    /// The CPU the node is armed on, or -1.
     var armedCpu = -1
-    /// The kernel timer a cancel IPI is for.
-    var cancelId: UInt32 = 0
-    /// One set or cancel at a time: a blocking lock (it waits for a cancel
-    /// IPI), so a deadline thread waits by lending its profile, not by
-    /// yielding (a yield ends its period: a period's wait per try).
+    var node = TimerNode()
+    /// One set or cancel at a time (a set is a cancel, then an arm): a
+    /// blocking lock, so a deadline thread waits by lending its profile,
+    /// not by yielding (a yield ends its period: a period's wait per try).
     let configuring = Mutex()
 
     static var defaultRights: Rights { .basic | .write | .signal }
@@ -35,6 +32,10 @@ struct TimerObject: ~Copyable {
         unsafeAddress { unsafe UnsafePointer<TimerObject>(bitPattern: UInt(object.address))! }
         nonmutating unsafeMutableAddress { unsafe UnsafeMutablePointer<TimerObject>(bitPattern: UInt(object.address))! }
     }
+
+    var node: TimerNodePointer {
+        withUnsafeMutablePointer(to: &pointee.node) { unsafe TimerNodePointer($0) }
+    }
 }
 
 enum TimerObjects {
@@ -46,7 +47,7 @@ enum TimerObjects {
 
     /// timer_set: fires at `deadline`, within `slack` as the timer's policy
     /// places it. Replaces any earlier set.
-    static func set(_ object: ObjectPointer, deadline: UInt64, slack: UInt64) throws(Status) {
+    static func set(_ object: ObjectPointer, deadline: UInt64, slack: UInt64) {
         let timer = TimerObjectPointer(object: object)
         configure(timer) {
             cancelArmed(timer)
@@ -62,19 +63,13 @@ enum TimerObjects {
                                ? .max : 2 * width)
         }
         object.retain()  // the armed kernel timer's
-        let armed = configure(timer) { () -> Bool in
-            object.header.lock.withLock { () -> Bool in
+        configure(timer) {
+            object.header.lock.withLock {
                 timer.pointee.generation += 1
-                guard let id = Timers.arm(deadline: start, slack: window, fired, object.address,
-                                          context: timer.pointee.generation) else { return false }
-                timer.pointee.armedId = id
+                Timers.arm(timer.node, deadline: start, slack: window, fired, object.address,
+                           context: timer.pointee.generation)
                 timer.pointee.armedCpu = Int(Cpu.current)
-                return true
             }
-        }
-        guard armed else {
-            object.release()
-            throw .noResources
         }
     }
 
@@ -93,26 +88,25 @@ enum TimerObjects {
         timer.pointee.configuring.withLock(body)
     }
 
-    /// Disarms the current set, if any (configuring held).
-    private static func cancelArmed(_ timer: TimerObjectPointer) {
-        let object = timer.object
-        let (id, cpu) = object.header.lock.withLock { () -> (UInt32, Int) in
-            let armed = (timer.pointee.armedId, timer.pointee.armedCpu)
-            timer.pointee.armedId = 0
-            timer.pointee.armedCpu = -1
-            timer.pointee.generation += 1  // a callback already in flight does nothing
-            return armed
-        }
-        guard id != 0 else { return }
-        timer.pointee.cancelId = id
-        _ = Ipi.call(onCpu: cpu, cancelHere, object.address)
+    /// The last handle is gone: disarmed (Zircon's on_zero_handles), so
+    /// the armed timer's reference doesn't keep it until it fires.
+    static func lastHandleClosed(_ object: ObjectPointer) {
+        cancelArmed(TimerObjectPointer(object: object))
     }
 
-    /// On the arming CPU: if the kernel timer hadn't fired, its reference
-    /// is ours to drop (otherwise the callback drops it).
-    private static let cancelHere: Ipi.Function = { address in
-        let object = ObjectPointer(address: address)
-        if Timers.cancel(TimerObjectPointer(object: object).pointee.cancelId) { object.release() }
+    /// Disarms the current set, if any (configuring held, or the last
+    /// handle gone). A kernel timer that hadn't fired gives its reference
+    /// to us to drop; one already firing finds a new generation and drops
+    /// its own.
+    private static func cancelArmed(_ timer: TimerObjectPointer) {
+        let object = timer.object
+        let cancelled = object.header.lock.withLock { () -> Bool in
+            let cpu = timer.pointee.armedCpu
+            timer.pointee.armedCpu = -1
+            timer.pointee.generation += 1  // a callback already in flight does nothing
+            return cpu >= 0 && Timers.cancel(timer.node, on: cpu)
+        }
+        if cancelled { object.release() }
     }
 
     private static let fired: Timers.Callback = { address, generation in
@@ -120,7 +114,6 @@ enum TimerObjects {
         let timer = TimerObjectPointer(object: object)
         let current = object.header.lock.withLock { () -> Bool in
             guard timer.pointee.generation == generation else { return false }
-            timer.pointee.armedId = 0
             timer.pointee.armedCpu = -1
             return true
         }

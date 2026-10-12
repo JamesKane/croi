@@ -11,8 +11,9 @@ import Synchronization
 /// A synthetic timeline has no periodic tick: when a value wait is
 /// registered, `watchLocked` arms one kernel timer for the earliest vblank
 /// any waiter needs, and each firing re-arms for the next, so with nothing
-/// waiting the timeline costs nothing (K10f). The armed timer holds a
-/// reference; a generation number makes a superseded one harmless.
+/// waiting the timeline costs nothing (K10f). The armed timer (its own
+/// node, so arming never fails) holds a reference; a superseded one is
+/// cancelled, and a generation number makes one already firing harmless.
 struct TimelineObject: ~Copyable {
     var header = ObjectHeader(type: .timeline)
     let synthetic: Bool
@@ -25,8 +26,10 @@ struct TimelineObject: ~Copyable {
     let page: VmoPointer
     let pageAddress: UInt64
     var generation: UInt64 = 0
-    /// The vblank the armed timer is for (0: none armed).
+    /// The vblank the armed timer is for (0: none armed), and its CPU.
     var armedFor: UInt64 = 0
+    var armedCpu = 0
+    var timer = TimerNode()
     /// K10c: a deadline profile lent to the threads its waits wake.
     var lend: Profile? = nil
 
@@ -36,6 +39,10 @@ struct TimelineObject: ~Copyable {
 
 @safe struct TimelinePointer {
     let object: ObjectPointer
+
+    var timer: TimerNodePointer {
+        withUnsafeMutablePointer(to: &pointee.timer) { unsafe TimerNodePointer($0) }
+    }
 
     var pointee: TimelineObject {
         unsafeAddress { unsafe UnsafePointer<TimelineObject>(bitPattern: UInt(object.address))! }
@@ -106,7 +113,7 @@ enum Timelines {
     static func setPeriod(_ object: ObjectPointer, _ period: UInt64) throws(Status) {
         guard period >= minimumPeriod else { throw .invalidArgs }
         let t = TimelinePointer(object: object)
-        try object.header.lock.withLock { () throws(Status) in
+        object.header.lock.withLock {
             if t.pointee.synthetic {
                 let now = valueLocked(object)
                 t.pointee.baseTime = time(of: now, t)  // the current vblank
@@ -115,8 +122,8 @@ enum Timelines {
             t.pointee.period = period
             writePage(t)
             if t.pointee.synthetic {
-                t.pointee.armedFor = 0  // re-arm on the new grid
-                try watchLocked(object)
+                disarmLocked(t)  // re-armed on the new grid
+                watchLocked(object)
             }
         }
     }
@@ -129,9 +136,8 @@ enum Timelines {
     static var pageRights: Rights { .basic | .read | .map | .getProperty }
 
     /// A value wait was registered: a synthetic timeline makes sure a timer
-    /// is armed for the earliest vblank any waiter needs. NO_RESOURCES if
-    /// the CPU's timer queue is full. Object lock held.
-    static func watchLocked(_ object: ObjectPointer) throws(Status) {
+    /// is armed for the earliest vblank any waiter needs. Object lock held.
+    static func watchLocked(_ object: ObjectPointer) {
         let t = TimelinePointer(object: object)
         guard t.pointee.synthetic else { return }
         let now = valueLocked(object)
@@ -155,13 +161,20 @@ enum Timelines {
         guard earliest != .max else { return }
         let deadline = time(of: earliest, t)
         guard t.pointee.armedFor == 0 || deadline < t.pointee.armedFor else { return }
-        t.pointee.generation += 1  // an earlier one supersedes the armed one
+        disarmLocked(t)  // an earlier one supersedes the armed one
         object.retain()  // the timer's
-        guard Timers.arm(deadline: deadline, slack: 0, fired, object.address, context: t.pointee.generation) != nil else {
-            object.release()
-            throw .noResources
-        }
+        Timers.arm(t.timer, deadline: deadline, slack: 0, fired, object.address, context: t.pointee.generation)
         t.pointee.armedFor = deadline
+        t.pointee.armedCpu = Int(Cpu.current)
+    }
+
+    /// Cancels the armed timer, if any (object lock held). One already
+    /// firing finds a new generation and drops its own reference.
+    private static func disarmLocked(_ t: TimelinePointer) {
+        t.pointee.generation += 1
+        guard t.pointee.armedFor != 0 else { return }
+        t.pointee.armedFor = 0
+        if Timers.cancel(t.timer, on: t.pointee.armedCpu) { t.object.release() }  // not the last: the caller has one
     }
 
     /// A synthetic vblank someone waits for: wake who it satisfies, arm the
@@ -173,7 +186,7 @@ enum Timelines {
             guard t.pointee.generation == generation else { return }  // superseded
             t.pointee.armedFor = 0
             Observers.notify(object)
-            try? watchLocked(object)
+            watchLocked(object)
         }
         object.release()
     }

@@ -773,6 +773,90 @@ private enum TimerProbe {
     }
 }
 
+/// Owned timer nodes for the time self-test, more than a CPU's slots.
+private enum OwnedTimerProbe {
+    static var count: Int { 200 }
+    /// Heap blocks: `count` nodes, fire times and fire counts.
+    nonisolated(unsafe) static var nodes: UInt64 = 0
+    nonisolated(unsafe) static var firedAt: UInt64 = 0
+    nonisolated(unsafe) static var fires: UInt64 = 0
+    nonisolated(unsafe) static var armedOn = 0
+    static let remoteCancels = Atomic<Int>(0)
+
+    static func node(_ i: Int) -> TimerNodePointer {
+        unsafe TimerNodePointer(UnsafeMutablePointer<TimerNode>(bitPattern: UInt(nodes))! + i)
+    }
+
+    static func slot(_ block: UInt64, _ i: Int) -> UnsafeMutablePointer<UInt64> {
+        unsafe UnsafeMutablePointer<UInt64>(bitPattern: UInt(block))! + i
+    }
+
+    static let record: Timers.Callback = { i, _ in
+        unsafe slot(firedAt, Int(i)).pointee = Clock.now()
+        unsafe slot(fires, Int(i)).pointee += 1
+    }
+
+    /// From another CPU: cancels node `i` where it was armed.
+    static let cancelRemotely: Ipi.Function = { i in
+        if Timers.cancel(node(Int(i)), on: armedOn) { remoteCancels.add(1, ordering: .relaxed) }
+    }
+
+    static func allocate(_ size: Int) -> UInt64 {
+        guard let raw = unsafe heap.allocate(size: size, alignment: 16) else { panic("timer self-test: out of memory") }
+        unsafe raw.initializeMemory(as: UInt8.self, repeating: 0, count: size)
+        return UInt64(UInt(bitPattern: raw))
+    }
+
+    static func free(_ block: UInt64) {
+        unsafe heap.free(UnsafeMutableRawPointer(bitPattern: UInt(block))!)
+    }
+
+    /// 200 nodes on this CPU (its slots are 32) with mixed deadlines and
+    /// slack; every seventh cancelled here, every eleventh from another
+    /// CPU. The rest fire once each, none early; the cancelled never.
+    static func run(others: Int) {
+        let ms: UInt64 = 1_000_000
+        nodes = allocate(count * MemoryLayout<TimerNode>.stride)
+        firedAt = allocate(count * 8)
+        fires = allocate(count * 8)
+        for i in 0..<count { node(i).pointee = TimerNode() }
+        armedOn = Int(Cpu.current)
+        let start = Clock.now()
+        func deadline(_ i: Int) -> UInt64 { start + 2 * ms + UInt64((i * 37) % count) * 50_000 }
+        func remote(_ i: Int) -> Bool { others > 0 && i % 11 == 0 && i % 7 != 0 }
+        for i in 0..<count {
+            Timers.arm(node(i), deadline: deadline(i), slack: UInt64(i % 5) * 200_000, record, UInt64(i))
+        }
+        var remoteExpected = 0
+        for i in 0..<count {
+            if i % 7 == 0 {
+                guard Timers.cancel(node(i), on: armedOn), !Timers.cancel(node(i), on: armedOn) else {
+                    panic("timer self-test: cancelling an owned node")
+                }
+            } else if remote(i) {
+                Ipi.call(onCpu: armedOn == 0 ? 1 : 0, cancelRemotely, UInt64(i))
+                remoteExpected += 1
+            }
+        }
+        guard remoteCancels.load(ordering: .relaxed) == remoteExpected else {
+            panic("timer self-test: a remote cancel missed")
+        }
+        while Clock.now() < start + 30 * ms { arch_spin_pause() }
+        for i in 0..<count {
+            let cancelled = i % 7 == 0 || remote(i)
+            let fired = unsafe slot(fires, i).pointee
+            guard cancelled ? fired == 0 : fired == 1 else { panic("timer self-test: an owned node fired wrongly") }
+            guard cancelled || (unsafe slot(firedAt, i).pointee) >= deadline(i) else {
+                panic("timer self-test: an owned node fired early")
+            }
+            guard Timers.pendingDeadline(node(i)) == nil else { panic("timer self-test: a node still queued") }
+        }
+        free(nodes)
+        free(firedAt)
+        free(fires)
+    }
+}
+
 /// The clock never goes backwards; timers fire no earlier than their
 /// deadline, overlapping windows coalesce into one interrupt, cancelled
 /// timers don't fire, and every CPU's timer hardware works.
@@ -828,6 +912,8 @@ private func timeSelfTest(others: Int, _ console: Uart) {
     Timers.cancel(farTimer)
     arch_interrupts_restore(saved)
     guard armedTarget <= Clock.now() + Timers.maxDistance else { panic("timer self-test: hardware armed too far out") }
+
+    OwnedTimerProbe.run(others: others)
 
     Ipi.callOthers(TimerProbe.armOnThisCpu, 0)
     let deadline = Clock.now() + 1_000 * ms

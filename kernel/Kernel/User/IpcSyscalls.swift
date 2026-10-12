@@ -356,11 +356,11 @@ extension Syscalls {
             do throws(Status) {
                 let (object, rights) = try table.take(values[i])
                 guard object.address != channel.address else {
-                    object.release()
+                    object.releaseTaken()
                     throw .notSupported
                 }
                 guard rights.contains(.transfer) else {
-                    object.release()
+                    object.releaseTaken()
                     throw .accessDenied
                 }
                 message.setHandle(i, object: object.address, rights: rights)
@@ -422,7 +422,7 @@ extension Syscalls {
                     object = ref.object
                 default:
                     let (taken, _) = try table.take(entry.handle)
-                    taken.release()
+                    taken.releaseTaken()
                     throw .invalidArgs
                 }
                 var wanted = Rights(rawValue: entry.rights)
@@ -436,7 +436,7 @@ extension Syscalls {
                         throw .accessDenied
                     }
                 } catch {
-                    object.release()
+                    object.releaseTaken()  // a DUPLICATE's handle is still there: no hook
                     throw error
                 }
                 message.setHandle(i, object: object.address, rights: wanted)

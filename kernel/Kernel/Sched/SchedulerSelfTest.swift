@@ -57,6 +57,18 @@ enum SchedulerSelfTest {
             guard ping.join() == 0, pong.join() == 0 else { panic("sched self-test: ping-pong") }
         }
 
+        // More sleepers on one CPU than its timer queue used to hold (32: a
+        // 33rd thread blocking with a deadline panicked), each woken no
+        // earlier than its own deadline.
+        sleepersFrom = Clock.now() + 20 * ms
+        var sleepers = UniqueArray<ThreadHandle>(capacity: 64)
+        for i in 0..<64 {
+            sleepers.append(spawn("sleeper", last, sleeper, UInt64(i)))
+        }
+        while let handle = sleepers.popLast() {
+            guard handle.join() == 0 else { panic("sched self-test: a sleeper woke early or its timer isn't its own") }
+        }
+
         // Sleeping, and a wait that times out.
         var start = Clock.now()
         Scheduler.sleep(until: start + 5 * ms)
@@ -206,6 +218,20 @@ enum SchedulerSelfTest {
     }
 
     private static let lock = SpinLock()
+
+    nonisolated(unsafe) static var sleepersFrom: UInt64 = 0
+
+    /// Sleeps until its own deadline (spread 100 us apart); 0 if it woke
+    /// no earlier and its timeout node lies in its thread record.
+    private static let sleeper: Thread.Entry = { index in
+        let thread = Scheduler.current
+        let node = thread.timeoutNode.address
+        guard node >= thread.address, node + UInt64(MemoryLayout<TimerNode>.size)
+                <= thread.address + UInt64(MemoryLayout<Thread>.size) else { return 1 }
+        let deadline = sleepersFrom + index * 100_000
+        Scheduler.sleep(until: deadline)
+        return Clock.now() >= deadline ? 0 : 2
+    }
 
     private static let worker: Thread.Entry = { index in
         guard index < 1000 else { return 0 }

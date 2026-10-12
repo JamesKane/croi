@@ -1,20 +1,63 @@
 import CKernel
+import Synchronization
 
-/// One pending timer: fire `callback(argument)` somewhere in
-/// [deadline, latest] (monotonic ns; latest = deadline + slack).
-struct TimerEntry {
-    var id: UInt32 = 0  // 0: free slot
+/// A timer: fire `callback(argument, context)` somewhere in [deadline,
+/// latest] (monotonic ns; latest = deadline + slack). The fields are the
+/// queue's while it is armed.
+///
+/// Kernel code that keeps a fixed number of timers takes one of its CPU's
+/// slots (`Timers.arm(deadline:...)`, an id back). Anything whose count
+/// user space decides (thread timeouts, timer objects, timelines) owns its
+/// node, embedded in its record as Zircon's Timer is, and arms that
+/// (`Timers.arm(_:deadline:...)`), which never fails. An owned node must
+/// stay put, and alive, while armed.
+struct TimerNode {
     var deadline: UInt64 = 0
     var latest: UInt64 = 0
     var callback: Timers.Callback?
     var argument: UInt64 = 0
     var context: UInt64 = 0
+    /// A slot's id while armed (0 for a free slot and for owned nodes).
+    fileprivate(set) var id: UInt32 = 0
+    /// The CPU whose queue holds it, or -1. Written under that queue's lock.
+    fileprivate(set) var cpu: Int32 = -1
+    /// Links in the queue (node addresses, 0 for none).
+    fileprivate var next: UInt64 = 0
+    fileprivate var previous: UInt64 = 0
 }
 
-/// A CPU's pending timers, in its PerCpu record. Touched only by its own
-/// CPU with interrupts masked.
-struct TimerQueue {
-    var entries = InlineArray<32, TimerEntry>(repeating: TimerEntry())
+@safe struct TimerNodePointer: Equatable {
+    let address: UInt64
+
+    /// `node` stays where it is while armed (a field of a heap record,
+    /// reached through its addressor).
+    @unsafe init(_ node: UnsafeMutablePointer<TimerNode>) {
+        address = UInt64(UInt(bitPattern: node))
+    }
+
+    fileprivate init(address: UInt64) {
+        self.address = address
+    }
+
+    var pointee: TimerNode {
+        unsafeAddress { unsafe UnsafePointer<TimerNode>(bitPattern: UInt(address))! }
+        nonmutating unsafeMutableAddress { unsafe UnsafeMutablePointer<TimerNode>(bitPattern: UInt(address))! }
+    }
+}
+
+/// A CPU's pending timers, in a list by `latest` (earliest first, FIFO
+/// among equals), under `lock`: its own CPU arms, fires and cancels with
+/// interrupts masked; another CPU may cancel an owned node (`cancel(_:on:)`).
+/// The hardware fields are the owning CPU's alone.
+struct TimerQueue: ~Copyable {
+    /// Slot timers' nodes. First: slot i is at the queue's address + i strides.
+    var slots = InlineArray<32, TimerNode>(repeating: TimerNode())
+    var head: UInt64 = 0
+    var count = 0
+    /// The largest slack (latest - deadline) among timers armed since the
+    /// queue was last empty: a timer due by `now` has `latest` no later
+    /// than now + maxSlack, which bounds the interrupt's walk.
+    var maxSlack: UInt64 = 0
     var nextId: UInt32 = 1
     /// What the hardware is armed for (monotonic ns), or .max; never later
     /// than the earliest pending `latest` (it may be earlier: see
@@ -25,12 +68,28 @@ struct TimerQueue {
     /// lead) and when it was set: what an early interrupt is measured by.
     var hardwareTarget: UInt64 = 0
     var hardwareArmedAt: UInt64 = 0
+    /// 1 while held (interrupts masked). A leaf: callbacks run without it.
+    let lock = Atomic<UInt32>(0)
+
+    init() {}
+}
+
+@safe struct TimerQueuePointer {
+    let address: UInt64
+
+    var pointee: TimerQueue {
+        unsafeAddress { unsafe UnsafePointer<TimerQueue>(bitPattern: UInt(address))! }
+        nonmutating unsafeMutableAddress { unsafe UnsafeMutablePointer<TimerQueue>(bitPattern: UInt(address))! }
+    }
 }
 
 /// Tickless per-CPU one-shot timers (roadmap K2b). The hardware is armed
 /// only for the earliest `latest` among pending timers; when it fires,
 /// every timer whose deadline has passed runs. Timers whose windows
 /// overlap therefore coalesce into one interrupt; zero slack is exact.
+/// Each CPU's queue is a list by `latest` (the head arms the hardware), so
+/// it holds any number (K14b; it was a 32-slot array, and a 33rd thread
+/// blocking with a deadline on one CPU panicked).
 ///
 /// amd64: local APIC TSC-deadline mode (one-shot mode as the fallback).
 /// arm64: the EL1 virtual timer (its PPI from the GTDT). rv64: SBI
@@ -94,46 +153,144 @@ enum Timers {
         #endif
     }
 
-    /// Arms a timer on this CPU. Returns its id (for `cancel`), or nil if
-    /// this CPU's queue is full.
+    /// Arms one of this CPU's slots. Returns its id (for `cancel`), or nil
+    /// if every slot is taken (kernel code with a fixed number of timers;
+    /// anything else owns its node).
     @discardableResult
     static func arm(
         deadline: UInt64, slack: UInt64 = 0, _ callback: Callback, _ argument: UInt64, context: UInt64 = 0
     ) -> UInt32? {
         let saved = arch_interrupts_save()
         defer { arch_interrupts_restore(saved) }
-        let queue = unsafe self.queue
-        for i in 0..<32 where unsafe queue.pointee.entries[i].id == 0 {
-            let id = unsafe queue.pointee.nextId
-            unsafe queue.pointee.nextId = id == .max ? 1 : id + 1
-            let latest = deadline.addingReportingOverflow(slack).overflow ? .max : deadline + slack
-            unsafe queue.pointee.entries[i] = TimerEntry(id: id, deadline: deadline, latest: latest,
-                                                         callback: callback, argument: argument, context: context)
-            // The hardware is never armed later than any other pending
-            // timer's `latest`, so only this one can make it sooner: no
-            // scan (the scheduler arms and cancels at every switch).
-            if unsafe latest < queue.pointee.programmed {
-                unsafe queue.pointee.programmed = latest
-                armHardware(atNanoseconds: latest)
-            }
+        let queue = self.queue
+        for i in 0..<32 where queue.pointee.slots[i].id == 0 {
+            let id = queue.pointee.nextId
+            queue.pointee.nextId = id == .max ? 1 : id + 1
+            let node = TimerNodePointer(address: queue.address + UInt64(i * MemoryLayout<TimerNode>.stride))
+            node.pointee.id = id
+            insert(node, deadline: deadline, slack: slack, callback, argument, context)
             return id
         }
         return nil
     }
 
-    /// Cancels a timer on this CPU. False if it already fired (or never was).
-    @discardableResult
-    static func cancel(_ id: UInt32) -> Bool {
+    /// Arms an owned node on this CPU (it must not be armed already).
+    static func arm(
+        _ node: TimerNodePointer, deadline: UInt64, slack: UInt64 = 0, _ callback: Callback, _ argument: UInt64,
+        context: UInt64 = 0
+    ) {
         let saved = arch_interrupts_save()
         defer { arch_interrupts_restore(saved) }
-        let queue = unsafe self.queue
-        for i in 0..<32 where unsafe queue.pointee.entries[i].id == id {
-            // The hardware stays armed: an early interrupt finds nothing
-            // due and re-arms for what is left (`program`).
-            unsafe queue.pointee.entries[i] = TimerEntry()
+        guard node.pointee.cpu < 0 else { panic("timers: node armed twice") }
+        insert(node, deadline: deadline, slack: slack, callback, argument, context)
+    }
+
+    /// Cancels slot timer `id` on this CPU. False if it already fired (or
+    /// never was).
+    @discardableResult
+    static func cancel(_ id: UInt32) -> Bool {
+        guard id != 0 else { return false }
+        let saved = arch_interrupts_save()
+        defer { arch_interrupts_restore(saved) }
+        let queue = self.queue
+        for i in 0..<32 where queue.pointee.slots[i].id == id {
+            let node = TimerNodePointer(address: queue.address + UInt64(i * MemoryLayout<TimerNode>.stride))
+            lock(queue)
+            unlink(node, queue)
+            unlock(queue)
             return true
         }
         return false
+    }
+
+    /// Cancels an owned node armed on `cpu` (any CPU may ask). False if it
+    /// isn't armed there: it fired, and on another CPU its callback may
+    /// still be running (on this one, with interrupts masked, it has
+    /// finished). The hardware stays armed: an early interrupt finds
+    /// nothing due and re-arms for what is left (`program`).
+    @discardableResult
+    static func cancel(_ node: TimerNodePointer, on cpu: Int) -> Bool {
+        let saved = arch_interrupts_save()
+        defer { arch_interrupts_restore(saved) }
+        let queue = self.queue(of: cpu)
+        lock(queue)
+        defer { unlock(queue) }
+        guard node.pointee.cpu == Int32(cpu) else { return false }
+        unlink(node, queue)
+        return true
+    }
+
+    /// Links `node` into this CPU's queue (interrupts masked).
+    private static func insert(
+        _ node: TimerNodePointer, deadline: UInt64, slack: UInt64, _ callback: Callback, _ argument: UInt64,
+        _ context: UInt64
+    ) {
+        let queue = self.queue
+        let latest = deadline.addingReportingOverflow(slack).overflow ? .max : deadline + slack
+        node.pointee.deadline = deadline
+        node.pointee.latest = latest
+        node.pointee.callback = callback
+        node.pointee.argument = argument
+        node.pointee.context = context
+        lock(queue)
+        var previous: UInt64 = 0
+        var cursor = queue.pointee.head
+        while cursor != 0, TimerNodePointer(address: cursor).pointee.latest <= latest {
+            previous = cursor
+            cursor = TimerNodePointer(address: cursor).pointee.next
+        }
+        node.pointee.previous = previous
+        node.pointee.next = cursor
+        if cursor != 0 { TimerNodePointer(address: cursor).pointee.previous = node.address }
+        if previous != 0 {
+            TimerNodePointer(address: previous).pointee.next = node.address
+        } else {
+            queue.pointee.head = node.address
+        }
+        node.pointee.cpu = Int32(Cpu.current)
+        queue.pointee.count += 1
+        queue.pointee.maxSlack = max(queue.pointee.maxSlack, latest - deadline)
+        unlock(queue)
+        // The hardware is never armed later than any other pending
+        // timer's `latest`, so only this one can make it sooner (the
+        // scheduler arms and cancels at every switch).
+        if latest < queue.pointee.programmed {
+            queue.pointee.programmed = latest
+            armHardware(atNanoseconds: latest)
+        }
+    }
+
+    /// Takes `node` out of `queue` (its lock held).
+    private static func unlink(_ node: TimerNodePointer, _ queue: TimerQueuePointer) {
+        let next = node.pointee.next, previous = node.pointee.previous
+        if next != 0 { TimerNodePointer(address: next).pointee.previous = previous }
+        if previous != 0 {
+            TimerNodePointer(address: previous).pointee.next = next
+        } else {
+            queue.pointee.head = next
+        }
+        node.pointee.next = 0
+        node.pointee.previous = 0
+        node.pointee.id = 0
+        node.pointee.cpu = -1
+        queue.pointee.count -= 1
+        if queue.pointee.count == 0 { queue.pointee.maxSlack = 0 }
+    }
+
+    private static func lock(_ queue: TimerQueuePointer) {
+        while !queue.pointee.lock.compareExchange(expected: 0, desired: 1, ordering: .acquiring).exchanged {
+            while queue.pointee.lock.load(ordering: .relaxed) != 0 { arch_spin_pause() }
+        }
+    }
+
+    private static func unlock(_ queue: TimerQueuePointer) {
+        queue.pointee.lock.store(0, ordering: .releasing)
+    }
+
+    /// The earliest pending `latest`, or .max.
+    private static func earliestLatest(_ queue: TimerQueuePointer) -> UInt64 {
+        let head = queue.pointee.head
+        return head == 0 ? .max : TimerNodePointer(address: head).pointee.latest
     }
 
     /// Before this CPU idles (polls or halts; interrupts masked): the hardware
@@ -141,13 +298,12 @@ enum Timers {
     /// leaves it armed for speed, which on an idle CPU is a wakeup for
     /// nothing (K10f: an idle machine takes none).
     static func settle() {
-        let queue = unsafe self.queue
-        var earliest = UInt64.max
-        for i in 0..<32 where unsafe queue.pointee.entries[i].id != 0 {
-            earliest = min(earliest, unsafe queue.pointee.entries[i].latest)
-        }
-        guard unsafe earliest > queue.pointee.programmed else { return }
-        unsafe queue.pointee.programmed = earliest
+        let queue = self.queue
+        lock(queue)
+        let earliest = earliestLatest(queue)
+        unlock(queue)
+        guard earliest > queue.pointee.programmed else { return }
+        queue.pointee.programmed = earliest
         if earliest == .max { disarmHardware() } else { armHardware(atNanoseconds: earliest) }
     }
 
@@ -170,22 +326,14 @@ enum Timers {
 
     /// The timer interrupt (interrupts masked).
     static func handleInterrupt() {
-        let queue = unsafe self.queue
-        unsafe queue.pointee.interrupts += 1
-        unsafe queue.pointee.programmed = .max
+        let queue = self.queue
+        queue.pointee.interrupts += 1
+        queue.pointee.programmed = .max
         var now = Clock.now()
-        // Early by a little (KVM's TSC deadline came ~240 us early for a
-        // timer 10 s out, ~24 ppm): wait for the earliest instead of
-        // re-arming for it, which was a second wakeup (K10f). Timers
-        // never run early.
-        var earliest = UInt64.max
-        for i in 0..<32 where unsafe queue.pointee.entries[i].id != 0 {
-            earliest = min(earliest, unsafe queue.pointee.entries[i].deadline)
-        }
         // An interrupt before the hardware's own target teaches the lead:
         // in ppm of the distance it was armed for (ten ms or more, and
         // under 1%, so a stale or odd reading can't teach nonsense).
-        let target = unsafe queue.pointee.hardwareTarget, armedAt = unsafe queue.pointee.hardwareArmedAt
+        let target = queue.pointee.hardwareTarget, armedAt = queue.pointee.hardwareArmedAt
         if target > now, target > armedAt, target - armedAt >= 10_000_000 {
             let early = target - now, distance = target - armedAt
             if early < distance / 100 {
@@ -193,52 +341,106 @@ enum Timers {
                 leadPpm = min(leadPpm + ppm, 2_000)
             }
         }
+        // Early by a little (KVM's TSC deadline came ~240 us early for a
+        // timer 10 s out, ~24 ppm): wait for the earliest instead of
+        // re-arming for it, which was a second wakeup (K10f). Timers
+        // never run early.
+        lock(queue)
+        let earliest = earliestDeadline(queue)
+        unlock(queue)
         if earliest > now, earliest - now <= earlyTolerance {
             while now < earliest {
                 arch_spin_pause()
                 now = Clock.now()
             }
         }
-        for i in 0..<32 {
-            let entry = unsafe queue.pointee.entries[i]
-            guard entry.id != 0, entry.deadline <= now, let callback = entry.callback else { continue }
-            unsafe queue.pointee.entries[i] = TimerEntry()  // free first: the callback may re-arm
-            callback(entry.argument, entry.context)
+        // Every timer due by `now`, one at a time: a callback may arm and
+        // cancel, so the walk starts over after each.
+        while true {
+            lock(queue)
+            guard let node = firstDue(queue, now) else {
+                unlock(queue)
+                break
+            }
+            let entry = node.pointee
+            unlink(node, queue)  // first: the callback may re-arm it
+            unlock(queue)
+            // Not a field of the node from here on: its owner may free it
+            // as soon as the callback has run.
+            if let callback = entry.callback { callback(entry.argument, entry.context) }
             unsafe UnsafeMutablePointer<PerCpu>(bitPattern: UInt(arch_percpu()))!.pointee.stats.timerCallbacks += 1
         }
         program()
         // Nothing left: the arm64 virtual timer and the SBI timer stay
         // pending until told otherwise.
-        if unsafe queue.pointee.programmed == .max { disarmHardware() }
+        if queue.pointee.programmed == .max { disarmHardware() }
+    }
+
+    /// The first timer due by `now` (lock held). One is due only if its
+    /// `latest` is at most now + maxSlack, so the walk stops there.
+    private static func firstDue(_ queue: TimerQueuePointer, _ now: UInt64) -> TimerNodePointer? {
+        let slack = queue.pointee.maxSlack
+        let horizon = now &+ slack < now ? UInt64.max : now + slack
+        var cursor = queue.pointee.head
+        while cursor != 0 {
+            let node = TimerNodePointer(address: cursor)
+            guard node.pointee.latest <= horizon else { return nil }
+            if node.pointee.deadline <= now { return node }
+            cursor = node.pointee.next
+        }
+        return nil
+    }
+
+    /// The earliest pending deadline, or .max (lock held): no timer whose
+    /// `latest` is past it + maxSlack can beat it.
+    private static func earliestDeadline(_ queue: TimerQueuePointer) -> UInt64 {
+        let slack = queue.pointee.maxSlack
+        var earliest = UInt64.max
+        var cursor = queue.pointee.head
+        while cursor != 0 {
+            let node = TimerNodePointer(address: cursor)
+            let bound = earliest &+ slack < earliest ? UInt64.max : earliest + slack
+            guard node.pointee.latest <= bound else { break }
+            earliest = min(earliest, node.pointee.deadline)
+            cursor = node.pointee.next
+        }
+        return earliest
     }
 
     /// Diagnostics: another CPU's queue (read racily): the deadline of
-    /// timer `id` if pending, what the hardware is armed for, pending
+    /// slot timer `id` if pending, what the hardware is armed for, pending
     /// count and interrupts taken.
     static func inspect(cpu: Int, id: UInt32) -> (deadline: UInt64?, programmed: UInt64, pending: Int, interrupts: UInt64) {
-        let record = unsafe UnsafePointer<PerCpu>(bitPattern: UInt(Smp.records[cpu]))!
-        let queue = unsafe UnsafePointer<TimerQueue>(bitPattern: UInt(record.pointee.timerQueue))!
+        let queue = self.queue(of: cpu)
         var deadline: UInt64? = nil
-        var pending = 0
-        for i in 0..<32 where unsafe queue.pointee.entries[i].id != 0 {
-            pending += 1
-            if unsafe queue.pointee.entries[i].id == id { deadline = unsafe queue.pointee.entries[i].deadline }
+        for i in 0..<32 where id != 0 && queue.pointee.slots[i].id == id {
+            deadline = queue.pointee.slots[i].deadline
         }
-        return unsafe (deadline, queue.pointee.programmed, pending, queue.pointee.interrupts)
+        return (deadline, queue.pointee.programmed, queue.pointee.count, queue.pointee.interrupts)
+    }
+
+    /// Diagnostics: an owned node's deadline if it is armed (racy).
+    static func pendingDeadline(_ node: TimerNodePointer) -> UInt64? {
+        node.pointee.cpu >= 0 ? node.pointee.deadline : nil
     }
 
     /// When this CPU's hardware was last armed to fire (ns; the time
     /// self-test's check of `maxDistance`).
-    static var hardwareTarget: UInt64 { unsafe queue.pointee.hardwareTarget }
+    static var hardwareTarget: UInt64 { queue.pointee.hardwareTarget }
 
     /// Timer interrupts this CPU has taken.
-    static var interruptCount: UInt64 { unsafe queue.pointee.interrupts }
+    static var interruptCount: UInt64 { queue.pointee.interrupts }
 
     // MARK: Hardware
 
-    private static var queue: UnsafeMutablePointer<TimerQueue> {
+    private static var queue: TimerQueuePointer {
         let record = unsafe UnsafePointer<PerCpu>(bitPattern: UInt(arch_percpu()))!
-        return unsafe UnsafeMutablePointer<TimerQueue>(bitPattern: UInt(record.pointee.timerQueue))!
+        return unsafe TimerQueuePointer(address: record.pointee.timerQueue)
+    }
+
+    private static func queue(of cpu: Int) -> TimerQueuePointer {
+        let record = unsafe UnsafePointer<PerCpu>(bitPattern: UInt(Smp.records[cpu]))!
+        return unsafe TimerQueuePointer(address: record.pointee.timerQueue)
     }
 
     /// After an interrupt: arms the hardware for the earliest `latest` left.
@@ -249,13 +451,12 @@ enum Timers {
     /// switch under KVM (the scheduler re-arms its slice timer at each
     /// one); now it is at most one interrupt per slice.
     private static func program() {
-        let queue = unsafe self.queue
-        var earliest = UInt64.max
-        for i in 0..<32 where unsafe queue.pointee.entries[i].id != 0 {
-            earliest = min(earliest, unsafe queue.pointee.entries[i].latest)
-        }
-        guard unsafe earliest < queue.pointee.programmed else { return }
-        unsafe queue.pointee.programmed = earliest
+        let queue = self.queue
+        lock(queue)
+        let earliest = earliestLatest(queue)
+        unlock(queue)
+        guard earliest < queue.pointee.programmed else { return }
+        queue.pointee.programmed = earliest
         armHardware(atNanoseconds: earliest)
     }
 
@@ -264,7 +465,7 @@ enum Timers {
         // Later by the learned lead (K10f: a 60 s sleep came ~1.4 ms early
         // under KVM, past what an interrupt waits out, and re-arming was a
         // second wakeup). At worst a long timer runs a few ppm late.
-        let queue = unsafe self.queue
+        let queue = self.queue
         let nowNs = Clock.nanoseconds(counter: now)
         let distance = requested > nowNs ? requested - nowNs : 0
         #if arch(x86_64)
@@ -287,8 +488,8 @@ enum Timers {
         // Todhchai's pthread test). Reaching the cap, the interrupt finds
         // nothing due and arms for what is left: one wakeup per cap.
         let ns = min(requested &+ extra < requested ? .max : requested + extra, nowNs + Self.maxDistance)
-        unsafe queue.pointee.hardwareTarget = ns
-        unsafe queue.pointee.hardwareArmedAt = nowNs
+        queue.pointee.hardwareTarget = ns
+        queue.pointee.hardwareArmedAt = nowNs
         let counter = max(Clock.counter(atNanoseconds: ns), now + 1)
         #if arch(x86_64)
         if deadlineMode {

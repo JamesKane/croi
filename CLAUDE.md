@@ -459,13 +459,16 @@ syscalls 90-97 in User/SyncSyscalls.swift):
   writable mappings cover the range (`UserAspace.covers`): nothing is
   read or written, so any size works and a concurrent user write isn't
   clobbered; the copy out still recovers from faults.
-- Timer objects (22): set arms a per-CPU kernel timer holding a reference
-  (generation numbers ignore stale callbacks; cancel IPIs the arming
-  CPU); slack windows as Zircon's center/early/late; zero slack for a
+- Timer objects (22): set arms the object's own timer node on the calling
+  CPU, holding a reference (generation numbers ignore stale callbacks;
+  cancel takes the node out of the arming CPU's queue from anywhere);
+  slack windows as Zircon's center/early/late; zero slack for a
   thread on a deadline profile. Set and cancel clear SIGNALED (cancel
-  too for a timer that already fired, as Zircon's). Not yet: cancel on
-  last handle close; the
-  kernel timer queue's 32-entry limit (NO_RESOURCES).
+  too for a timer that already fired, as Zircon's). The last handle's
+  close cancels (K14b: `Objects.lastHandleClosed`, Zircon's
+  on_zero_handles, run from `HandleTable.close`, a freed message's
+  handles and `releaseTaken`; handle_replace adds the new handle before
+  closing the old so the count never passes through 0).
 
 Exceptions and job policy (K7d, Kernel/Object/Exception.swift, task.h,
 syscalls 100-107 in User/ExceptionSyscalls.swift):
@@ -1814,8 +1817,18 @@ tickless per-CPU one-shot timers, `arm(deadline:slack:callback, arg)` /
 for the earliest deadline+slack; when it fires every due timer runs, so
 overlapping windows coalesce and zero slack is exact. amd64 TSC-deadline
 (LAPIC one-shot fallback, tested with `-cpu max,-tsc-deadline`), arm64
-virtual timer (GTDT PPI), rv64 SBI set_timer. The queue is a fixed array
-per CPU for now; K3's thread timers will need an intrusive structure.
+virtual timer (GTDT PPI), rv64 SBI set_timer. K14b: each CPU's queue is
+a list by `latest` under a leaf lock (`TimerNode`s; the head arms the
+hardware; `maxSlack` bounds the interrupt's walk for due timers). Kernel
+code with a fixed number of timers uses the CPU's 32 slots (`arm(deadline:
+...)` -> id, `cancel(id)` on that CPU); anything whose count user space
+decides owns a node in its record (thread timeouts, timer objects,
+timelines: `arm(node, ...)`, never fails; `cancel(node, on: cpu)` from any
+CPU, false once it fired, when on another CPU its callback may still be
+running). A thread whose timeout fired elsewhere as it cancelled waits
+that CPU out by IPI (`timeoutStragglers`) before leaving the scheduler.
+It was a 32-entry array: a 33rd thread blocking with a deadline on one CPU
+panicked, a 33rd timer object was NO_RESOURCES.
 QEMU TCG has no TSC-deadline mode, so amd64 TCG runs use the LAPIC
 one-shot timer: its count comes from the same counter read that bounds
 the deadline (a second read past it wrapped the delta and fired a due

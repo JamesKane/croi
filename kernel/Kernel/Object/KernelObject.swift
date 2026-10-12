@@ -59,6 +59,22 @@ struct ObjectHeader: ~Copyable {
         Objects.destroy(self)
     }
 
+    /// A handle to it is gone for good (closed, or freed with the message
+    /// carrying it): after the last, the type's on_zero_handles (Zircon's).
+    /// The caller still holds the handle's reference.
+    func handleGone() {
+        if header.handleCount.subtract(1, ordering: .acquiringAndReleasing).newValue == 0 {
+            Objects.lastHandleClosed(self)
+        }
+    }
+
+    /// Drops the reference `HandleTable.take` handed over when the handle
+    /// isn't placed anywhere after all (a refused channel write).
+    func releaseTaken() {
+        if header.handleCount.load(ordering: .acquiring) == 0 { Objects.lastHandleClosed(self) }
+        release()
+    }
+
     /// Clears then sets signal bits and runs the observers the new state
     /// satisfies. Lock order: object -> scheduler -> port packets.
     func updateSignals(clear: UInt32, set: UInt32) {
@@ -99,6 +115,15 @@ enum Objects {
         unsafe raw.bindMemory(to: T.self, capacity: 1).initialize(to: value)
         live.add(1, ordering: .relaxed)
         return ObjectPointer(address: UInt64(UInt(bitPattern: raw)))
+    }
+
+    /// Zircon's on_zero_handles: the last handle is gone, though kernel
+    /// references may remain.
+    static func lastHandleClosed(_ object: ObjectPointer) {
+        switch object.header.type {
+        case .timer: TimerObjects.lastHandleClosed(object)
+        default: break
+        }
     }
 
     static func destroy(_ object: ObjectPointer) {

@@ -19,7 +19,7 @@ struct PerCpu: ~Copyable {
     let ipiPending = Atomic<UInt32>(0)
     /// This CPU's interrupt controller is set up: it can take IPIs.
     let interruptsReady = Atomic<Bool>(false)
-    /// This CPU's TimerQueue (heap; only this CPU touches it).
+    /// This CPU's TimerQueue (heap; other CPUs only cancel owned nodes).
     let timerQueue: UInt64
     /// Placement (filled from the PPTT by the boot CPU; coreType by itself).
     var topology = CpuTopology()

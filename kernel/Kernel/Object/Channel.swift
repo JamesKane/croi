@@ -113,7 +113,7 @@ struct MessageHeader {
         for i in 0..<Int(pointee.handles) {
             let object = handle(i).object
             if object != 0 {
-                ObjectPointer(address: object).header.handleCount.subtract(1, ordering: .relaxed)
+                ObjectPointer(address: object).handleGone()
                 ObjectPointer(address: object).release()
             }
         }

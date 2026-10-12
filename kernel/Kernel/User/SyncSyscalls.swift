@@ -29,7 +29,7 @@ extension Syscalls {
         case 96:  // timer_set(timer, deadline, slack)
             guard Int64(bitPattern: a[2]) >= 0 else { throw .outOfRange }
             let timer = try table.get(UInt32(truncatingIfNeeded: a[0]), type: .timer, rights: .write)
-            try TimerObjects.set(timer.object, deadline: a[1], slack: a[2])
+            TimerObjects.set(timer.object, deadline: a[1], slack: a[2])
         case 97:  // timer_cancel(timer)
             let timer = try table.get(UInt32(truncatingIfNeeded: a[0]), type: .timer, rights: .write)
             TimerObjects.cancel(timer.object)

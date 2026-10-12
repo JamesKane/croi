@@ -65,14 +65,16 @@ struct Thread: ~Copyable {
     var waitQueue: QueuePointer?
     var waitResult = WaitResult.woken
     var waitGeneration: UInt64 = 0
-    /// The armed timeout, if any. Timers belong to the CPU that armed them,
-    /// so one on another CPU is cancelled by IPI once the scheduler lock is
-    /// dropped; until then it waits in `staleTimers` (cpu << 32 | id).
-    var timeoutTimer: UInt32 = 0
+    /// The timeout's timer (owned), armed on `timeoutCpu` for
+    /// `timeoutDeadline` while `timeoutArmed`.
+    var timeoutNode = TimerNode()
+    var timeoutArmed = false
     var timeoutCpu = 0
     var timeoutDeadline: UInt64 = 0
-    var staleTimers = InlineArray<4, UInt64>(repeating: 0)
-    var staleTimerCount = 0
+    /// CPUs where a timeout's callback may still be running (it fired as
+    /// the thread cancelled it): waited out by IPI once the scheduler lock
+    /// is dropped, so no callback touches the thread after it is freed.
+    var timeoutStragglers: UInt64 = 0
     var exitCode = 0
     /// Dead and switched off its stack: safe to free.
     var switchedOut = false
@@ -162,6 +164,11 @@ struct Thread: ~Copyable {
     var pointee: Thread {
         unsafeAddress { unsafe UnsafePointer<Thread>(bitPattern: UInt(address))! }
         nonmutating unsafeMutableAddress { unsafe UnsafeMutablePointer<Thread>(bitPattern: UInt(address))! }
+    }
+
+    /// The timeout's node, in the record.
+    var timeoutNode: TimerNodePointer {
+        withUnsafeMutablePointer(to: &pointee.timeoutNode) { unsafe TimerNodePointer($0) }
     }
 }
 

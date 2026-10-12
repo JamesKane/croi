@@ -3800,6 +3800,35 @@ static int64_t futex_deadlines(const startup_t *s) {
   return 0;
 }
 
+// K14b: a CPU's kernel timers are a list, not 32 slots: timer objects
+// armed from one thread (so on one CPU, mostly) past the old limit all
+// fire, and handle_replace keeps a timer armed (it closed the old handle
+// first, and the last handle's close now cancels).
+static int64_t many_timers(void) {
+  enum { count = 100 };
+  uint32_t timers[count];
+  uint64_t deadline = now_ns() + 20000000;
+  int created = 0, set = 0;
+  for (int i = 0; i < count; i++) {
+    if (sys(CROI_SYS_TIMER_CREATE, 0, 0, (uint64_t)&timers[i], 0, 0) != 0) break;
+    created++;
+    if (sys(CROI_SYS_TIMER_SET, timers[i], deadline + (uint64_t)i * 10000, 0, 0, 0) == 0) set++;
+  }
+  int fired = 0;
+  for (int i = 0; i < created; i++) {
+    if (wait_for(timers[i], SIGNALED, 2000000000) & SIGNALED) fired++;
+    sys(CROI_SYS_HANDLE_CLOSE, timers[i], 0, 0, 0, 0);
+  }
+  CHECK(621, created == count && set == count && fired == count);
+  uint32_t timer = 0, replaced = 0;
+  CHECK(622, sys(CROI_SYS_TIMER_CREATE, 0, 0, (uint64_t)&timer, 0, 0) == 0 &&
+                 sys(CROI_SYS_TIMER_SET, timer, now_ns() + 10000000, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_HANDLE_REPLACE, timer, 0x80000000u, (uint64_t)&replaced, 0, 0) == 0 &&  // SAME_RIGHTS
+                 (wait_for(replaced, SIGNALED, 2000000000) & SIGNALED) &&
+                 sys(CROI_SYS_HANDLE_CLOSE, replaced, 0, 0, 0, 0) == 0);
+  return 0;
+}
+
 // K14a: reclamation. A pager VMO's clean pages are evicted oldest first
 // (DONT_NEED first, ALWAYS_NEED and dirty pages kept, ALWAYS_NEED given up
 // at OOM) and come back from the pager; a discardable VMO's lock states and
@@ -4304,6 +4333,8 @@ static int64_t extensions(const startup_t *s) {
   if (frozen != 0) return frozen;
   int64_t futexes = futex_deadlines(s);
   if (futexes != 0) return futexes;
+  int64_t timers = many_timers();
+  if (timers != 0) return timers;
   int64_t reclaimed = reclaim(s);
   if (reclaimed != 0) return reclaimed;
   int64_t random = cprng_checks();
