@@ -522,7 +522,7 @@ enum Syscalls {
         guard vmo.pointee.cache == .cached else { throw .badState }
         let size = holder.sizeOwner.pointee.size
         guard offset <= size, length <= size - offset else { throw .outOfRange }
-        var done: UInt64 = 0
+        var done: UInt64 = 0, faults = 0
         while done < length {
             let at = shift + offset + done
             // A pager's page (K13d): requested and waited for, with the
@@ -533,18 +533,21 @@ enum Syscalls {
                 try Pagers.ensureWritable(vmo, at, ahead: length - done)  // dirtied (K13d, part 2)
             }
             // Reading a child's untouched page reads its parent's (no copy).
-            guard let phys = toUser ? (vmo.content(at: at) ?? vmo.commit(at: at)) : vmo.commit(at: at) else {
-                if vmo.pointee.discard == .discarded { throw .notFound }  // K14a: until locked
-                throw at >= vmo.pointee.size ? .outOfRange : .noMemory  // shrunk meanwhile (K13h)
+            // The page is copied under its owner's lock (K14h).
+            let chunk = min(length - done, KernelLayout.pageSize - at % KernelLayout.pageSize)
+            switch toUser ? VmoUserCopy.read(vmo, at, to: user + done, chunk)
+                          : VmoUserCopy.write(vmo, at, from: user + done, chunk) {
+            case .copied:
+                done += chunk
+                faults = 0
+            case .absent:
+                try VmoUserCopy.commit(vmo, at)
+            case .faulted:
+                faults += 1
+                guard faults < VmoUserCopy.attempts, VmoUserCopy.pageIn(user + done, chunk, write: toUser) else {
+                    throw .invalidArgs
+                }
             }
-            let within = at % KernelLayout.pageSize
-            let chunk = min(length - done, KernelLayout.pageSize - within)
-            let kernel = KernelLayout.physmap(phys) + within
-            let result = toUser
-                ? unsafe UserCopy.to(user + done, UnsafeRawPointer(bitPattern: UInt(kernel))!, chunk)
-                : unsafe UserCopy.from(UnsafeMutableRawPointer(bitPattern: UInt(kernel))!, user + done, chunk)
-            guard result == 0 else { throw .invalidArgs }
-            done += chunk
         }
     }
 
@@ -602,6 +605,24 @@ enum UserCopy {
     @unsafe static func to(_ destination: UInt64, _ source: UnsafeRawPointer, _ length: UInt64) -> Int32 {
         guard length == 0 || UserLayout.contains(destination, length) else { return -1 }
         return unsafe arch_copy_to_user(destination, source, length)
+    }
+
+    /// `to` and `from` without paging anything in (interrupts masked, e.g.
+    /// under a VMO's lock): a fault fails the copy (K14h, VmoUserCopy).
+    @unsafe static func toNoPageIn(_ destination: UInt64, _ source: UnsafeRawPointer, _ length: UInt64) -> Int32 {
+        let percpu = unsafe UnsafeMutablePointer<PerCpu>(bitPattern: UInt(arch_percpu()))!
+        unsafe percpu.pointee.noPageIn = true
+        let result = unsafe to(destination, source, length)
+        unsafe percpu.pointee.noPageIn = false
+        return result
+    }
+
+    @unsafe static func fromNoPageIn(_ destination: UnsafeMutableRawPointer, _ source: UInt64, _ length: UInt64) -> Int32 {
+        let percpu = unsafe UnsafeMutablePointer<PerCpu>(bitPattern: UInt(arch_percpu()))!
+        unsafe percpu.pointee.noPageIn = true
+        let result = unsafe from(destination, source, length)
+        unsafe percpu.pointee.noPageIn = false
+        return result
     }
 }
 

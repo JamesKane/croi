@@ -842,6 +842,12 @@ THREAD, VMO, maps, handle table) and the NAME property.
   ALWAYS_NEED) and their eviction when a lender wants its page. On by
   default (`croi.ppb.loan=off`). Requirement 3's pool no longer holds
   memory idle.
+- **K14h: VMO copies under the page's lock.** **Done** (2026-10-12):
+  vmo_read/write, streams and process_read/write_memory copied a page
+  after dropping its VMO's lock, so a concurrent decommit or eviction
+  could free it and another VMO's data be read (or written over). The
+  copy now holds the owner's lock without paging in; a user fault drops
+  it, pages in and retries.
 - **K14g: the other VMO child kinds.** **Done** (2026-10-12): SNAPSHOT
   (copied at creation), SNAPSHOT_MODIFIED (a full snapshot, or under a
   pager the child's own pages copied and the rest read through), slices

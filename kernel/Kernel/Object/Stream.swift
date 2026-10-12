@@ -130,42 +130,46 @@ enum Streams {
                                  _ count: UInt64, toUser: Bool) throws(Status) -> (moved: UInt64, faulted: Bool) {
         let (vmo, shift) = holder.target
         let offset = offset + shift
-        var moved: UInt64 = 0
+        var moved: UInt64 = 0, faults = 0
         var zeros = InlineArray<256, UInt8>(repeating: 0)
         for i in 0..<count where moved < limit {
             let (buffer, length) = try iovec(vector, i)
             var done: UInt64 = 0
             while done < length, moved < limit {
                 let at = offset + moved
-                let within = at % KernelLayout.pageSize
-                let chunk = min(length - done, limit - moved, KernelLayout.pageSize - within)
+                let chunk = min(length - done, limit - moved, KernelLayout.pageSize - at % KernelLayout.pageSize)
                 if toUser {
                     try Pagers.ensure(vmo, at, readAhead: limit - moved)
                 } else {
                     try Pagers.ensureWritable(vmo, at, ahead: limit - moved)
                 }
-                var failed: Int32
-                if toUser {
-                    if let phys = vmo.content(at: at) {
-                        failed = unsafe UserCopy.to(buffer + done, UnsafeRawPointer(bitPattern: UInt(KernelLayout.physmap(phys) + within))!, chunk)
-                    } else {  // never written: zeros, nothing committed
-                        failed = 0
-                        var left = chunk
-                        var span = zeros.mutableSpan
-                        while left > 0, failed == 0 {
-                            let piece = min(left, 256)
-                            failed = span.withUnsafeMutableBytes {
-                                unsafe UserCopy.to(buffer + done + (chunk - left), UnsafeRawPointer($0.baseAddress!), piece)
-                            }
-                            left -= piece
+                // Copied under the page's owner's lock (K14h, VmoUserCopy).
+                switch toUser ? VmoUserCopy.read(vmo, at, to: buffer + done, chunk)
+                              : VmoUserCopy.write(vmo, at, from: buffer + done, chunk) {
+                case .copied:
+                    faults = 0
+                case .absent where toUser:  // never written: zeros, nothing committed
+                    var failed: Int32 = 0
+                    var left = chunk
+                    var span = zeros.mutableSpan
+                    while left > 0, failed == 0 {
+                        let piece = min(left, 256)
+                        failed = span.withUnsafeMutableBytes {
+                            unsafe UserCopy.to(buffer + done + (chunk - left), UnsafeRawPointer($0.baseAddress!), piece)
                         }
+                        left -= piece
                     }
-                } else {
-                    guard let phys = vmo.commit(at: at) else { throw .noMemory }
-                    failed = unsafe UserCopy.from(UnsafeMutableRawPointer(bitPattern: UInt(KernelLayout.physmap(phys) + within))!,
-                                                  buffer + done, chunk)
+                    guard failed == 0 else { return (moved, true) }
+                case .absent:
+                    try VmoUserCopy.commit(vmo, at)
+                    continue
+                case .faulted:
+                    faults += 1
+                    guard faults < VmoUserCopy.attempts, VmoUserCopy.pageIn(buffer + done, chunk, write: toUser) else {
+                        return (moved, true)
+                    }
+                    continue
                 }
-                guard failed == 0 else { return (moved, true) }
                 done += chunk
                 moved += chunk
             }

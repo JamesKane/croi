@@ -4677,6 +4677,60 @@ static int64_t child_kinds(const startup_t *s) {
   return 0;
 }
 
+// K14h: vmo_read copies a page under its VMO's lock. A writer fills a
+// page with 'V' and decommits it, over and over; a polluter does the same
+// with 'J' in a VMO of its own, so a freed page soon holds 'J'. A reader
+// copying a page after it was freed would see a 'J'.
+typedef struct {
+  uint32_t vmo;
+  volatile int stop;
+} copy_race_t;
+
+static void race_fill(uint32_t vmo, char c, volatile int *stop) {
+  char page[PAGE];
+  for (int i = 0; i < PAGE; i++) page[i] = c;
+  while (!*stop) {
+    sys(CROI_SYS_VMO_WRITE, vmo, (uint64_t)page, 0, PAGE, 0);
+    sys6(CROI_SYS_VMO_OP_RANGE, vmo, CROI_VMO_OP_DECOMMIT, 0, PAGE, 0, 0);
+  }
+}
+
+static void race_writer(uint64_t arg) {
+  copy_race_t *r = (copy_race_t *)arg;
+  race_fill(r->vmo, 'V', &r->stop);
+  sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
+}
+
+static void race_polluter(uint64_t arg) {
+  copy_race_t *r = (copy_race_t *)arg;
+  uint32_t own = 0;
+  if (sys(CROI_SYS_VMO_CREATE, PAGE, 0, (uint64_t)&own, 0, 0) == 0) race_fill(own, 'J', &r->stop);
+  sys(CROI_SYS_HANDLE_CLOSE, own, 0, 0, 0, 0);
+  sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
+}
+
+static int64_t copy_race(const startup_t *s) {
+  copy_race_t r = {0, 0};
+  char page[PAGE];
+  CHECK(661, sys(CROI_SYS_VMO_CREATE, PAGE, 0, (uint64_t)&r.vmo, 0, 0) == 0);
+  uint32_t writer = start_thread(s, race_writer, (uint64_t)&r);
+  uint32_t polluter = start_thread(s, race_polluter, (uint64_t)&r);
+  uint64_t end = now_ns() + 300000000ull;
+  int polluted = 0, reads = 0;
+  while (now_ns() < end && !polluted) {
+    if (sys(CROI_SYS_VMO_READ, r.vmo, (uint64_t)page, 0, PAGE, 0) != 0) break;
+    reads++;
+    for (int i = 0; i < PAGE; i++) polluted |= page[i] == 'J';
+  }
+  r.stop = 1;
+  wait_for(writer, CROI_SIGNAL_TASK_TERMINATED, 3000000000ull);
+  wait_for(polluter, CROI_SIGNAL_TASK_TERMINATED, 3000000000ull);
+  uint32_t handles[] = {writer, polluter, r.vmo};
+  for (int i = 0; i < 3; i++) sys(CROI_SYS_HANDLE_CLOSE, handles[i], 0, 0, 0, 0);
+  CHECK(662, !polluted && reads > 0);
+  return 0;
+}
+
 // K11b: the kernel's CPRNG.
 static int64_t cprng_checks(void) {
   uint8_t a[256], b[256];
@@ -4789,6 +4843,8 @@ static int64_t extensions(const startup_t *s) {
   if (slices != 0) return slices;
   int64_t kinds = child_kinds(s);
   if (kinds != 0) return kinds;
+  int64_t raced = copy_race(s);
+  if (raced != 0) return raced;
   int64_t fifos = fifos_and_exec(s);
   if (fifos != 0) return fifos;
   int64_t socks = sockets(s);

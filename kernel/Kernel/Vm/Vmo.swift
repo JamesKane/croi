@@ -377,6 +377,14 @@ enum DiscardState: UInt8 {
     /// freed meanwhile. Lock order child -> parent: the caller may hold
     /// a descendant's lock, never an ancestor's.
     func withContent<R>(at offset: UInt64, _ body: (UInt64?) -> R) -> R {
+        if pointee.isAlias { return pointee.parent!.withContent(at: pointee.parentOffset + offset, body) }  // K14g
+        switch pointee.kind {
+        case .anonymous: break
+        case .physical, .contiguous:
+            // Fixed pages, except a contiguous VMO's lent ones (K14f), which
+            // read as absent until taken back.
+            return pointee.lock.withLock { body(ownLocked(at: offset)) }
+        }
         var result: R? = nil
         var up: (VmoPointer, UInt64)? = nil
         pointee.lock.withLock {
@@ -1169,4 +1177,101 @@ enum Vmos {
     static func nextTraceId() -> UInt64 {
         traceIds.add(1, ordering: .relaxed).newValue
     }
+}
+
+extension VmoPointer {
+    /// The VMO's own page holding byte `offset`, if it has one (no
+    /// commit, no parent's): lock held. A contiguous VMO's lent page is
+    /// absent (K14f); past the end, nothing.
+    func ownLocked(at offset: UInt64) -> UInt64? {
+        guard offset < pointee.size else { return nil }
+        let index = Int(offset / KernelLayout.pageSize)
+        switch pointee.kind {
+        case .physical(let base): return base + UInt64(index) * KernelLayout.pageSize
+        case .contiguous(let base): return lentLocked(index) ? nil : base + UInt64(index) * KernelLayout.pageSize
+        case .anonymous:
+            let phys = pointee.pages.lookup(index)
+            return phys == 0 ? nil : phys
+        }
+    }
+}
+
+/// Copies between user memory and a VMO's pages (vmo_read/write, streams,
+/// process_read/write_memory; K14h). A page is only read or written while
+/// the lock of the VMO that has it is held, so a decommit, eviction, swap
+/// or resize can't free it (and hand it to someone else) mid-copy, which
+/// a copy after dropping the lock allowed. Under that spinlock user memory
+/// can't be paged in, so the copy runs without (`UserCopy.*NoPageIn`): a
+/// chunk that faults is `.faulted`, and the caller pages the user range
+/// in (`pageIn`) with no lock held and tries again. Callers resolve
+/// aliases first and make pages present (pagers, lent pages) as before.
+enum VmoUserCopy {
+    enum Chunk {
+        case copied
+        /// No page there: zeros for a reader; commit one and retry.
+        case absent
+        /// The user side faulted: page it in and retry.
+        case faulted
+    }
+
+    /// `length` bytes (inside one page) from what `vmo` reads as at
+    /// `offset` (its page or an ancestor's) to user `user`.
+    static func read(_ vmo: VmoPointer, _ offset: UInt64, to user: UInt64, _ length: UInt64) -> Chunk {
+        vmo.withContent(at: offset) { phys -> Chunk in
+            guard let phys else { return .absent }
+            let kernel = KernelLayout.physmap(phys) + offset % KernelLayout.pageSize
+            let failed = unsafe UserCopy.toNoPageIn(user, UnsafeRawPointer(bitPattern: UInt(kernel))!, length)
+            return failed == 0 ? .copied : .faulted
+        }
+    }
+
+    /// `length` bytes (inside one page) from user `user` into `vmo`'s own
+    /// page at `offset`.
+    static func write(_ vmo: VmoPointer, _ offset: UInt64, from user: UInt64, _ length: UInt64) -> Chunk {
+        let (vmo, shift) = vmo.target
+        let at = offset + shift
+        return vmo.pointee.lock.withLock { () -> Chunk in
+            guard let phys = vmo.ownLocked(at: at) else { return .absent }
+            let kernel = KernelLayout.physmap(phys) + at % KernelLayout.pageSize
+            let failed = unsafe UserCopy.fromNoPageIn(UnsafeMutableRawPointer(bitPattern: UInt(kernel))!, user, length)
+            return failed == 0 ? .copied : .faulted
+        }
+    }
+
+    /// Pages [user, +length) in for the kernel to read (`write` false) or
+    /// write, as a fault there would. False: not mapped for that.
+    static func pageIn(_ user: UInt64, _ length: UInt64, write: Bool) -> Bool {
+        guard length > 0 else { return true }
+        let page = KernelLayout.pageSize
+        var at = user & ~(page - 1)
+        while at < user + length {
+            guard UserAspaces.handleFault(at: at, write: write, execute: false) else { return false }
+            at += page
+        }
+        return true
+    }
+
+    /// After `.absent`: commits the page so the next try finds it (a read
+    /// of an untouched page commits it, as vmo_read always has), or returns
+    /// to try again when the next `Pagers.ensure*` makes it present (a
+    /// pager's page, a lent one, gone again meanwhile). Throws NOT_FOUND
+    /// for a discarded VMO (K14a), OUT_OF_RANGE past a shrunk end (K13h),
+    /// NO_MEMORY otherwise.
+    static func commit(_ vmo: VmoPointer, _ offset: UInt64) throws(Status) {
+        let (vmo, shift) = vmo.target
+        let at = offset + shift
+        guard vmo.commit(at: at) == nil else { return }
+        if vmo.pointee.discard == .discarded { throw .notFound }
+        if at >= vmo.pointee.size { throw .outOfRange }
+        if vmo.pagerGap(at: at) != nil { return }
+        if vmo.pointee.lentPages > 0, vmo.pointee.lock.withLock({ vmo.lentLocked(Int(at / KernelLayout.pageSize)) }) {
+            return
+        }
+        throw .noMemory
+    }
+
+    /// How often one chunk may fault and be paged in before the copy is
+    /// refused: a page evicted again at once is retried; a fault paging
+    /// can't fix (a protection key's) would loop.
+    static let attempts = 4
 }

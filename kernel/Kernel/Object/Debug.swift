@@ -192,19 +192,29 @@ enum Debug {
         guard offset < end else { throw .outOfRange }
         let length = min(size, end - offset)
         guard vmo.inPhysmap, vmo.pointee.cache == .cached else { throw .badState }
-        var done: UInt64 = 0
+        var done: UInt64 = 0, faults = 0
         while done < length {
             let at = offset + done
             if write { try Pagers.ensureWritable(vmo, at, ahead: length - done) } else { try Pagers.ensure(vmo, at, readAhead: length - done) }
-            guard let phys = write ? vmo.commit(at: at) : (vmo.content(at: at) ?? vmo.commit(at: at)) else { throw .noMemory }
-            let within = at % KernelLayout.pageSize
-            let chunk = min(length - done, KernelLayout.pageSize - within)
-            let kernel = KernelLayout.physmap(phys) + within
-            let failed = write
-                ? unsafe UserCopy.from(UnsafeMutableRawPointer(bitPattern: UInt(kernel))!, buffer + done, chunk)
-                : unsafe UserCopy.to(buffer + done, UnsafeRawPointer(bitPattern: UInt(kernel))!, chunk)
-            guard failed == 0 else { throw .invalidArgs }
-            done += chunk
+            // Copied under the page's owner's lock (K14h, VmoUserCopy).
+            let chunk = min(length - done, KernelLayout.pageSize - at % KernelLayout.pageSize)
+            switch write ? VmoUserCopy.write(vmo, at, from: buffer + done, chunk)
+                         : VmoUserCopy.read(vmo, at, to: buffer + done, chunk) {
+            case .copied:
+                done += chunk
+                faults = 0
+            case .absent:
+                do throws(Status) {
+                    try VmoUserCopy.commit(vmo, at)
+                } catch {
+                    throw error == .notFound || error == .outOfRange ? error : .noMemory
+                }
+            case .faulted:
+                faults += 1
+                guard faults < VmoUserCopy.attempts, VmoUserCopy.pageIn(buffer + done, chunk, write: !write) else {
+                    throw .invalidArgs
+                }
+            }
         }
         if write, mapping.rights.contains(.execute) {
             try? Vmo.withBorrowed(vmo) { (v: borrowing Vmo) throws(VmError) in

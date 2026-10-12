@@ -1266,6 +1266,20 @@ The other child kinds, K14g (Vmo.swift `Vmo.snapshot`, `init(sliceOf:)`,
   decommit could hand it a freed, reused page).
 - Mode 17's `child_kinds` (checks 650-660).
 
+Copies between user memory and VMO pages, K14h (Vm/Vmo.swift
+`VmoUserCopy`; vmo_read/write, streams, process_read/write_memory): a
+page is read or written only under the lock of the VMO that has it
+(`withContent`, `ownLocked`), so a decommit, eviction, swap or shrink
+can't free it mid-copy (they used to look it up, drop the lock and copy:
+a freed page reused by another VMO leaked its bytes). The copy runs
+under that spinlock without paging in (`UserCopy.toNoPageIn` /
+`fromNoPageIn`, PerCpu.noPageIn); a chunk that faults is paged in with
+no lock held (`pageIn`: `UserAspaces.handleFault` per page) and retried,
+up to `attempts` times. `.absent` commits (`VmoUserCopy.commit`) or
+waits for the next `Pagers.ensure*`. Mode 17's `copy_race` (661-662:
+writer, polluter and reader threads) failed 3 of 3 KVM boots with the
+copy outside the lock.
+
 VMO slices, ZERO_CHILDREN and handle counts, K13a (Vmo.swift `init(sliceOf:)`,
 `childAdded`/`childGone`; VmoObject; agreed with Todhchai for the GPU
 driver host's BAR windows):
