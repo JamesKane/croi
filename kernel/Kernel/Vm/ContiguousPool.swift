@@ -6,8 +6,9 @@ import Synchronization
 /// possible for 32-bit DMA engines such as the Q8B's scan-out. Contiguous
 /// VMOs come from here first, so they still succeed once RAM is
 /// fragmented. `croi.contiguous_pool=<MiB>` sizes it (default 8, 0 for
-/// none). Lending free pool pages to the system (Zircon-style loaning)
-/// comes later.
+/// none). Its free pages are lent to the system (K14f, Vm/Loans.swift;
+/// unless croi.ppb.loan=off) and taken back as they are allocated, so the
+/// pool costs no memory while unused.
 enum ContiguousPool {
     nonisolated(unsafe) private(set) static var base: UInt64 = 0
     nonisolated(unsafe) private(set) static var pages = 0
@@ -24,6 +25,7 @@ enum ContiguousPool {
         base = phys
         pages = Int(count)
         used = UniqueArray<UInt64>(repeating: 0, count: (pages + 63) / 64)
+        if Loans.enabled { pmm.lend(base, count: count) }
     }
 
     static func contains(_ phys: UInt64) -> Bool {
@@ -41,6 +43,12 @@ enum ContiguousPool {
     /// `count` contiguous pool pages aligned to 2^alignLog2, from `floor`
     /// up, ending at or below `limit`; nil if the pool can't.
     static func allocate(_ count: Int, alignLog2: Int, floor: UInt64 = 0, limit: UInt64) -> UInt64? {
+        guard let phys = reserve(count, alignLog2: alignLog2, floor: floor, limit: limit) else { return nil }
+        if Loans.enabled { Loans.reclaim(phys, count: count) }  // lent while free: back first
+        return phys
+    }
+
+    private static func reserve(_ count: Int, alignLog2: Int, floor: UInt64, limit: UInt64) -> UInt64? {
         guard pages > 0, count > 0 else { return nil }
         let page = KernelLayout.pageSize
         let alignment = max(UInt64(1) << UInt64(alignLog2), page)
@@ -62,6 +70,8 @@ enum ContiguousPool {
     }
 
     static func free(_ phys: UInt64, _ count: Int) {
+        // Lent before it is free: an allocation of it then takes it back.
+        if Loans.enabled { pmm.lend(phys, count: UInt64(count)) }
         lock.withLock {
             let first = Int((phys - base) / KernelLayout.pageSize)
             for i in first..<(first + count) {

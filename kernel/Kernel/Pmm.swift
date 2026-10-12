@@ -15,6 +15,10 @@ enum PageState: UInt8 {
     case heap
     /// Owned by a VMO (Vm/Vmo.swift).
     case vmo
+    /// K14f: lent by its lender (a contiguous VMO or the contiguous pool)
+    /// and free: on the PMM's loaned list, which only `allocateLoaned`
+    /// hands out (Zircon's FREE_LOANED).
+    case freeLoaned
 }
 
 /// Per-page metadata, one for every 4 KiB page in every arena (Zircon's
@@ -45,6 +49,13 @@ struct Page {
     fileprivate init(physical: UInt64) {
         self.physical = physical
     }
+
+    /// K14f, in `reclaimFlags`: lent (free or borrowed), and its lender
+    /// wants it back. While borrowed, `next` is the borrower's VmoRecord
+    /// and `prev` the page's index there (VMO pages use no links), 0 while
+    /// in transit.
+    static var loaned: UInt8 { 0x80 }
+    static var loanCancelled: UInt8 { 0x40 }
 }
 
 /// A run of physically contiguous RAM the PMM manages.
@@ -70,6 +81,10 @@ let pmmLock = SpinLock()
     /// Physmap address of the first free `Page`, 0 if none.
     private var freeHead: UInt64 = 0
     private(set) var freePages: UInt64 = 0
+    /// K14f: the free lent pages, and every lent page (free or borrowed).
+    private var loanedHead: UInt64 = 0
+    private(set) var freeLoanedPages: UInt64 = 0
+    private(set) var loanedPages: UInt64 = 0
     private(set) var totalPages: UInt64 = 0
     /// A page of free RAM below 1 MiB kept out of the free list, for the
     /// amd64 SMP trampoline (0 if there is none).
@@ -269,13 +284,13 @@ let pmmLock = SpinLock()
 
     /// Pages in each PageState (indexed by raw value), by a scan of every
     /// arena (ZX_INFO_KMEM_STATS; not a hot path).
-    func pageCounts() -> InlineArray<6, UInt64> {
-        pmmLock.withLock { () -> InlineArray<6, UInt64> in
-            var counts = InlineArray<6, UInt64>(repeating: 0)
+    func pageCounts() -> InlineArray<7, UInt64> {
+        pmmLock.withLock { () -> InlineArray<7, UInt64> in
+            var counts = InlineArray<7, UInt64>(repeating: 0)
             for a in 0..<arenaCount {
                 for i in 0..<arenas[a].pageCount {
                     let state = Int(unsafe page(arenas[a], i).pointee.state.rawValue)
-                    if state < 6 { counts[state] += 1 }
+                    if state < 7 { counts[state] += 1 }
                 }
             }
             return counts
@@ -304,8 +319,116 @@ let pmmLock = SpinLock()
 
     private mutating func freeLocked(_ phys: UInt64) {
         guard let page = unsafe page(for: phys) else { panic("pmm: freeing a page outside every arena") }
-        guard unsafe page.pointee.state != .free else { panic("pmm: double free") }
+        guard unsafe page.pointee.state != .free, unsafe page.pointee.state != .freeLoaned else {
+            panic("pmm: double free")
+        }
+        // A borrowed page goes back to the loaned list, or to its lender if
+        // it asked for it meanwhile (K14f).
+        if unsafe page.pointee.reclaimFlags & Page.loaned != 0 {
+            unsafe page.pointee.next = 0
+            unsafe page.pointee.prev = 0
+            if unsafe page.pointee.reclaimFlags & Page.loanCancelled != 0 {
+                unsafe returnToLender(page)
+            } else {
+                unsafe pushLoaned(page)
+            }
+            return
+        }
         unsafe pushFree(page)
+    }
+
+    // MARK: Loaning (K14f)
+
+    /// Lends `count` pages at `phys`, its lender's (state .vmo: a
+    /// contiguous VMO's or the pool's), to the rest of the system: free on
+    /// the loaned list until `unloan` takes each back.
+    mutating func lend(_ phys: UInt64, count: UInt64) {
+        pmmLock.withLock {
+            for i in 0..<count {
+                guard let page = unsafe page(for: phys + i * KernelLayout.pageSize),
+                      unsafe page.pointee.state == .vmo, unsafe page.pointee.reclaimFlags & Page.loaned == 0 else {
+                    panic("pmm: lending a page its lender doesn't hold")
+                }
+                unsafe page.pointee.reclaimFlags = Page.loaned
+                unsafe page.pointee.next = 0
+                unsafe page.pointee.prev = 0
+                unsafe pushLoaned(page)
+                loanedPages += 1
+            }
+        }
+    }
+
+    /// One step of taking a lent page back for its lender: `.back` (it is
+    /// the lender's again, state .vmo), `.evict` (borrowed: the borrower
+    /// must let go of it, whose free then returns it), or `.wait` (in
+    /// transit between a borrower and the PMM; ask again shortly).
+    enum Unloan: Equatable {
+        case back
+        case evict(vmo: UInt64, index: UInt64)
+        case wait
+    }
+
+    mutating func unloan(_ phys: UInt64) -> Unloan {
+        pmmLock.withLock { () -> Unloan in
+            guard let page = unsafe page(for: phys) else { panic("pmm: unloaning a page outside every arena") }
+            guard unsafe page.pointee.reclaimFlags & Page.loaned != 0 else { return .back }
+            if unsafe page.pointee.state == .freeLoaned {
+                unsafe unlinkLoaned(page)
+                unsafe returnToLender(page)
+                return .back
+            }
+            unsafe page.pointee.reclaimFlags |= Page.loanCancelled
+            let vmo = unsafe page.pointee.next
+            return vmo != 0 ? .evict(vmo: vmo, index: unsafe page.pointee.prev) : .wait
+        }
+    }
+
+    /// A free lent page for page `index` of the VmoRecord at `vmo` (a
+    /// borrower: its page must stay replaceable), which it must install
+    /// before dropping its lock; nil if none is free.
+    mutating func allocateLoaned(for vmo: UInt64, index: UInt64) -> UInt64? {
+        pmmLock.withLock { () -> UInt64? in
+            guard loanedHead != 0 else { return nil }
+            let page = unsafe pointer(loanedHead)
+            unsafe unlinkLoaned(page)
+            unsafe page.pointee.state = .vmo
+            unsafe page.pointee.reclaimAge = 0
+            unsafe page.pointee.next = vmo
+            unsafe page.pointee.prev = index
+            return unsafe page.pointee.physical
+        }
+    }
+
+    /// Whether `phys` is a lent page (a borrower asks about its own pages,
+    /// under its lock: the bit doesn't change while it holds the page).
+    func isLoaned(_ phys: UInt64) -> Bool {
+        guard let page = unsafe page(for: phys) else { return false }
+        return unsafe page.pointee.reclaimFlags & Page.loaned != 0
+    }
+
+    @unsafe private mutating func returnToLender(_ page: UnsafeMutablePointer<Page>) {
+        unsafe page.pointee.state = .vmo
+        unsafe page.pointee.reclaimFlags = 0
+        unsafe page.pointee.reclaimAge = 0
+        loanedPages -= 1
+    }
+
+    @unsafe private mutating func pushLoaned(_ page: UnsafeMutablePointer<Page>) {
+        unsafe page.pointee.state = .freeLoaned
+        unsafe page.pointee.prev = 0
+        unsafe page.pointee.next = loanedHead
+        if loanedHead != 0 { unsafe pointer(loanedHead).pointee.prev = address(page) }
+        loanedHead = unsafe address(page)
+        freeLoanedPages += 1
+    }
+
+    @unsafe private mutating func unlinkLoaned(_ page: UnsafeMutablePointer<Page>) {
+        let next = unsafe page.pointee.next, prev = unsafe page.pointee.prev
+        if prev != 0 { unsafe pointer(prev).pointee.next = next } else { loanedHead = next }
+        if next != 0 { unsafe pointer(next).pointee.prev = prev }
+        unsafe page.pointee.next = 0
+        unsafe page.pointee.prev = 0
+        freeLoanedPages -= 1
     }
 
     /// Hands `count` wired pages at `phys` (memory the loader filled, e.g.

@@ -241,6 +241,7 @@ enum Pagers {
     /// asking for up to `readAhead` bytes from there. Throws the pager's
     /// failure, BAD_STATE once detached, TIMED_OUT, or CANCELED (killed).
     static func ensure(_ vmo: VmoPointer, _ offset: UInt64, readAhead: UInt64 = KernelLayout.pageSize) throws(Status) {
+        Loans.ensure(vmo, offset, readAhead)  // K14f: a contiguous VMO's lent pages
         let page = KernelLayout.pageSize
         let at = offset & ~(page - 1)
         let (last, overflow) = offset.addingReportingOverflow(max(readAhead, 1) - 1)
@@ -253,6 +254,7 @@ enum Pagers {
 
     /// `ensure` for every page of [offset, offset+size) (page aligned).
     static func ensureRange(_ vmo: VmoPointer, _ offset: UInt64, _ size: UInt64) throws(Status) {
+        Loans.ensure(vmo, offset, size)
         guard vmo.pointee.pager != nil || vmo.pointee.readsFromPager else { return }
         var at = offset
         while at < offset + size {
@@ -287,6 +289,7 @@ enum Pagers {
 
     /// `ensureWritable` for every page of [offset, offset+size) (page aligned).
     static func ensureWritableRange(_ vmo: VmoPointer, _ offset: UInt64, _ size: UInt64) throws(Status) {
+        Loans.ensure(vmo, offset, size)
         guard vmo.pointee.pager != nil || vmo.pointee.readsFromPager else { return }
         var at = offset
         while at < offset + size {

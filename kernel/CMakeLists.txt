@@ -115,6 +115,7 @@ add_library(kernel-swift OBJECT
   Kernel/Vm/Vmo.swift
   Kernel/Vm/PageList.swift
   Kernel/Vm/Reclaim.swift
+  Kernel/Vm/Loans.swift
   Kernel/Vm/MemoryAccount.swift
   Kernel/Vm/Jit.swift
   Kernel/Vm/ContiguousPool.swift

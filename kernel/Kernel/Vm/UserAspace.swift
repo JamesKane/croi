@@ -458,13 +458,39 @@ struct UserAspace: ~Copyable {
     /// VMO reference and listing this address space on the VMO.
     private func insert(_ mapping: Mapping) throws(VmError) {
         if mapping.vmo.pointee.sharedReadOnly, mapping.rights != .read { throw .invalidArgument }
-        if case .anonymous = mapping.vmo.pointee.kind {} else {
-            try record.pointee.arch.map(virt: mapping.base, phys: mapping.vmo.commit(at: mapping.offset)!,
-                                        size: mapping.size,
-                                        attributes(mapping.rights, mapping.vmo.pointee.cache, key: mapping.key))
-        }
         mapping.vmo.retain()
-        mapping.vmo.addMapper(record.address)
+        // A mapper before it is mapped, and a contiguous VMO's lent pages
+        // (K14f) read in the same locked step: a decommit either sees the
+        // mapper and unmaps here, or this sees its pages lent and skips them.
+        let lent = mapping.vmo.addMapper(record.address, lentIn: mapping.offset, mapping.size)
+        if case .anonymous = mapping.vmo.pointee.kind {} else {
+            let base = mapping.vmo.physicalBase + mapping.offset
+            let page = KernelLayout.pageSize
+            let attributes = attributes(mapping.rights, mapping.vmo.pointee.cache, key: mapping.key)
+            do throws(VmError) {
+                if lent.isEmpty {
+                    try record.pointee.arch.map(virt: mapping.base, phys: base, size: mapping.size, attributes)
+                } else {
+                    var run: UInt64 = 0  // runs of pages not lent
+                    var at: UInt64 = 0
+                    while at <= mapping.size {
+                        let index = Int(at / page)
+                        if at == mapping.size || lent[index / 64] & (1 << UInt64(index % 64)) != 0 {
+                            if at > run {
+                                try record.pointee.arch.map(virt: mapping.base + run, phys: base + run, size: at - run,
+                                                            attributes)
+                            }
+                            run = at + page
+                        }
+                        at += page
+                    }
+                }
+            } catch {
+                mapping.vmo.removeMapper(record.address)
+                mapping.vmo.release()
+                throw error
+            }
+        }
         var index = 0
         while index < record.pointee.mappings.count, record.pointee.mappings[index].base < mapping.base { index += 1 }
         record.pointee.mappings.insert(mapping, at: index)
@@ -673,6 +699,14 @@ enum UserAspaces {
                     paged = (mapping.vmo, offset, false)
                     return false
                 }
+                // A contiguous VMO's lent page (K14f): taken back outside
+                // the lock (Pagers.ensure), then the fault is retried.
+                if mapping.vmo.pointee.lentPages > 0,
+                   mapping.vmo.pointee.lock.withLock({ mapping.vmo.lentLocked(Int(offset / KernelLayout.pageSize)) }) {
+                    mapping.vmo.retain()
+                    paged = (mapping.vmo, offset, false)
+                    return false
+                }
                 if tracked, write, !dirty {
                     mapping.vmo.retain()
                     paged = (mapping.vmo, offset, true)
@@ -872,7 +906,7 @@ extension VmoPointer {
             let bytes: UInt64
             switch pointee.kind {
             case .physical: bytes = 0
-            case .contiguous: bytes = size
+            case .contiguous: bytes = size - lentBytesLocked(offset, size)  // lent pages aren't its (K14f)
             case .anonymous:
                 let first = Int(offset / page), end = Int((offset + size + page - 1) / page)
                 bytes = UInt64(pointee.pages.count(from: first, to: end)) * page

@@ -834,6 +834,11 @@ THREAD, VMO, maps, handle table) and the NAME property.
   system_get_event, eviction at critical, OOM eviction then reboot),
   KMEM_STATS' reclaim fields, committed_change_events. Not yet: jobkill
   at OOM, compression, zero-page dedupe, page-table reclaim, page loaning.
+- **K14f: page loaning.** Part 1 **done** (2026-10-11): lenders (a
+  contiguous VMO's decommitted range, the contiguous pool's free pages)
+  and taking pages back (faults, COMMIT, pins, accesses, the VMO's end,
+  pool allocation). Part 2: borrowers (a pager VMO's clean pages, swapped
+  onto lent ones by the aging pass) and their eviction.
 - **K14e: scheduling-context handoff on interrupt wakeup (ext 5).**
   **Done** (2026-10-11): object_set_profile with CROI_PROFILE_HANDOFF on
   an interrupt admits a deadline context the object owns; the thread

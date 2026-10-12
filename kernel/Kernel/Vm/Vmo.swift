@@ -95,6 +95,11 @@ struct VmoRecord: ~Copyable {
     var discardable = false
     var lockCount: UInt64 = 0
     var discard = DiscardState.unset
+    /// K14f (Vm/Loans.swift): a contiguous VMO's decommitted pages, lent
+    /// to the system (a bit each, allocated at the first decommit), and
+    /// how many; they read as absent until taken back.
+    var lent = UniqueArray<UInt64>()
+    var lentPages = 0
 
     var pageCount: Int { Int(size / KernelLayout.pageSize) }
 }
@@ -144,6 +149,7 @@ enum DiscardState: UInt8 {
         case .contiguous where pointee.slice:
             break  // the parent's pages
         case .contiguous(let base):
+            Loans.endOfLender(self)  // K14f: lent pages come back first
             if ContiguousPool.contains(base) {
                 ContiguousPool.free(base, pointee.pageCount)
             } else {
@@ -162,11 +168,21 @@ enum DiscardState: UInt8 {
     /// ZERO_CHILDREN cleared. The object's lock serializes the signal with
     /// `childGone`, which rechecks the count under it (as Zircon does).
     func childAdded() {
-        let object = pointee.lock.withLock { () -> UInt64 in
+        _ = childAdded(unlessLent: false)
+    }
+
+    /// `childAdded`, refused (false, nothing counted) with `unlessLent` if
+    /// it has lent pages (K14f: a slice shares them), checked under the
+    /// same lock decommit takes.
+    func childAdded(unlessLent: Bool) -> Bool {
+        let object = pointee.lock.withLock { () -> UInt64? in
+            if unlessLent, pointee.lentPages > 0 { return nil }
             pointee.children += 1
             return pointee.object
         }
+        guard let object else { return false }
         signalChildren(object)
+        return true
     }
 
     /// One went (its last reference): ZERO_CHILDREN set if it was the last.
@@ -197,7 +213,11 @@ enum DiscardState: UInt8 {
     func commit(at offset: UInt64) -> UInt64? {
         let index = Int(offset / KernelLayout.pageSize)
         switch pointee.kind {
-        case .physical(let base), .contiguous(let base):
+        case .contiguous(let base):
+            // A lent page (K14f) is absent until `Loans.ensure` takes it back.
+            if pointee.lentPages > 0, pointee.lock.withLock({ lentLocked(index) }) { return nil }
+            return base + UInt64(index) * KernelLayout.pageSize
+        case .physical(let base):
             return base + UInt64(index) * KernelLayout.pageSize
         case .anonymous:
             // A pager VMO's missing page comes from its pager, and a child
@@ -252,6 +272,30 @@ enum DiscardState: UInt8 {
         pointee.lock.withLock { pointee.mappers.append(aspace) }
     }
 
+    /// `addMapper`, and in the same locked step which pages of [offset,
+    /// +size) a contiguous VMO has lent (K14f): a bit per page from
+    /// `offset`, empty if none.
+    func addMapper(_ aspace: UInt64, lentIn offset: UInt64, _ size: UInt64) -> UniqueArray<UInt64> {
+        let saved = pointee.lock.acquire()  // withLock can't return a ~Copyable value
+        defer { pointee.lock.release(saved) }
+        pointee.mappers.append(aspace)
+        var bits = UniqueArray<UInt64>()
+        guard pointee.lentPages > 0, lentBytesLocked(offset, size) > 0 else { return bits }
+        let page = KernelLayout.pageSize
+        let count = Int(size / page)
+        bits = UniqueArray<UInt64>(repeating: 0, count: (count + 63) / 64)
+        for i in 0..<count where lentLocked(Int(offset / page) + i) { bits[i / 64] |= 1 << UInt64(i % 64) }
+        return bits
+    }
+
+    /// A physical or contiguous VMO's first page (0 for anonymous ones).
+    var physicalBase: UInt64 {
+        switch pointee.kind {
+        case .physical(let base), .contiguous(let base): return base
+        case .anonymous: return 0
+        }
+    }
+
     func removeMapper(_ aspace: UInt64) {
         pointee.lock.withLock {
             for i in 0..<pointee.mappers.count where pointee.mappers[i] == aspace {
@@ -282,7 +326,10 @@ enum DiscardState: UInt8 {
     func lookup(at offset: UInt64) -> UInt64? {
         let index = Int(offset / KernelLayout.pageSize)
         switch pointee.kind {
-        case .physical(let base), .contiguous(let base):
+        case .contiguous(let base):
+            if pointee.lentPages > 0, pointee.lock.withLock({ lentLocked(index) }) { return nil }  // lent (K14f)
+            return base + UInt64(index) * KernelLayout.pageSize
+        case .physical(let base):
             return base + UInt64(index) * KernelLayout.pageSize
         case .anonymous:
             return pointee.lock.withLock { () -> UInt64? in
@@ -510,10 +557,13 @@ struct Vmo: ~Copyable {
         made.pointee.slice = true
         made.pointee.cachedFirmware = firmware
         made.pointee.sharedReadOnly = readOnly
+        guard root.childAdded(unlessLent: true) else {  // K14f: not over lent pages
+            made.release()
+            throw .badState
+        }
         root.retain()
         made.pointee.parent = root
         made.pointee.parentOffset = at
-        root.childAdded()
         record = made
     }
 
@@ -554,6 +604,8 @@ struct Vmo: ~Copyable {
     /// meanwhile, in case it is being torn down), then free the pages.
     func decommit(offset: UInt64, size: UInt64) throws(VmError) {
         try checkRange(offset, size)
+        // A contiguous VMO lends its pages (K14f).
+        if case .contiguous = record.pointee.kind { return try Loans.decommit(record, offset: offset, size: size) }
         guard case .anonymous = record.pointee.kind else { throw .invalidArgument }
         // A child's decommitted page would read as its parent's again, not
         // zero (Zircon: NOT_SUPPORTED on snapshot children).
@@ -725,11 +777,16 @@ struct Vmo: ~Copyable {
         try checkRange(offset, size)
         let page = KernelLayout.pageSize
         while true {
+            Loans.ensure(record, offset, size)  // K14f: lent pages back first
             var at = offset
             while at < offset + size {
-                guard record.commit(at: at) != nil else { throw .outOfMemory }
+                guard record.commit(at: at) != nil else {
+                    if record.pointee.lentPages > 0 { break }  // lent again meanwhile: once more
+                    throw .outOfMemory
+                }
                 at += page
             }
+            guard at >= offset + size else { continue }
             // A decommit may have raced the commits: check under the lock
             // that pins them.
             let done = record.pointee.lock.withLock { () -> Bool in
@@ -740,6 +797,7 @@ struct Vmo: ~Copyable {
                         at += page
                     }
                 }
+                if record.pointee.lentPages > 0, record.lentBytesLocked(offset, size) > 0 { return false }
                 record.pointee.pins.append(PinRange(offset: offset, size: size))
                 return true
             }

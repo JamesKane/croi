@@ -114,9 +114,10 @@ matches the pinned tree where upstream docs or expectations say otherwise).
   (K14a) the reclaim and discardable fields filled; loaned, ipc, cache,
   slab, zram and reclaim_disabled are 0. Kind: not yet. Impact: memory
   dashboards.
-- **Page loaning** — Zircon lends decommitted contiguous VMOs' pages;
-  croi uses a boot contiguous pool (`croi.contiguous_pool`) and has no
-  loaning. Kind: not yet. Impact: contiguous memory held idle.
+- **Page loaning** — as Zircon's for decommitted contiguous VMOs (K14f),
+  plus croi's boot contiguous pool lending its free pages; on by default
+  (`croi.ppb.loan=off`; Zircon's kernel.ppb.loan defaults off). Kind:
+  deliberate. Impact: none.
 
 ## Reclamation (K14a)
 

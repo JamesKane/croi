@@ -271,6 +271,7 @@ func kernel_main_continue() -> Never {
 
         UserAspaces.initialize()
         Resources.initialize()
+        Loans.initialize()  // K14f: before the pool, which lends its free pages
         ContiguousPool.initialize()
         Jit.initialize()
         VmoCache.initialize(acpi)

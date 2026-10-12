@@ -195,7 +195,12 @@ extension Syscalls {
             try need(.write)
             guard offset % page == 0, size % page == 0 else { throw .invalidArgs }
             try inRange()
-            guard case .anonymous = record.pointee.kind else { throw .notSupported }
+            // Anonymous VMOs free the pages; contiguous ones lend them (K14f).
+            switch record.pointee.kind {
+            case .anonymous: break
+            case .contiguous: guard Loans.enabled else { throw .notSupported }
+            case .physical: throw .notSupported
+            }
             guard size > 0 else { return }
             try vm { () throws(VmError) in
                 try Vmo.withBorrowed(record) { (vmo: borrowing Vmo) throws(VmError) in

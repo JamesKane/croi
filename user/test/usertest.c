@@ -3912,6 +3912,64 @@ static int64_t futex_deadlines(const startup_t *s) {
   return 0;
 }
 
+// K14f: page loaning. A contiguous VMO's decommitted pages are lent (free
+// loaned memory grows by them, the VMO's committed bytes shrink); a
+// mapping over them faults them back, COMMIT takes them back, both zeroed,
+// and the VMO's end takes back what it lent. Slices refuse lent pages.
+static uint64_t committed_of(uint32_t vmo, uint64_t *events);
+
+static int kmem_loaned(const startup_t *s, uint64_t *loaned) {
+  croi_info_kmem_stats_t k;
+  uint64_t counts[2];
+  if (get_info(s->resource, CROI_INFO_KMEM_STATS, &k, sizeof k, counts) != 0) return 0;
+  *loaned = k.free_loaned_bytes;
+  return 1;
+}
+
+static int64_t page_loaning(const startup_t *s) {
+  uint32_t iommu = 0, bti = 0, vmo = 0, slice = 0;
+  uint8_t desc = 0;
+  uint64_t before = 0, created = 0, lent = 0, now = 0;
+  CHECK(636, kmem_loaned(s, &before) &&
+                 sys(CROI_SYS_IOMMU_CREATE, s->resource, CROI_IOMMU_TYPE_STUB, (uint64_t)&desc, 1, (uint64_t)&iommu) == 0 &&
+                 sys(CROI_SYS_BTI_CREATE, iommu, 0, 0, (uint64_t)&bti, 0) == 0 &&
+                 sys(CROI_SYS_VMO_CREATE_CONTIGUOUS, bti, 4 * PAGE, 0, (uint64_t)&vmo, 0) == 0 && kmem_loaned(s, &created));
+  char page[PAGE];
+  for (int i = 0; i < 4; i++) {
+    for (int j = 0; j < PAGE; j++) page[j] = (char)('A' + i);
+    sys(CROI_SYS_VMO_WRITE, vmo, (uint64_t)page, (uint64_t)i * PAGE, PAGE, 0);
+  }
+  // Decommit lends pages 1 and 2; a slice can't be made over them, nor a
+  // decommit done while one exists.
+  CHECK(637, sys6(CROI_SYS_VMO_OP_RANGE, vmo, CROI_VMO_OP_DECOMMIT, PAGE, 2 * PAGE, 0, 0) == 0 &&
+                 committed_of(vmo, 0) == 2 * PAGE && kmem_loaned(s, &lent) && lent == created + 2 * PAGE);
+  CHECK(638, sys6(CROI_SYS_VMO_CREATE_CHILD, vmo, CROI_VMO_CHILD_SLICE, 0, PAGE, (uint64_t)&slice, 0) == ERR_BAD_STATE);
+  // Mapped: the pages kept read as written; touching a lent one takes it
+  // back, zeroed.
+  uint64_t at = 0;
+  CHECK(639, sys6(CROI_SYS_VMAR_MAP, s->vmar | (uint64_t)(CROI_VM_PERM_READ | CROI_VM_PERM_WRITE) << 32, 0, vmo, 0,
+                  4 * PAGE, (uint64_t)&at) == 0);
+  volatile const char *m = (volatile const char *)at;
+  CHECK(640, m[0] == 'A' && m[3 * PAGE + 7] == 'D' && m[PAGE + 9] == 0 && committed_of(vmo, 0) == 3 * PAGE &&
+                 kmem_loaned(s, &now) && now == created + PAGE);
+  // COMMIT takes the other back, zeroed; then all four are its own again.
+  CHECK(641, sys6(CROI_SYS_VMO_OP_RANGE, vmo, CROI_VMO_OP_COMMIT, 2 * PAGE, PAGE, 0, 0) == 0 &&
+                 sys(CROI_SYS_VMO_READ, vmo, (uint64_t)page, 2 * PAGE, PAGE, 0) == 0 && page[0] == 0 &&
+                 page[PAGE - 1] == 0 && committed_of(vmo, 0) == 4 * PAGE && kmem_loaned(s, &now) && now == created);
+  // With a slice, no decommit; without, lent again and closed while lent:
+  // the pages come back to the VMO's end and to wherever it came from.
+  CHECK(642, sys6(CROI_SYS_VMO_CREATE_CHILD, vmo, CROI_VMO_CHILD_SLICE, 0, PAGE, (uint64_t)&slice, 0) == 0 &&
+                 sys6(CROI_SYS_VMO_OP_RANGE, vmo, CROI_VMO_OP_DECOMMIT, 0, PAGE, 0, 0) == ERR_BAD_STATE &&
+                 sys(CROI_SYS_HANDLE_CLOSE, slice, 0, 0, 0, 0) == 0);
+  sys(CROI_SYS_VMAR_UNMAP, s->vmar, at, 4 * PAGE, 0, 0);
+  CHECK(643, sys6(CROI_SYS_VMO_OP_RANGE, vmo, CROI_VMO_OP_DECOMMIT, 0, 4 * PAGE, 0, 0) == 0 &&
+                 committed_of(vmo, 0) == 0 && sys(CROI_SYS_HANDLE_CLOSE, vmo, 0, 0, 0, 0) == 0 &&
+                 kmem_loaned(s, &now) && now == before);
+  uint32_t handles[2] = {bti, iommu};
+  sys(CROI_SYS_HANDLE_CLOSE_MANY, (uint64_t)handles, 2, 0, 0, 0);
+  return 0;
+}
+
 // K14d: thread_raise_exception. ZX_EXCP_USER goes to each job debugger
 // from the caller's job up, one after the other, the reply ignored; with
 // none it returns at once.
@@ -4524,6 +4582,8 @@ static int64_t extensions(const startup_t *s) {
   if (timers != 0) return timers;
   int64_t raised = user_exceptions(s);
   if (raised != 0) return raised;
+  int64_t loaning = page_loaning(s);
+  if (loaning != 0) return loaning;
   int64_t reclaimed = reclaim(s);
   if (reclaimed != 0) return reclaimed;
   int64_t random = cprng_checks();

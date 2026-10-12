@@ -1750,6 +1750,30 @@ PageQueues + Evictor + MemoryWatchdog without the page queues):
   reboot). Lock order: aspace -> vmo (harvest); the registry lock is a
   leaf (heap below it).
 
+Page loaning, K14f (Kernel/Vm/Loans.swift, Pmm.swift's loaning part;
+Zircon's physical page borrowing; Todhchai requirement 3):
+- Lenders: a contiguous VMO's decommitted range (vmo_op_range DECOMMIT,
+  `Loans.decommit`; refused on slices, with children, over pinned pages)
+  and the contiguous pool's free pages (lent at boot and on each free,
+  taken back by `ContiguousPool.allocate`). `croi.ppb.loan=off` turns it
+  off (contiguous DECOMMIT NOT_SUPPORTED again, the pool idle).
+- PMM: lent free pages are PageState `.freeLoaned` on their own list,
+  which only `allocateLoaned` (a borrower) draws from; `Page.loaned` /
+  `loanCancelled` in `reclaimFlags`; a borrowed page keeps its borrower
+  in `next` (VmoRecord) and `prev` (index). A borrowed page's free goes
+  back to the loaned list, or to its lender if cancelled. `unloan` is
+  the lender's step: back (free, or not lent), evict (borrowed), wait (in
+  transit). KMEM free_loaned_bytes.
+- A contiguous VMO's lent pages are bits in `VmoRecord.lent`: `lookup` /
+  `commit(at:)` see them absent, eager mapping skips them (the mapper
+  registered and the bits read in one locked step: `addMapper(lentIn:)`),
+  the fault path and every `Pagers.ensure*` take them back through
+  `Loans.ensure` (zeroed; written back for uncached VMOs), as does pin;
+  slices of a VMO with lent pages are BAD_STATE; the VMO's end takes them
+  back first (`endOfLender`). `Loans.mutex` (outermost) serializes lending
+  and taking back. Attribution and ZX_INFO_VMO count lent pages out.
+- Mode 17's `page_loaning` (checks 636-643).
+
 Boot budgets, K9f (Kernel/Trace/Budgets.swift, BootOptions.swift's
 `SelfTests`, tools/bench.py):
 - `boot-lean-icount` (arm64, rv64): the lean boot under QEMU
