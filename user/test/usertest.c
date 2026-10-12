@@ -5547,6 +5547,104 @@ static int64_t jit_views(const startup_t *s) {
   return 0;
 }
 
+// K15c: deadline-aware idle (power.h).
+// `all` is a mapped buffer of 128 records (this program has no writable data).
+static croi_idle_state_stats_t idle_stats_in(croi_idle_state_stats_t *all, const startup_t *s, uint32_t cpu,
+                                             uint32_t state) {
+  croi_idle_state_stats_t none;
+  zero_bytes(&none, sizeof none);
+  uint64_t actual = 0, avail = 0;
+  if (sys6(CROI_SYS_OBJECT_GET_INFO, s->resource, CROI_INFO_CPU_IDLE_STATES, (uint64_t)all, 128 * sizeof *all,
+           (uint64_t)&actual, (uint64_t)&avail) != 0)
+    return none;
+  for (uint64_t i = 0; i < actual; i++)
+    if (all[i].cpu == cpu && all[i].state == state) return all[i];
+  return none;
+}
+
+static int64_t idle_states(const startup_t *s) {
+  uint32_t buffer_vmo = 0;
+  uint64_t buffer = 0;
+  CHECK(729, sys(CROI_SYS_VMO_CREATE, 2 * PAGE, 0, (uint64_t)&buffer_vmo, 0, 0) == 0 &&
+                 sys6(CROI_SYS_VMAR_MAP, s->vmar | (uint64_t)(CROI_VM_PERM_READ | CROI_VM_PERM_WRITE) << 32, 0, buffer_vmo,
+                      0, 2 * PAGE, (uint64_t)&buffer) == 0);
+  sys(CROI_SYS_HANDLE_CLOSE, buffer_vmo, 0, 0, 0, 0);
+#define idle_stats(s, cpu, state) idle_stats_in((croi_idle_state_stats_t *)buffer, s, cpu, state)
+  croi_idle_state_t table[9];
+  zero_bytes(table, sizeof table);
+  for (int i = 0; i < 9; i++) {
+    table[i].exit_latency_ns = 1000 * (uint64_t)(i + 1);
+    table[i].target_residency_ns = 1000;
+    table[i].method = CROI_IDLE_METHOD_HALT;
+  }
+  // Refusals: too many, latencies out of order, unknown flags, a method
+  // this CPU lacks.
+  croi_idle_state_t backwards[2] = {table[1], table[0]}, flagged = table[0], foreign = table[0];
+  flagged.flags = 1u << 7;
+#if defined(__x86_64__)
+  foreign.method = CROI_IDLE_METHOD_PSCI;
+#else
+  foreign.method = CROI_IDLE_METHOD_MWAIT;
+#endif
+  CHECK(729, sys(CROI_SYS_CPU_SET_IDLE_STATES, s->resource, 0, (uint64_t)table, 9, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_CPU_SET_IDLE_STATES, s->resource, 0, (uint64_t)backwards, 2, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_CPU_SET_IDLE_STATES, s->resource, 0, (uint64_t)&flagged, 1, 0) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_CPU_SET_IDLE_STATES, s->resource, 0, (uint64_t)&foreign, 1, 0) == ERR_NOT_SUPPORTED);
+  // CPU 0: a shallow state, and a deep one (10 ms to wake); a third that
+  // stops the timer is skipped, never entered.
+  croi_idle_state_t three[3] = {table[0], table[1], table[2]};
+  three[1].exit_latency_ns = 10000000;
+  three[2].exit_latency_ns = 10000000;
+  three[2].flags = CROI_IDLE_FLAG_TIMER_STOPS;
+  CHECK(730, sys(CROI_SYS_CPU_SET_IDLE_STATES, s->resource, 0, (uint64_t)three, 3, 0) == 0);
+  sleep_ns(50000000);
+  croi_idle_state_stats_t deep = idle_stats(s, 0, 1), stops = idle_stats(s, 0, 2);
+  croi_idle_state_stats_t shallow = idle_stats(s, 0, 0), plain = idle_stats(s, 0, CROI_IDLE_STATE_DEFAULT);
+  CHECK(734, shallow.entries + deep.entries + stops.entries + plain.entries + stops.skipped + deep.demoted > 0);  // the info works
+  CHECK(735, deep.demoted == 0);
+  CHECK(736, stops.skipped > 0);
+  CHECK(730, deep.entries > 0 && stops.entries == 0);
+  // An interrupt on CPU 0 with a deadline profile (100 us every 1 ms: a
+  // bound of ~0.9 ms) keeps CPU 0 out of the 10 ms state until it goes.
+  uint32_t v = 0, profile = 0;
+  // (The profile makes CPU 0 choose again at once: counted from before it.)
+  CHECK(731, deadline_profile(s->resource, 100000, 1000000, 1000000, &profile) == 0 &&
+                 sys(CROI_SYS_INTERRUPT_CREATE, 0, 0, CROI_INTERRUPT_VIRTUAL, (uint64_t)&v, 0) == 0);
+  croi_idle_state_stats_t before = idle_stats(s, 0, 1);
+  CHECK(731, sys(CROI_SYS_OBJECT_SET_PROFILE, v, profile, 0, 0, 0) == 0);
+  sleep_ns(50000000);
+  croi_idle_state_stats_t during = idle_stats(s, 0, 1);
+  sys(CROI_SYS_HANDLE_CLOSE, v, 0, 0, 0, 0);
+  sleep_ns(50000000);
+  croi_idle_state_stats_t after = idle_stats(s, 0, 1);
+  CHECK(731, during.entries == before.entries && during.demoted > before.demoted && after.entries > during.entries);
+  sys(CROI_SYS_HANDLE_CLOSE, profile, 0, 0, 0, 0);
+  CHECK(731, sys(CROI_SYS_CPU_SET_IDLE_STATES, s->resource, 0, 0, 0, 0) == 0);
+  // The hardware's own: MWAIT (amd64, where the CPU has MONITOR) and PSCI
+  // standby (arm64), on CPU 0.
+  croi_idle_state_t hardware = table[0];
+#if defined(__x86_64__)
+  hardware.method = CROI_IDLE_METHOD_MWAIT;
+  hardware.param = 0;  // C1
+  int64_t installed = sys(CROI_SYS_CPU_SET_IDLE_STATES, s->resource, 0, (uint64_t)&hardware, 1, 0);
+  CHECK(732, installed == 0 || installed == ERR_NOT_SUPPORTED);
+  if (installed == 0) {
+    sleep_ns(50000000);
+    CHECK(732, idle_stats(s, 0, 0).entries > 0);
+  }
+#elif defined(__aarch64__)
+  hardware.method = CROI_IDLE_METHOD_PSCI;
+  hardware.param = 0;  // standby
+  CHECK(733, sys(CROI_SYS_CPU_SET_IDLE_STATES, s->resource, 0, (uint64_t)&hardware, 1, 0) == 0);
+  sleep_ns(50000000);
+  CHECK(733, idle_stats(s, 0, 0).entries > 0);
+#endif
+  sys(CROI_SYS_CPU_SET_IDLE_STATES, s->resource, 0, 0, 0, 0);
+  sys(CROI_SYS_VMAR_UNMAP, s->vmar, buffer, 2 * PAGE, 0, 0);
+#undef idle_stats
+  return 0;
+}
+
 static uint64_t pac_sign(uint64_t value, uint64_t modifier) {
 #if defined(__aarch64__)
   register uint64_t x17 __asm__("x17") = value;
@@ -5771,6 +5869,8 @@ static int64_t extensions(const startup_t *s, uint64_t vdso_base) {
   if (accounts != 0) return accounts;
   int64_t views = jit_views(s);
   if (views != 0) return views;
+  int64_t idle = idle_states(s);
+  if (idle != 0) return idle;
   int64_t signedPointers = pointer_auth(s);
   if (signedPointers != 0) return signedPointers;
   int64_t guardedCode = guarded_pages(s);

@@ -133,6 +133,34 @@ arch_idle:
     jmp     1b
 .size arch_idle, . - arch_idle
 
+// void arch_idle_mwait(uint32_t hint) (K15c): a C-state from the power
+// service's table, entered as arch_wait_for_interrupt halts: sti's
+// one-instruction shadow covers the mwait, so no interrupt slips in
+// between, and the one that ends it is taken inside (ECX 0: the
+// break-on-masked-interrupt extension isn't needed, and QEMU's TCG raises
+// #GP for it whatever CPUID says). The line monitored is this file's own,
+// written by nobody. Returns masked.
+.globl arch_idle_mwait
+.type arch_idle_mwait, @function
+arch_idle_mwait:
+    mov     %edi, %r8d
+    lea     idle_monitor_line(%rip), %rax
+    xor     %ecx, %ecx
+    xor     %edx, %edx
+    monitor
+    mov     %r8d, %eax
+    sti
+    mwait
+    cli
+    ret
+.size arch_idle_mwait, . - arch_idle_mwait
+
+.section .bss.idle_monitor_line, "aw", @nobits
+.balign 64
+idle_monitor_line:
+    .skip   64
+.section .text.arch_cpu, "ax", @progbits
+
 // void arch_wait_for_interrupt(void): sti's one-instruction shadow means
 // the interrupt can't arrive before hlt.
 .globl arch_wait_for_interrupt

@@ -98,6 +98,7 @@ add_library(kernel-swift OBJECT
   Kernel/Sched/ExtendedStateSelfTest.swift
   Kernel/Sched/Thread.swift
   Kernel/Sched/Scheduler.swift
+  Kernel/Sched/Idle.swift
   Kernel/Sched/SchedulerSelfTest.swift
   Kernel/Sched/MutexSelfTest.swift
   Kernel/Sched/DeadlineSelfTest.swift

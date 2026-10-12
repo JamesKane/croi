@@ -220,7 +220,7 @@ enum Scheduler {
             // through its poll comes back there, past the settle above (a
             // stale slice timer woke Todhchai's 10 s nanosleep once).
             Timers.settle()
-            arch_wait_for_interrupt()
+            Idle.enter(me)  // K15c: the deepest state the next timer and the wake-latency bound allow
             unsafe percpu.pointee.stats.idleTime += Clock.now() - waiting
             unsafe percpu.pointee.stats.idleWakeups += 1
         }
@@ -1303,22 +1303,70 @@ enum Scheduler {
 
     /// The wake-latency bound and frequency floor `cpu` publishes for the
     /// power service (KP enforces them; these are the hooks).
+    /// K15c: an idle `cpu` wakes to choose its idle state again (a new
+    /// table, or a new bound, takes effect at once).
+    static func reevaluateIdle(cpu: Int) {
+        locked {
+            guard cpu != Int(Cpu.current), cpus[cpu].ready, let running = cpus[cpu].current,
+                  running.pointee.isIdle else { return }
+            kick(cpu)
+        }
+    }
+
+    /// `cpu`'s wake-latency bound, unlocked (the idle governor's read: a
+    /// stale value lasts one idle).
+    static func wakeLatencyBound(cpu: Int) -> UInt64 { cpus[cpu].wakeLatencyBound }
+
     static func powerHints(cpu: Int) -> (wakeLatency: UInt64, frequencyFloor: UInt64) {
         locked { (cpus[cpu].wakeLatencyBound, cpus[cpu].frequencyFloor) }
     }
 
+    /// K15c: interrupts routed to a CPU with a deadline profile: (object
+    /// address, CPU, the profile's parameters). Lock held.
+    nonisolated(unsafe) private static var interruptLatency = UniqueArray<(UInt64, Int, DeadlineParams)>()
+
+    /// An interrupt object's deadline demand on `cpu` (nil: none, or gone).
+    static func setInterruptLatency(_ object: UInt64, cpu: Int, _ params: DeadlineParams?) {
+        locked {
+            var touched = InlineArray<2, Int>(repeating: -1)
+            var i = 0
+            while i < interruptLatency.count {
+                if interruptLatency[i].0 == object {
+                    touched[0] = interruptLatency[i].1
+                    _ = interruptLatency.remove(at: i)
+                } else {
+                    i += 1
+                }
+            }
+            if let params {
+                interruptLatency.append((object, cpu, params))
+                touched[1] = cpu
+            }
+            for j in 0..<2 where touched[j] >= 0 && touched[j] < Smp.count { recomputePowerHints(touched[j]) }
+        }
+    }
+
     /// Wake latency: the least slack (deadline minus the wall time its
-    /// budget needs here) among the reservations admitted on `cpu`.
+    /// budget needs here) among the reservations admitted on `cpu`, and
+    /// (K15c) the interrupts routed there with a deadline profile.
     private static func recomputePowerHints(_ cpu: Int) {
         var latency = UInt64.max
+        func demand(_ params: DeadlineParams) {
+            let wall = params.capacity * SchedScale.capacityOne / cpus[cpu].capacity
+            latency = min(latency, params.deadline > wall ? params.deadline - wall : 0)
+        }
         var cursor = contexts
         while let context = cursor {
-            if context.pointee.cpu == cpu {
-                let params = context.pointee.profile.params
-                let wall = params.capacity * SchedScale.capacityOne / cpus[cpu].capacity
-                latency = min(latency, params.deadline > wall ? params.deadline - wall : 0)
-            }
+            if context.pointee.cpu == cpu { demand(context.pointee.profile.params) }
             cursor = context.pointee.next
+        }
+        for i in 0..<interruptLatency.count where interruptLatency[i].1 == cpu { demand(interruptLatency[i].2) }
+        // An idle CPU chose its state for the old bound: woken, it chooses
+        // again (K15c: a deep state must not outlast a new real-time
+        // demand; Linux does the same when latency constraints change).
+        if latency != cpus[cpu].wakeLatencyBound, cpu != Int(Cpu.current), cpus[cpu].ready,
+           let running = cpus[cpu].current, running.pointee.isIdle {
+            kick(cpu)
         }
         cpus[cpu].wakeLatencyBound = latency
         cpus[cpu].frequencyFloor = cpus[cpu].admitted

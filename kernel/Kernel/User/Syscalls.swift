@@ -438,6 +438,10 @@ enum Syscalls {
             try exceptionCall(number, a, table)
         case 86 where a[1] == UInt64(CROI_INFO_CPU_STATS):  // returns a count
             return try CpuStatistics.info(a, table)
+        case 86 where a[1] == UInt64(CROI_INFO_CPU_IDLE_STATES):  // K15c
+            try idleInfo(a, table)
+        case 245:  // cpu_set_idle_states (K15c)
+            try idleCall(a, table)
         case 80...89, 210...215:
             try ipcCall(number, a, table)
         case 90...99:

@@ -298,6 +298,16 @@ enum Timers {
     /// armed for the earliest timer still pending, or not at all. `cancel`
     /// leaves it armed for speed, which on an idle CPU is a wakeup for
     /// nothing (K10f: an idle machine takes none).
+    /// This CPU's earliest pending `latest` (.max: none): how long an idle
+    /// CPU will sleep at most (K15c's governor).
+    static func nextLatest() -> UInt64 {
+        let queue = self.queue
+        lock(queue)
+        let earliest = earliestLatest(queue)
+        unlock(queue)
+        return earliest
+    }
+
     static func settle() {
         let queue = self.queue
         lock(queue)

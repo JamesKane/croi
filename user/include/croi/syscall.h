@@ -179,6 +179,7 @@ enum : uint64_t {
   CROI_SYS_ACCOUNT_SET_LIMIT = 241,     // (account, limit)
   CROI_SYS_ACCOUNT_BIND_PRESSURE_PORT = 242,  // (account, port, key)
   CROI_SYS_PROCESS_SET_ACCOUNT = 243,   // (process, account)
+  CROI_SYS_CPU_SET_IDLE_STATES = 245,   // (resource, cpu, const croi_idle_state_t *, count): power.h, K15c
   CROI_SYS_VMAR_MAP_VIEW = 244,         // (vmar | perms << 32, vmar_offset, vmo, vmo_offset, len): task.h, K15b  // (options, type, const croi_exception_context_t *): K14d
   CROI_SYS_SYSTEM_POWERCTL = 180,       // (power resource, cmd, const croi_system_powerctl_arg_t *)
 

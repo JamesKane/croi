@@ -139,6 +139,7 @@ enum InterruptObjects {
     /// The last reference went (Objects.destroy).
     static func destroyObject(_ object: ObjectPointer) {
         _ = destroy(object)
+        latencyChanged(object, gone: true)
         let interrupt = InterruptPointer(object: object)
         let port = interrupt.pointee.port
         if port != 0 {
@@ -264,6 +265,7 @@ enum InterruptObjects {
             return old
         }
         dropContext(old)
+        latencyChanged(object)
     }
 
     private static func dropContext(_ address: UInt64) {
@@ -483,6 +485,25 @@ enum InterruptObjects {
             interrupt.pointee.affinity = mask
             interrupt.pointee.cpu = cpu
         }
+        latencyChanged(object)  // K15c: its bound moves with it
+    }
+
+    /// K15c (Todhchai ext 11): an interrupt with a deadline profile (lent
+    /// or handed off) bounds the wake latency of the CPU it is routed to,
+    /// as an admitted deadline thread does, so the idle governor never
+    /// leaves that CPU in a state slower to wake than its deadline allows.
+    static func latencyChanged(_ object: ObjectPointer, gone: Bool = false) {
+        let (cpu, params) = object.header.lock.withLock { () -> (Int, DeadlineParams?) in
+            let interrupt = InterruptPointer(object: object)
+            if !gone, interrupt.pointee.context != 0 {
+                return (interrupt.pointee.cpu, SchedContextPointer(address: interrupt.pointee.context).pointee.profile.params)
+            }
+            if !gone, let lent = interrupt.pointee.lend, lent.discipline == .deadline {
+                return (interrupt.pointee.cpu, lent.params)
+            }
+            return (interrupt.pointee.cpu, nil)
+        }
+        Scheduler.setInterruptLatency(object.address, cpu: cpu, params)
     }
 
 }

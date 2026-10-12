@@ -7,6 +7,9 @@
 
 // Enables interrupts and waits for them forever (the idle loop).
 [[noreturn]] void arch_idle(void);
+// amd64 (K15c): MONITOR a private line, then sti; MWAIT with `hint`; cli
+// (as arch_wait_for_interrupt's sti; hlt). Returns masked.
+void arch_idle_mwait(uint32_t hint);
 
 // Called with interrupts masked: waits until one is pending, lets it be
 // taken, and returns with interrupts masked again. No wakeup is lost

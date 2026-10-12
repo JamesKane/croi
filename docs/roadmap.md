@@ -842,6 +842,18 @@ THREAD, VMO, maps, handle table) and the NAME property.
   ALWAYS_NEED) and their eviction when a lender wants its page. On by
   default (`croi.ppb.loan=off`). Requirement 3's pool no longer holds
   memory idle.
+- **K15c: deadline-aware idle (Todhchai ext 11).** Agreed with Todhchai
+  2026-10-12: one idle-state table per CPU, evaluated by devmgr (ACPI
+  _LPI/_CST) and installed by the power service (cpu_set_idle_states,
+  245, POWER resource); a deterministic governor (the deepest state whose
+  target residency fits before the next timer and whose exit latency fits
+  the CPU's wake-latency bound); interrupts carrying a deadline profile
+  (lent or handed off) bound their routed CPU like admitted deadline
+  threads; per-state statistics with demotions and skips
+  (CROI_INFO_CPU_IDLE_STATES). Methods: HALT, MWAIT hints (amd64), PSCI
+  CPU_SUSPEND standby (arm64). Not yet: states that stop the timer or
+  lose context (skipped and counted until an always-on wake timer and
+  context save exist), the frequency floor (ext 12).
 - **K15b: reservations, atomic views and the JIT in user space (ext 7,
   F-218).** Agreed with Todhchai 2026-10-12: vmar_allocate RESERVATION
   and JIT, vmar_map_view (atomic), protect/op_range/unmap on views,

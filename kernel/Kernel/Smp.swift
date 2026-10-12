@@ -31,6 +31,8 @@ struct PerCpu: ~Copyable {
     /// The frame of the interrupt this CPU is handling, or 0 (samplers read
     /// it; user memory isn't paged in while it is set).
     var interruptFrame: UInt64 = 0
+    /// K15c: this CPU's idle-state table (an `IdleTable` on the heap), or 0.
+    var idleTable: UInt64 = 0
     /// A user access that must not page memory in (futex reads under the
     /// scheduler lock): a fault goes straight to recovery.
     var noPageIn = false

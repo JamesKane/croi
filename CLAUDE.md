@@ -1292,6 +1292,37 @@ Todhchai M4's shutdown):
   process with threads in port, counter and event waits plus a spinner
   30 times, each TERMINATED within 500 ms).
 
+Deadline-aware idle, K15c (Kernel/Sched/Idle.swift, include/power.h,
+syscall 245; Todhchai ext 11):
+- `cpu_set_idle_states(resource, cpu, croi_idle_state_t *, count)`: the
+  POWER system resource (base 5) or root; up to 8 states, exit latencies
+  non-decreasing, known flags only, a method this CPU has (HALT; MWAIT
+  with a hint, amd64 with CPUID MONITOR; PSCI CPU_SUSPEND with a power
+  state, arm64 with PSCI), else INVALID_ARGS / NOT_SUPPORTED; count 0
+  removes the table. The table (heap, `PerCpu.idleTable`) is swapped under
+  `Idle.lock` and the CPU, if idle, kicked to choose again.
+- `Idle.enter` (the idle loop's halt, after `Timers.settle`): the deepest
+  state whose target residency is at most the time to the CPU's next
+  timer (`Timers.nextLatest`) and whose exit latency is at most its
+  wake-latency bound (`Scheduler.wakeLatencyBound`); states with
+  TIMER_STOPS or CONTEXT_LOST are skipped (no always-on wake timer or
+  context save yet), too-slow ones demoted, each counted; none fits: a
+  plain halt. Entries are counted at entry, residency at exit. amd64
+  MWAIT is `sti; mwait; cli` (as the halt; QEMU TCG raises #GP for ECX
+  bit 0, the masked break event).
+- The bound: admitted deadline contexts on the CPU, and (K15c) interrupt
+  objects with a deadline profile lent or handed off, at the CPU they are
+  routed to (`Scheduler.setInterruptLatency`, from
+  `InterruptObjects.latencyChanged`: set_profile, set_affinity, destroy).
+  A changed bound kicks an idle CPU.
+- object_get_info(INFO resource or root, CROI_INFO_CPU_IDLE_STATES =
+  0x10005): croi_idle_state_stats_t per CPU and state (entries,
+  residency, demoted, skipped), then one with state DEFAULT for plain
+  halts; actual/avail as list topics.
+- Mode 17's checks 729-736 (refusals; a deep state entered, a
+  TIMER_STOPS one skipped; an interrupt's deadline profile demoting CPU 0
+  until it closes; MWAIT where the CPU has it, PSCI standby on arm64).
+
 An idle machine makes no wakeups, K10f (M4: 0 per second;
 resource.h CROI_INFO_CPU_STATS, Smp.swift `CpuStats`):
 - object_get_info(INFO resource or root, CROI_INFO_CPU_STATS = 16):
