@@ -5294,6 +5294,168 @@ static int64_t review_queues(const startup_t *s) {
 }
 
 // Negative tests from the second review (pager, VMO ops).
+// Review 2's open items (checks 737-): threads for the size lock tests.
+// w[0] the stream or VMO, w[1] the result, w[2] done.
+static void size_lock_writer(uint64_t arg) {
+  volatile int64_t *w = (volatile int64_t *)arg;
+  croi_iovec_t one = {(void *)"x", 1};
+  uint64_t actual = 0;
+  w[1] = sys6(CROI_SYS_STREAM_WRITEV_AT, (uint32_t)w[0], 0, (uint64_t)w[3], (uint64_t)&one, 1, (uint64_t)&actual);
+  w[2] = 1;
+  sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
+}
+
+static void size_lock_resizer(uint64_t arg) {
+  volatile int64_t *w = (volatile int64_t *)arg;
+  w[1] = sys(CROI_SYS_VMO_SET_SIZE, (uint32_t)w[0], (uint64_t)w[3], 0, 0, 0);
+  w[2] = 1;
+  sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
+}
+
+// 740: a pager answering every READ with 'P' pages until told to stop.
+// r[0] port, [1] pager, [2] vmo, [3] stop, [4] supplies.
+static void race_pager(uint64_t arg) {
+  volatile uint64_t *r = (volatile uint64_t *)arg;
+  croi_port_packet_t packet;
+  char page[PAGE];
+  for (int i = 0; i < PAGE; i++) page[i] = 'P';
+  while (!r[3]) {
+    if (sys(CROI_SYS_PORT_WAIT, (uint32_t)r[0], now_ns() + 50000000ull, (uint64_t)&packet, 0, 0) != 0) continue;
+    uint64_t *req = (uint64_t *)&packet.payload;
+    if (packet.type != CROI_PKT_TYPE_PAGE_REQUEST || (uint16_t)req[0] != CROI_PAGER_VMO_READ) continue;
+    uint32_t aux = 0;
+    sys(CROI_SYS_VMO_CREATE, req[2], 0, (uint64_t)&aux, 0, 0);
+    for (uint64_t at = 0; at < req[2]; at += PAGE) sys(CROI_SYS_VMO_WRITE, aux, (uint64_t)page, at, PAGE, 0);
+    sys6(CROI_SYS_PAGER_SUPPLY_PAGES, (uint32_t)r[1], (uint32_t)r[2], req[1], req[2], aux, 0);
+    sys(CROI_SYS_HANDLE_CLOSE, aux, 0, 0, 0, 0);
+    r[4]++;
+  }
+  sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
+}
+
+// 740: reads page 0 until told to stop, keeping the slowest read and any
+// failure. q[0] vmo, [1] stop, [2] reads, [3] slowest ns, [4] first error,
+// [5] a read's start (0 between reads).
+static void race_reader(uint64_t arg) {
+  volatile uint64_t *q = (volatile uint64_t *)arg;
+  char c = 0;
+  while (!q[1]) {
+    uint64_t start = now_ns();
+    q[5] = start;
+    int64_t result = sys(CROI_SYS_VMO_READ, (uint32_t)q[0], (uint64_t)&c, 0, 1, 0);
+    q[5] = 0;
+    uint64_t took = now_ns() - start;
+    if (took > q[3]) q[3] = took;
+    if (result != 0 && q[4] == 0) q[4] = (uint64_t)result;
+    if (result == 0 && c != 'P' && c != 0 && q[4] == 0) q[4] = 1;
+    q[2]++;
+  }
+  sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
+}
+
+static int64_t review_open(const startup_t *s) {
+  // A stream write waiting for its VMO's pager holds that VMO's size lock
+  // only: a write growing another VMO's stream goes ahead (737; one global
+  // lock stalled it until the pager answered), while vmo_set_size of the
+  // same VMO waits for it (738: the size can't move under the write).
+  uint32_t pg = 0, port = 0, paged = 0, ps = 0, anon = 0, as = 0;
+  CHECK(737, sys(CROI_SYS_PAGER_CREATE, 0, (uint64_t)&pg, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_PORT_CREATE, 0, (uint64_t)&port, 0, 0, 0) == 0 &&
+                 sys6(CROI_SYS_PAGER_CREATE_VMO, pg, CROI_VMO_RESIZABLE, port, 5, 4 * PAGE, (uint64_t)&paged) == 0 &&
+                 sys(CROI_SYS_STREAM_CREATE, CROI_STREAM_MODE_WRITE, paged, 0, (uint64_t)&ps, 0) == 0 &&
+                 sys(CROI_SYS_VMO_CREATE, 4 * PAGE, 0, (uint64_t)&anon, 0, 0) == 0 &&
+                 sys(CROI_SYS_VMO_SET_STREAM_SIZE, anon, 0, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_STREAM_CREATE, CROI_STREAM_MODE_WRITE, anon, 0, (uint64_t)&as, 0) == 0);
+  volatile int64_t blocked[4] = {ps, 1, 0, 0}, other[4] = {as, 1, 0, 100}, resize[4] = {paged, 1, 0, 2 * PAGE};
+  uint32_t t1 = start_thread(s, size_lock_writer, (uint64_t)blocked);
+  croi_port_packet_t packet;
+  CHECK(737, sys(CROI_SYS_PORT_WAIT, port, now_ns() + 5000000000ull, (uint64_t)&packet, 0, 0) == 0 &&
+                 packet.type == CROI_PKT_TYPE_PAGE_REQUEST);
+  sleep_ns(20000000);
+  uint32_t t2 = start_thread(s, size_lock_writer, (uint64_t)other);
+  uint32_t t3 = start_thread(s, size_lock_resizer, (uint64_t)resize);
+  for (int i = 0; i < 100 && !other[2]; i++) sleep_ns(10000000);
+  sleep_ns(50000000);
+  int64_t other_done = other[2], other_result = other[1], resize_early = resize[2];
+  // The pager answers: the write lands, then the resize.
+  uint32_t aux = 0;
+  sys(CROI_SYS_VMO_CREATE, 4 * PAGE, 0, (uint64_t)&aux, 0, 0);
+  sys6(CROI_SYS_PAGER_SUPPLY_PAGES, pg, paged, 0, 4 * PAGE, aux, 0);
+  join(t1);
+  join(t2);
+  join(t3);
+  uint64_t size = 0;
+  CHECK(737, other_done && other_result == 0);
+  CHECK(745, blocked[1] == 0);  // the blocked write landed once supplied
+  CHECK(738, !resize_early && resize[1] == 0 &&
+                 sys(CROI_SYS_VMO_GET_SIZE, paged, (uint64_t)&size, 0, 0, 0) == 0 && size == 2 * PAGE);
+  uint32_t handles[] = {pg, port, paged, ps, anon, as, aux};
+  for (int i = 0; i < 7; i++) sys(CROI_SYS_HANDLE_CLOSE, handles[i], 0, 0, 0, 0);
+
+  // 739: op DIRTY over a dirty zero interval (a TRAP_DIRTY VMO's grown
+  // space) commits zero pages there, dirty (Zircon's; it was NOT_FOUND).
+  uint32_t tp = 0, tport = 0, tv = 0;
+  croi_vmo_dirty_range_t ranges[4];
+  uint64_t counts[2] = {0, 0};
+  croi_info_vmo_t info;
+  zero_bytes(&info, sizeof info);
+  char byte = 1;
+  CHECK(739, sys(CROI_SYS_PAGER_CREATE, 0, (uint64_t)&tp, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_PORT_CREATE, 0, (uint64_t)&tport, 0, 0, 0) == 0 &&
+                 sys6(CROI_SYS_PAGER_CREATE_VMO, tp, CROI_VMO_TRAP_DIRTY | CROI_VMO_RESIZABLE, tport, 9, PAGE,
+                      (uint64_t)&tv) == 0 &&
+                 sys(CROI_SYS_VMO_SET_SIZE, tv, 3 * PAGE, 0, 0, 0) == 0 &&
+                 sys6(CROI_SYS_PAGER_OP_RANGE, tp, CROI_PAGER_OP_DIRTY, tv, PAGE, 2 * PAGE, 0) == 0 &&
+                 sys6(CROI_SYS_PAGER_QUERY_DIRTY_RANGES, tp | (uint64_t)tv << 32, 0, 3 * PAGE, (uint64_t)ranges,
+                      sizeof ranges, (uint64_t)counts) == 0 &&
+                 counts[0] == 1 && ranges[0].offset == PAGE && ranges[0].length == 2 * PAGE && ranges[0].options == 0 &&
+                 sys6(CROI_SYS_OBJECT_GET_INFO, tv, CROI_INFO_VMO, (uint64_t)&info, sizeof info, 0, 0) == 0 &&
+                 info.committed_bytes == 2 * PAGE &&
+                 sys(CROI_SYS_VMO_READ, tv, (uint64_t)&byte, 2 * PAGE + 7, 1, 0) == 0 && byte == 0);
+  sys(CROI_SYS_HANDLE_CLOSE, tv, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, tport, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, tp, 0, 0, 0, 0);
+
+  // 740: a reader racing ZEROs: each round ZERO makes page 0 a zero
+  // interval and a writeback hands it back to the pager. A read that saw
+  // the gap just before a ZERO used to wait for a supply that never comes
+  // (it skips zero intervals): 300 s. Every read here finishes promptly.
+  uint32_t rp = 0, rport = 0, rv = 0;
+  CHECK(740, sys(CROI_SYS_PAGER_CREATE, 0, (uint64_t)&rp, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_PORT_CREATE, 0, (uint64_t)&rport, 0, 0, 0) == 0 &&
+                 sys6(CROI_SYS_PAGER_CREATE_VMO, rp, 0, rport, 3, PAGE, (uint64_t)&rv) == 0);
+  volatile uint64_t r[5] = {rport, rp, rv, 0, 0}, q[6] = {rv, 0, 0, 0, 0, 0};
+  uint32_t server = start_thread(s, race_pager, (uint64_t)r), reader = start_thread(s, race_reader, (uint64_t)q);
+  int stuck = 0;
+  for (int round = 0; round < 3000 && !stuck; round++) {
+    sys6(CROI_SYS_VMO_OP_RANGE, rv, CROI_VMO_OP_ZERO, 0, PAGE, 0, 0);
+    sys6(CROI_SYS_PAGER_OP_RANGE, rp, CROI_PAGER_OP_WRITEBACK_BEGIN, rv, 0, PAGE, 0);
+    sys6(CROI_SYS_PAGER_OP_RANGE, rp, CROI_PAGER_OP_WRITEBACK_END, rv, 0, PAGE, 0);
+    uint64_t since = q[5];
+    if (since != 0 && now_ns() - since > 1000000000ull) stuck = 1;
+  }
+  for (int i = 0; i < 100 && !stuck; i++) {  // the last read, if any, finishes
+    uint64_t since = q[5];
+    if (since == 0) break;
+    if (now_ns() - since > 1000000000ull) stuck = 1;
+    sleep_ns(20000000);
+  }
+  uint64_t reads = q[2], slowest = q[3], error = q[4];
+  q[1] = 1;
+  r[3] = 1;
+  sys6(CROI_SYS_PAGER_OP_RANGE, rp, CROI_PAGER_OP_FAIL, rv, 0, PAGE, (uint64_t)(int64_t)-40);  // frees a stuck reader
+  join(reader);
+  join(server);
+  CHECK(741, !stuck);
+  CHECK(742, reads > 100);
+  CHECK(743, slowest < 1000000000ull);
+  CHECK(744, error == 0);
+  sys(CROI_SYS_HANDLE_CLOSE, rv, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, rport, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, rp, 0, 0, 0, 0);
+  return 0;
+}
+
 static int64_t review_pager(const startup_t *s) {
   (void)s;
   uint32_t big = 0, anon = 0, ro = 0;
@@ -5865,6 +6027,8 @@ static int64_t extensions(const startup_t *s, uint64_t vdso_base) {
   if (queues != 0) return queues;
   int64_t pagerReview = review_pager(s);
   if (pagerReview != 0) return pagerReview;
+  int64_t open = review_open(s);
+  if (open != 0) return open;
   int64_t accounts = memory_accounts(s);
   if (accounts != 0) return accounts;
   int64_t views = jit_views(s);

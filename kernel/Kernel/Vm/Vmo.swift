@@ -94,6 +94,10 @@ struct VmoRecord: ~Copyable {
     /// K13c: the stream ("content") size, byte-granular, shared by every
     /// stream over this VMO; nil until set, reading as the VMO's size.
     var streamSize: UInt64? = nil
+    /// The wait queue of this VMO's size lock (`Streams.withSizeLock`: a
+    /// blocking mutex serializing stream size changes and vmo_set_size,
+    /// Zircon's per-VMO StreamSizeManager), made on first use; 0 until then.
+    var sizeQueue: UInt64 = 0
     /// K13d: a pager VMO's source (pages come from user space: Pagers),
     /// and, for a snapshot child, whether an ancestor is a pager VMO.
     var pager: PagerSourcePointer? = nil
@@ -200,6 +204,7 @@ enum DiscardState: UInt8 {
         case .physical:
             break
         }
+        if pointee.sizeQueue != 0 { QueuePointer(address: pointee.sizeQueue).deallocate() }  // nobody can hold it now
         let raw = unsafe UnsafeMutablePointer<VmoRecord>(bitPattern: UInt(address))!
         unsafe raw.deinitialize(count: 1)
         unsafe heap.free(UnsafeMutableRawPointer(raw))
@@ -1410,12 +1415,27 @@ enum VmoUserCopy {
     static func commit(_ vmo: VmoPointer, _ offset: UInt64) throws(Status) {
         let (vmo, shift) = vmo.target
         let at = offset + shift
-        guard vmo.commit(at: at) == nil else { return }
-        if vmo.pointee.discard == .discarded { throw .notFound }
-        if at >= vmo.pointee.size { throw .outOfRange }
-        if vmo.pagerGap(at: at) != nil { return }
-        if vmo.pointee.lentPages > 0, vmo.pointee.lock.withLock({ vmo.lentLocked(Int(at / KernelLayout.pageSize)) }) {
-            return
+        let index = Int(at / KernelLayout.pageSize)
+        for _ in 0..<4 {
+            guard vmo.commit(at: at) == nil else { return }
+            if vmo.pointee.discard == .discarded { throw .notFound }
+            if at >= vmo.pointee.size { throw .outOfRange }
+            // A pager VMO's page, judged in one look under its lock:
+            // present (supplied since commit looked) or the pager's (the
+            // next ensure waits for it) is tried again; only a zero
+            // interval's page, which commit allocates, failed. Review 2:
+            // separate looks raced a supply, ZERO and writeback (check 740's
+            // stress) into NO_MEMORY.
+            if vmo.pointee.pager != nil {
+                let zeroFailed = vmo.pointee.lock.withLock { () -> Bool in
+                    vmo.pointee.pages.lookup(index) == 0 && !vmo.pointee.zeros.isEmpty && vmo.zeroStateLocked(at) != nil
+                }
+                if !zeroFailed { return }
+                continue  // a zero interval now: commit allocates there, once more
+            }
+            if vmo.pagerGap(at: at) != nil || vmo.lookup(at: at) != nil { return }  // a child reading through
+            if vmo.pointee.lentPages > 0, vmo.pointee.lock.withLock({ vmo.lentLocked(index) }) { return }
+            break
         }
         throw .noMemory
     }

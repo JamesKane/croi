@@ -84,15 +84,19 @@ struct VmoObject: ~Copyable {
         guard size <= Vmos.maxSize else { throw .outOfRange }
         guard vmo.pointee.resizable else { throw .unavailable }
         let rounded = (size + pageMask) & ~pageMask
-        do throws(VmError) {
-            try Vmo.withBorrowed(vmo) { (v: borrowing Vmo) throws(VmError) in try v.resize(rounded) }
-        } catch {
-            throw error == .pinned ? .badState : error.status
-        }
-        vmo.pointee.lock.withLock { vmo.pointee.streamSize = size }
-        if size < rounded {
-            try? Pagers.ensureWritableRange(vmo, rounded - KernelLayout.pageSize, KernelLayout.pageSize)
-            try? Vmo.withBorrowed(vmo) { (v: borrowing Vmo) throws(VmError) in try v.zero(offset: size, size: rounded - size) }
+        // Under the VMO's size lock, so a stream write or set_stream_size
+        // never sees the end move under it (Zircon's StreamSizeManager).
+        try Streams.withSizeLock(vmo) { () throws(Status) in
+            do throws(VmError) {
+                try Vmo.withBorrowed(vmo) { (v: borrowing Vmo) throws(VmError) in try v.resize(rounded) }
+            } catch {
+                throw error == .pinned ? .badState : error.status
+            }
+            vmo.pointee.lock.withLock { vmo.pointee.streamSize = size }
+            if size < rounded {
+                try? Pagers.ensureWritableRange(vmo, rounded - KernelLayout.pageSize, KernelLayout.pageSize)
+                try? Vmo.withBorrowed(vmo) { (v: borrowing Vmo) throws(VmError) in try v.zero(offset: size, size: rounded - size) }
+            }
         }
     }
 

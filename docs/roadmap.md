@@ -956,12 +956,26 @@ THREAD, VMO, maps, handle table) and the NAME property.
     vmo_set_size past MAX_SIZE, PREFETCH committing anonymous pages,
     hints and CACHE_INVALIDATE check order, ZERO of 0 bytes dirtying a
     page, ALWAYS_NEED/COMMIT over UNBOUNDED ranges unkillable, DIRTY's
-    check order. Open: op DIRTY on a dirty zero interval (NOT_FOUND;
-    Zircon allocates zero pages), a reader that registers just after a
-    ZERO waits to the pager timeout, Streams.sizeLock held across pager
-    waits (a pager-backed stream write stalls every stream size change),
-    vmo_set_stream_size's size check outside the locks, NO_MEMORY
-    reported as SHOULD_WAIT/INVALID_ARGS by socket page allocation.
+    check order. Open: NO_MEMORY reported as SHOULD_WAIT/INVALID_ARGS by
+    socket page allocation.
+  - Review 2's open items, fixed (2026-10-12, checks 737-744): the
+    stream size lock is per VMO (Zircon's StreamSizeManager, made on
+    first use) and vmo_set_size takes it, so a write waiting for one
+    file's pager no longer stalls every stream (737) and the VMO's end
+    can't move under a stream write or vmo_set_stream_size's check
+    (738); op DIRTY commits a zero interval's pages, dirty (739); a
+    reader registering just after a ZERO is satisfied by the zero
+    interval instead of waiting 300 s for a supply that skips it
+    (740-743, a stress of ZERO and writeback against reads; the window is
+    narrow and the stress didn't hit it with the fix removed in 6 boots,
+    so this one is by reasoning). The stress did find vmo_read of a pager
+    VMO returning NO_MEMORY when a supply, ZERO or writeback landed
+    between its commit attempt and the recheck: `VmoUserCopy.commit` now
+    judges a pager VMO's page in one look under its lock and tries again
+    unless a zero interval's page couldn't be allocated (744: failed on
+    KVM, then 2 of 3 TCG boots with a recheck of separate looks).
+    Negative checks: 737 (one global lock), 745 (vmo_set_size without the
+    size lock: the waiting write fails), 739.
   - left, as Zircon does or unverified: NMI/#MC still choose GS from the
     saved CS (no paranoid entry; NMIs are fatal); REMAP_IRQ resources
     checked against the ISA number; iommu_create's reserved ranges

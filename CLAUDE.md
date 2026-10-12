@@ -1563,8 +1563,11 @@ syscalls 194-201; vmo.h):
   a write at or past the VMO's end is OUT_OF_RANGE, one reaching it cut
   short (streams never grow their VMO, as the pinned tree's don't:
   vmo_set_size does, K13h); append writes at
-  the stream size. Size changes are serialized by one global Mutex
-  (Zircon: a per-VMO StreamSizeManager). A user buffer that faults ends
+  the stream size. Size changes (stream writes, vmo_set_stream_size,
+  vmo_set_size) hold their VMO's size lock (`Streams.withSizeLock`, as
+  Zircon's per-VMO StreamSizeManager: a wait queue on the VmoRecord,
+  `sizeQueue`, made on first use; review 2 replaced one global Mutex,
+  which a pager wait held for every stream). A user buffer that faults ends
   a transfer short, NOT_FOUND if nothing moved. vmo_write doesn't move
   the stream size (as Zircon).
 - Mode 17's `streams`.

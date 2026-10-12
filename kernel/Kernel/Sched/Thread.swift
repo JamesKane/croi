@@ -288,6 +288,14 @@ struct QueueHead {
     func deallocate() {
         unsafe heap.free(UnsafeMutableRawPointer(bitPattern: UInt(address))!)
     }
+
+    /// `allocate`, nil when the heap is out (for queues made on demand in a
+    /// syscall, which then fails NO_MEMORY).
+    static func tryAllocate() -> QueuePointer? {
+        guard let raw = unsafe heap.allocate(size: MemoryLayout<QueueHead>.size) else { return nil }
+        unsafe raw.bindMemory(to: QueueHead.self, capacity: 1).initialize(to: QueueHead())
+        return QueuePointer(address: UInt64(UInt(bitPattern: raw)))
+    }
 }
 
 /// The owner of a spawned thread. `join` waits for it to exit and frees

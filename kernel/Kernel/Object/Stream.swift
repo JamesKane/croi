@@ -11,10 +11,12 @@ import Synchronization
 /// vmo_get/set_stream_size and ZX_PROP_VMO_CONTENT_SIZE.
 ///
 /// Copies may fault and page in, so a stream's seek is kept under a
-/// blocking Mutex of its own, and every size-changing write (any stream)
-/// under one global Mutex (Zircon's per-VMO StreamSizeManager serializes
-/// these; one lock is simpler and enough). A faulting user buffer ends a
-/// transfer short; with nothing moved it is NOT_FOUND (Zircon's).
+/// blocking Mutex of its own, and every size-changing write under its
+/// VMO's size lock (`withSizeLock`, Zircon's per-VMO StreamSizeManager;
+/// vmo_set_size takes it too). It was one global Mutex: a write waiting for
+/// one file's pager stalled every other stream's size change (review 2).
+/// A faulting user buffer ends a transfer short; with nothing moved it is
+/// NOT_FOUND (Zircon's).
 ///
 /// Not yet: resizable VMOs (croi has none; writes never grow the VMO, as
 /// in the pinned tree), streams over pager-backed VMOs.
@@ -39,7 +41,27 @@ struct StreamObject: ~Copyable {
 }
 
 enum Streams {
-    static let sizeLock = Mutex()
+    /// Runs `body` holding `vmo`'s size lock (its size owner's: a reference
+    /// shares its root's). The queue is made on first use (NO_MEMORY if it
+    /// can't be) and lives as long as the VMO record; the caller's
+    /// reference keeps that alive.
+    static func withSizeLock<R>(_ vmo: VmoPointer, _ body: () throws(Status) -> R) throws(Status) -> R {
+        let vmo = vmo.sizeOwner
+        var queue = vmo.pointee.lock.withLock { vmo.pointee.sizeQueue }
+        if queue == 0 {
+            guard let made = QueuePointer.tryAllocate() else { throw .noMemory }
+            queue = vmo.pointee.lock.withLock { () -> UInt64 in
+                if vmo.pointee.sizeQueue == 0 { vmo.pointee.sizeQueue = made.address }
+                return vmo.pointee.sizeQueue
+            }
+            if queue != made.address { made.deallocate() }  // another thread's won
+        }
+        let lock = QueuePointer(address: queue)
+        Scheduler.lockMutex(lock)
+        defer { Scheduler.unlockMutex(lock) }
+        return try body()
+    }
+
     static var modeRead: UInt32 { UInt32(CROI_STREAM_MODE_READ) }
     static var modeWrite: UInt32 { UInt32(CROI_STREAM_MODE_WRITE) }
     static var modeAppend: UInt32 { UInt32(CROI_STREAM_MODE_APPEND) }
@@ -75,9 +97,13 @@ enum Streams {
     static func setStreamSize(_ vmo: VmoPointer, _ size: UInt64) throws(Status) {
         let vmo = vmo.sizeOwner
         guard case .anonymous = vmo.pointee.kind else { throw .notSupported }
-        guard size <= vmo.pointee.size else { throw .outOfRange }
-        sizeLock.lock()
-        defer { sizeLock.unlock() }
+        try withSizeLock(vmo) { () throws(Status) in try setStreamSizeLocked(vmo, size) }
+    }
+
+    /// Size lock held, so vmo_set_size can't move the VMO's end between the
+    /// check and the zeroing (review 2: the check was outside every lock).
+    private static func setStreamSizeLocked(_ vmo: VmoPointer, _ size: UInt64) throws(Status) {
+        guard size <= vmo.pointee.lock.withLock({ vmo.pointee.size }) else { throw .outOfRange }
         let old = streamSize(vmo)
         let from = min(old, size)
         // Zircon's: zeroed up to the new size's page end (a pager VMO's
@@ -208,11 +234,17 @@ enum Streams {
                       _ count: UInt64) throws(Status) -> (UInt64, UInt64) {
         let me = StreamPointer(object: object)
         let vmo = me.pointee.vmo
-        let limit = vmo.sizeOwner.pointee.size
         let total = try capacity(vector, count)
         guard total > 0 else { return (requested, 0) }
-        sizeLock.lock()
-        defer { sizeLock.unlock() }
+        return try withSizeLock(vmo) { () throws(Status) -> (UInt64, UInt64) in
+            try writeLocked(vmo, at: requested, append: append, total, vector, count)
+        }
+    }
+
+    private static func writeLocked(_ vmo: VmoPointer, at requested: UInt64, append: Bool, _ total: UInt64,
+                                    _ vector: UInt64, _ count: UInt64) throws(Status) -> (UInt64, UInt64) {
+        let owner = vmo.sizeOwner
+        let limit = owner.pointee.lock.withLock { owner.pointee.size }
         let size = streamSize(vmo)
         let offset = append ? size : requested
         let (sum, overflow) = offset.addingReportingOverflow(total)
@@ -222,7 +254,6 @@ enum Streams {
         if offset > size { try zero(vmo, size, offset - size) }
         let (moved, faulted) = try transfer(vmo, offset, end - offset, vector, count, toUser: false)
         if offset + moved > size {
-            let owner = vmo.sizeOwner
             owner.pointee.lock.withLock { owner.pointee.streamSize = offset + moved }
         }
         if moved == 0, faulted { throw .notFound }

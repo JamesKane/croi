@@ -439,11 +439,15 @@ enum Pagers {
     }
 
     /// Whether `root`'s page at `offset` is what a waiter of this kind
-    /// waits for (read: present; dirty: dirty). Source locked.
+    /// waits for (read: present, or in a zero interval; dirty: dirty).
+    /// Source locked. A reader that found a gap just before a ZERO made it
+    /// a zero interval registered after `zeroPages` let its waiters go, and
+    /// waited for a supply that skips zero intervals: 300 s (review 2).
     private static func satisfied(_ root: VmoPointer, _ offset: UInt64, dirty: Bool) -> Bool {
         root.pointee.lock.withLock { () -> Bool in
             let present = root.pointee.pages.lookup(Int(offset / KernelLayout.pageSize)) != 0
-            return dirty ? !present || root.dirtLocked(offset) == PageDirt.dirty : present
+            if dirty { return !present || root.dirtLocked(offset) == PageDirt.dirty }
+            return present || (!root.pointee.zeros.isEmpty && root.zeroStateLocked(offset) != nil)
         }
     }
 
@@ -679,7 +683,7 @@ enum Pagers {
         let end = offset + UInt64(pages.count) * page
         source.pointee.lock.withLock {
             trimLocked(source, offset, end, dirty: false)
-            resolveLocked(source) { at, dirty in !dirty && vmo.lookup(at: at) != nil ? 0 : nil }
+            resolveLocked(source) { at, dirty in !dirty && satisfied(vmo, at, dirty: false) ? 0 : nil }
         }
         wakeWaiters(source)
     }
@@ -783,13 +787,35 @@ enum Pagers {
 
     /// pager_op_range DIRTY (range checked): every page present, else
     /// NOT_FOUND (the DIRTY requests there are still resolved: their
-    /// waiters ask again); then all dirty, and their waiters go on.
+    /// waiters ask again); then all dirty, and their waiters go on. A zero
+    /// interval's pages are committed first, zeroed and dirty (Zircon's: it
+    /// allocates zero pages there; croi said NOT_FOUND, review 2).
     static func dirty(_ vmo: VmoPointer, offset: UInt64, length: UInt64) throws(Status) {
         guard let source = vmo.pointee.pager else { throw .badState }
         guard source.pointee.trapDirty else { throw .notSupported }
         let page = KernelLayout.pageSize
         let end = offset + length
         var result: Status? = nil
+        var attempts = 0
+        while true {
+            var at = offset
+            while at < end {
+                if vmo.readsAsZero(at), vmo.commit(at: at) == nil { throw .noMemory }
+                at += page
+            }
+            // A ZERO meanwhile makes a zero interval again: once more.
+            let zeroAgain = vmo.pointee.lock.withLock { () -> Bool in
+                var at = offset
+                while at < end {
+                    if vmo.pointee.pages.lookup(Int(at / page)) == 0, !vmo.pointee.zeros.isEmpty,
+                       vmo.zeroStateLocked(at) != nil { return true }
+                    at += page
+                }
+                return false
+            }
+            attempts += 1
+            if !zeroAgain || attempts >= 4 { break }
+        }
         source.pointee.lock.withLock {
             if source.pointee.detached {
                 result = .badState
