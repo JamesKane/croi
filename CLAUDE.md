@@ -82,7 +82,8 @@ machine's history:
 
 - `boot/`     UEFI loader. Linked as an ELF static PIE, converted to PE32+
               by `tools/elf2efi.py` (LLVM has no RISC-V COFF backend).
-- `kernel/`   Kernel image (static PIE at CROI_KERNEL_BASE).
+- `kernel/`   Kernel image (static PIE linked at CROI_KERNEL_BASE, run at a
+              random base: KASLR).
 - `lib/handoff/` Loader -> kernel handoff ABI (`croi_handoff_t`, C header).
 - `lib/fmt/`  `TextOutput`: allocation-free text formatting for both images.
 - `lib/pagetables/` Page-table formats + generic builder (loader and kernel).
@@ -99,7 +100,7 @@ volume -> load + relocate it at its link address -> optional
 (copied into the handoff pages) -> GOP framebuffer (linear only) -> RSDP
 and SMBIOS (3.x, else 2.x) from the UEFI config table, early UART from
 ACPI SPCR (COM1 fallback on amd64) -> boot page tables (all RAM identity
-mapped RWX, UART as device, kernel segments W^X at CROI_KERNEL_BASE; Sv39
+mapped RWX, UART as device, kernel segments W^X at the KASLR base; Sv39
 on rv64, TTBR0/TTBR1 on arm64) ->
 ExitBootServices -> memory map converted into the handoff, framebuffer
 range overlaid as CROI_MEM_FRAMEBUFFER (holes in it filled: q35's is a
@@ -133,7 +134,7 @@ never handed out), and switches to them. Kernel address space
 (`KernelLayout`): low half empty; physmap of all RAM at 0xffff800000000000
 (amd64/arm64) or 0xffffffc000000000 (rv64 Sv39), RW + NX; device registers
 the kernel uses are mapped in the physmap as device memory; the image at
-CROI_KERNEL_BASE with text RX, rodata R, data RW. amd64 loads its own GDT
+its KASLR base with text RX, rodata R, data RW. amd64 loads its own GDT
 first thing, since firmware's sits in memory reported free.
 
 Physical memory (`Kernel/Pmm.swift`, global `pmm`, after Zircon's
@@ -2140,7 +2141,26 @@ Kernel enters on the loader's page tables with the handoff's physical
 address as its argument, at EL1 on arm64: if firmware ran at EL2, the
 trampoline neutralizes EL2 (HCR_EL2 = RW only; timer, PMU and GICv3 sysregs
 handed to EL1) and drops to EL1 after ExitBootServices. Not yet supported:
-amd64 5-level paging, KASLR, CPUs where HCR_EL2.E2H is RES1 (VHE-only).
+amd64 5-level paging, CPUs where HCR_EL2.E2H is RES1 (VHE-only).
+
+KASLR (K14j; handoff.h CROI_KASLR_*, boot/Loader `kaslrEntropy`,
+KernelLayout `randomized`/`describeImage`): the loader picks the kernel's
+base, 2 MiB aligned (any segment's alignment), anywhere the image fits in
+a window that ends at the link address: 48-bit amd64/arm64 the last
+512 GiB top-level slot (~2^18 bases), rv64 the Sv39 high half's last
+62 GiB (~2^15). Bits from EFI_RNG_PROTOCOL, else RDRAND/RNDR
+(`croi_arch_entropy`), else the counter (the loader says WEAK). The
+relocations (R_*_RELATIVE only) are applied for that base
+(`ElfImage.load(runningAt:)`); the kernel already used run-time addresses
+throughout (image symbols PC-relative, the handoff's kernel_virt, the
+sampler's image offsets). `croi.kaslr=off` loads at the link address. The
+kernel panics on an image outside the window (or, with self-tests, at the
+link address without croi.kaslr=off). It prints `kaslr: image
+<start>-<end>, link <link>` at boot and after every PANIC line: kernel
+addresses in a log map to the ELF's as address - start + link.
+qemu.sh's `--registers-on` backtraces do that (qemu-monitor.py `backtrace
+<start> <end> <link>`). Physical placement isn't randomized (the physmap
+shows it anyway).
 EL2 does not yet un-trap pointer authentication (HCR_EL2.API/APK), so the
 kernel must not use PAC until it does.
 - `ld/image.ld` Shared linker script: one PT_LOAD per permission (W^X).

@@ -14,6 +14,8 @@ func panic(_ message: StaticString) -> Never {
         console.write("\ncroi kernel: PANIC: ")
         console.write(message)
         console.write("\n")
+        KernelLayout.describeImage(to: console)  // to symbolize what came before
+        console.write("\n")
     }
     arch_halt()
 }

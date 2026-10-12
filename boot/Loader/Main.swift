@@ -46,13 +46,17 @@ func croi_loader_main(
     let unsupported = croi_arch_unsupported()
     guard unsupported == 0 else { throw .unsupported("CPU state left by firmware", unsupported) }
 
-    // Kernel image, loaded at its link address.
+    // Kernel image, loaded at a random base (KASLR) unless the command
+    // line says croi.kaslr=off, then at its link address.
     let volume = try unsafe BootVolume(image: image, boot: boot)
+    let cmdline = try unsafe volume.readIntoPool("\\croi\\cmdline")
+    let kaslr = unsafe !(cmdline.map { unsafe commandLine($0.buffer, $0.size, has: "croi.kaslr=off") } ?? false)
     guard let file = try unsafe volume.readIntoPool("\\croi\\kernel.elf") else {
         throw .kernel("\\croi\\kernel.elf not found")
     }
-    let (elf, kernelPhys) = try unsafe withPhysical(UInt64(UInt(bitPattern: file.buffer)), size: file.size) {
-        (bytes: RawSpan) throws(LoaderError) -> (ElfImage, UInt64) in
+    var kaslrSource: StaticString = "off"
+    let (elf, kernelPhys, kernelBase) = try unsafe withPhysical(UInt64(UInt(bitPattern: file.buffer)), size: file.size) {
+        (bytes: RawSpan) throws(LoaderError) -> (ElfImage, UInt64, UInt64) in
         let elf: ElfImage
         do throws(ElfImage.Error) {
             elf = try ElfImage(parsing: bytes)
@@ -60,28 +64,37 @@ func croi_loader_main(
             throw .kernel(error.reason)
         }
         guard elf.kind == .pie else { throw .kernel("not a static PIE (ET_DYN)") }
+        var base = elf.base
+        if kaslr {
+            let (random, source) = unsafe kaslrEntropy(boot)
+            kaslrSource = source
+            let slots = (CROI_KASLR_SIZE - roundUp(elf.size, to: CROI_KASLR_ALIGN)) / CROI_KASLR_ALIGN + 1
+            base = CROI_KASLR_BASE + random % slots * CROI_KASLR_ALIGN
+        }
         let phys = try boot.allocatePages(elf.size / pageSize, type: CroiMemoryType.kernel)
         try unsafe withPhysicalMutable(phys, size: Int(elf.size)) { (dest: inout MutableRawSpan) throws(LoaderError) in
             do throws(ElfImage.Error) {
-                try elf.load(from: bytes, into: &dest, runningAt: elf.base)
+                try elf.load(from: bytes, into: &dest, runningAt: base)
             } catch {
                 throw .kernel(error.reason)
             }
         }
-        return (elf, phys)
+        return (elf, phys, base)
     }
     unsafe boot.freePool(file.buffer)
     console.write("kernel: ")
     console.write(decimal: elf.size / 1024)
     console.write(" KiB at ")
     console.write(hex: kernelPhys)
-    console.write(", entry ")
-    console.write(hex: elf.entry)
-    console.write("\n")
+    console.write(", base ")
+    console.write(hex: kernelBase)
+    console.write(" (kaslr: ")
+    console.write(kaslrSource)
+    console.write(")\n")
+    let entry = kernelBase + (elf.entry - elf.base)
 
     // Optional: the boot filesystem image and the kernel command line.
     let bootfs = try volume.readIntoPages("\\croi\\bootfs.img", type: CroiMemoryType.bootfs)
-    let cmdline = try unsafe volume.readIntoPool("\\croi\\cmdline")
     // Close the volume now. Its deinit calls firmware, and bootKernel never
     // returns, so left alone it could run after ExitBootServices.
     _ = consume volume
@@ -206,7 +219,7 @@ func croi_loader_main(
     for i in 0..<elf.segmentCount {
         let segment = elf.segments[i]
         try mapping(&tables, 
-            virt: segment.vaddr, phys: kernelPhys + (segment.vaddr - elf.base),
+            virt: kernelBase + (segment.vaddr - elf.base), phys: kernelPhys + (segment.vaddr - elf.base),
             size: roundUp(segment.memsz, to: pageSize),
             MapAttributes(writable: segment.writable, executable: segment.executable, global: true))
     }
@@ -241,7 +254,7 @@ func croi_loader_main(
         version: CROI_HANDOFF_VERSION,
         size: UInt32(MemoryLayout<croi_handoff_t>.size),
         kernel_phys: kernelPhys,
-        kernel_virt: elf.base,
+        kernel_virt: kernelBase,
         kernel_size: elf.size,
         acpi_rsdp: acpi?.rsdp ?? 0,
         efi_system_table: UInt64(UInt(bitPattern: systemTable)),
@@ -265,7 +278,28 @@ func croi_loader_main(
             croi_arch_clean_dcache(range.base, range.size)
         }
     }
-    croi_arch_enter_kernel(tables.rootLow, tables.rootHigh, elf.entry, handoffPhys)
+    croi_arch_enter_kernel(tables.rootLow, tables.rootHigh, entry, handoffPhys)
+}
+
+/// 64 random bits for KASLR and where they came from: the firmware's
+/// EFI_RNG_PROTOCOL, else the CPU's random number instruction, else the
+/// counter (weak: the boot's timing is fairly repeatable; said so).
+@unsafe private func kaslrEntropy(_ boot: BootServices) -> (UInt64, StaticString) {
+    var value: UInt64 = 0
+    if let rng = try? unsafe boot.locateProtocol(.rng, as: EFI_RNG_PROTOCOL.self) {
+        let status = withUnsafeMutableBytes(of: &value) { bytes in
+            unsafe croi_efi_get_rng(rng, 8, bytes.baseAddress!.assumingMemoryBound(to: UInt8.self))
+        }
+        if status == EFI_SUCCESS { return (value, "EFI_RNG_PROTOCOL") }
+    }
+    var strong: UInt64 = 0
+    value = unsafe croi_arch_entropy(&strong)
+    if strong != 0 { return (value, "CPU RNG") }
+    // splitmix64 of the counter, so its low bits spread over the slots.
+    var mixed = croi_arch_counter() &+ 0x9E37_79B9_7F4A_7C15
+    mixed = (mixed ^ (mixed >> 30)) &* 0xBF58_476D_1CE4_E5B9
+    mixed = (mixed ^ (mixed >> 27)) &* 0x94D0_49BB_1331_11EB
+    return (mixed ^ (mixed >> 31), "counter only, WEAK")
 }
 
 /// Adds a boot mapping, reporting failure as a LoaderError.

@@ -59,6 +59,12 @@ func kernel_main(_ handoffAddress: UInt64) -> Never {
     console.write(hex: handoff.kernel_phys)
     console.write(" -> ")
     console.write(hex: handoff.kernel_virt)
+    console.write("; ")
+    KernelLayout.describeImage(to: console)
+    // A loader that put the image anywhere else broke the address layout.
+    guard KernelLayout.randomized || handoff.kernel_virt == KernelLayout.linkBase else {
+        panic("kaslr: image outside the KASLR window")
+    }
     #if arch(arm64)
     console.write("\n  EL:     ")
     console.write(decimal: arch_current_el())
@@ -100,6 +106,10 @@ func kernel_main(_ handoffAddress: UInt64) -> Never {
     reportMemory(allocator, to: console)
     BootOptions.capture(handoff)  // before the handoff memory is reclaimed
     SelfTests.configure()
+    // The loader randomizes unless told not to (croi.kaslr=off).
+    if SelfTests.enabled, !BootOptions.has("croi.kaslr=off"), !KernelLayout.randomized {
+        panic("kaslr: the image is at its link address, croi.kaslr=off not given")
+    }
     BootData.build(handoff, &allocator)
     console.write("  boot:   cmdline \"")
     BootOptions.write(to: console)

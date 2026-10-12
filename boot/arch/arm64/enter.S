@@ -202,6 +202,36 @@ croi_arch_unsupported:
     ret
 .size croi_arch_unsupported, . - croi_arch_unsupported
 
+// uint64_t croi_arch_entropy(uint64_t *strong=x0): RNDR (FEAT_RNG, from
+// ID_AA64ISAR0_EL1.RNDR) with ten tries, else 0 with *strong = 0.
+.globl croi_arch_entropy
+.type croi_arch_entropy, %function
+croi_arch_entropy:
+    mrs     x1, id_aa64isar0_el1
+    ubfx    x1, x1, #60, #4
+    cbz     x1, 2f
+    mov     x2, #10
+1:  mrs     x3, s3_3_c2_c4_0        // RNDR; NZCV = 0b0100 on failure
+    b.ne    3f
+    subs    x2, x2, #1
+    b.ne    1b
+2:  str     xzr, [x0]
+    mov     x0, xzr
+    ret
+3:  mov     x1, #1
+    str     x1, [x0]
+    mov     x0, x3
+    ret
+.size croi_arch_entropy, . - croi_arch_entropy
+
+.globl croi_arch_counter
+.type croi_arch_counter, %function
+croi_arch_counter:
+    isb
+    mrs     x0, cntvct_el0
+    ret
+.size croi_arch_counter, . - croi_arch_counter
+
 // void croi_arch_clean_dcache(addr=x0, size=x1)
 .globl croi_arch_clean_dcache
 .type croi_arch_clean_dcache, %function

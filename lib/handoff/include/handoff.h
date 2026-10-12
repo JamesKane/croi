@@ -15,6 +15,26 @@
 enum : uint64_t { CROI_HANDOFF_MAGIC = 0x31464f444e414843 };  // "CHANDOF1"
 enum : uint32_t { CROI_HANDOFF_VERSION = 5 };
 
+// KASLR: the loader maps the kernel at a random CROI_KASLR_ALIGN-aligned
+// base in [CROI_KASLR_BASE, CROI_KASLR_BASE + CROI_KASLR_SIZE), the whole
+// image inside, which ends where the link address (CROI_KERNEL_BASE in
+// cmake/arch) begins: an image at its link address wasn't randomized
+// (croi.kaslr=off). Above the kernel's physmap and dynamic ranges
+// (KernelLayout): 48-bit amd64/arm64 use the last 512 GiB top-level slot,
+// rv64 the Sv39 high half's last 64 GiB.
+#if defined(__x86_64__) || defined(__aarch64__)
+enum : uint64_t {
+  CROI_KASLR_BASE = 0xffffff8000000000,
+  CROI_KASLR_SIZE = 0x0000007f80000000,  // up to 0xffffffff80000000
+};
+#elif defined(__riscv)
+enum : uint64_t {
+  CROI_KASLR_BASE = 0xfffffff000000000,
+  CROI_KASLR_SIZE = 0x0000000f80000000,  // up to 0xffffffff80000000
+};
+#endif
+enum : uint64_t { CROI_KASLR_ALIGN = 0x200000 };  // 2 MiB: any segment's alignment
+
 // Physical memory range types.
 enum : uint32_t {
   CROI_MEM_FREE = 1,          // usable RAM

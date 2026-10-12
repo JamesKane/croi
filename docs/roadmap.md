@@ -842,6 +842,11 @@ THREAD, VMO, maps, handle table) and the NAME property.
   ALWAYS_NEED) and their eviction when a lender wants its page. On by
   default (`croi.ppb.loan=off`). Requirement 3's pool no longer holds
   memory idle.
+- **K14j: KASLR.** **Done** (2026-10-12): the loader maps the kernel at a
+  random 2 MiB-aligned base below its link address (~2^18 bases on amd64
+  and arm64, ~2^15 on rv64) from EFI_RNG_PROTOCOL, the CPU's RNG or (weak,
+  said so) the counter; `croi.kaslr=off`. Boots, panics and qemu.sh's
+  backtraces name the image's range and link address for symbolizing.
 - **K14i: UNBOUNDED VMOs.** **Done** (2026-10-12): vmo_create and
   pager_create_vmo make a VMO of Zircon's MAX_SIZE (2^64 - 64 KiB) whose
   content size is the size asked for; sizes past MAX_SIZE are
@@ -935,7 +940,7 @@ from Zircon, see docs/zircon-divergences.md.
   its own).
 
 **Kernel internals**
-- amd64 5-level paging, KASLR, VHE-only arm64 CPUs, pointer
+- amd64 5-level paging, VHE-only arm64 CPUs, pointer
   authentication (EL2 doesn't un-trap it yet).
 - IOMMUs: ATS, two-level SMMUv3 stream tables, stage 2, posted
   interrupts, source verification for MSI-X, identity-level MSI isolation

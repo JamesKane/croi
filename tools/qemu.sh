@@ -133,14 +133,19 @@ if [[ -n $expect ]]; then
   [[ -n $screendump ]] && monitor+=(-action shutdown=pause)
   coproc vm { exec timeout 90 "${qemu[@]}" -display none -serial stdio "${monitor[@]}" -no-reboot "$@" 2>&1; }
   pid=$vm_PID  # bash unsets vm_PID when the coproc ends
+  kaslr_image=()
   status=1
   while IFS= read -r line <&"${vm[0]}"; do
     printf '%s\n' "$line"
+    # KASLR: where the kernel runs, so backtraces can name link addresses.
+    if [[ $line =~ kaslr:\ image\ (0x[0-9a-f]+)-(0x[0-9a-f]+),\ link\ (0x[0-9a-f]+) ]]; then
+      kaslr_image=("${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}")
+    fi
     if [[ -n $registers_on ]]; then
       IFS='|' read -ra triggers <<< "$registers_on"
       for trigger in "${triggers[@]}"; do
         if [[ $line == *"$trigger"* ]]; then
-          python3 -I "$(dirname "$0")/qemu-monitor.py" "$socket" backtrace || true
+          python3 -I "$(dirname "$0")/qemu-monitor.py" "$socket" backtrace "${kaslr_image[@]}" || true
           registers_on=
           break
         fi

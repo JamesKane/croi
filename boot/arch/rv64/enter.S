@@ -28,6 +28,23 @@ croi_arch_unsupported:
     ret
 .size croi_arch_unsupported, . - croi_arch_unsupported
 
+// No random number instruction S-mode can count on (Zkr's seed CSR traps
+// unless M-mode opened it): 0 with *strong = 0.
+.globl croi_arch_entropy
+.type croi_arch_entropy, %function
+croi_arch_entropy:
+    sd      zero, 0(a0)
+    li      a0, 0
+    ret
+.size croi_arch_entropy, . - croi_arch_entropy
+
+.globl croi_arch_counter
+.type croi_arch_counter, %function
+croi_arch_counter:
+    rdtime  a0
+    ret
+.size croi_arch_counter, . - croi_arch_counter
+
 // Data caches are coherent with page walks; fence.i covers instructions.
 .globl croi_arch_clean_dcache
 .type croi_arch_clean_dcache, %function
