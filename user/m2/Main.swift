@@ -58,6 +58,9 @@ struct M2 {
             if same { named = true }
         }
         guard named else { throw Failure(what: "finding userboot.next in the environment", status: -25) }
+        // userboot's loader made PT_GNU_RELRO read only once relocated.
+        let relro = croi_relro_read_only()
+        guard relro == 1 else { throw Failure(what: "finding its RELRO read only", status: Int64(relro)) }
         print("m2: started from bootfs by userboot, with its handles and the command line")
         return (resource, thread)
     }

@@ -3,7 +3,8 @@ import CroiRuntime
 /// The K8a boot self-test's Embedded Swift program: runs on the user
 /// runtime from an ELF the kernel loads, prints over the debuglog it was
 /// handed as stdout, and grows a heap through its root VMAR. The kernel
-/// reads its records back and checks the exit code.
+/// reads its records back and checks the exit code (its RELRO must be
+/// read only).
 @main
 struct SwiftTest {
     static func main() {
@@ -29,7 +30,9 @@ struct SwiftTest {
 
         let handles = croi_process_self() != 0 && croi_vmar_root_self() != 0 && croi_vdso_base() != 0
         let log = debuglogRoundTrip()
-        croi_exit(sum == 332_833_500 && aligned && last == 0xA5 && handles && log ? 0x600D : 1)
+        // The kernel's loader made PT_GNU_RELRO read only once relocated.
+        let relro = croi_relro_read_only() == 1
+        croi_exit(sum == 332_833_500 && aligned && last == 0xA5 && handles && log && relro ? 0x600D : 1)
     }
 
     /// debuglog_create/write/read from user mode: a write-only log needs no

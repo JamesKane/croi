@@ -139,7 +139,7 @@ enum ProgramSelfTest {
         console.write("heap over its VMAR, stdout as ")
         console.write(decimal: UInt64(matched))
         console.write(" debuglog records, debuglog create/read/wait from user mode; an ET_EXEC with a dynamic section")
-        console.write(" and no relocations; all torn down\n")
+        console.write(" and no relocations; RELRO read only; all torn down\n")
     }
 
     private static func created(_ body: () throws(Status) -> (ObjectPointer, Rights)) -> (ObjectPointer, Rights) {

@@ -263,8 +263,6 @@ matches the pinned tree where upstream docs or expectations say otherwise).
   userboot as a ZBI-format container in PA_VMO_BOOTDATA built by the
   kernel. Kind: deliberate. Impact: user space reads `include/zbi.h`
   items only.
-- **PT_GNU_RELRO** — not enforced (RELRO pages stay writable). Kind: not
-  yet. Impact: hardening only.
 
 ## croi additions (not in Zircon)
 

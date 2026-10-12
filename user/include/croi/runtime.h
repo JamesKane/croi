@@ -39,6 +39,14 @@ void croi_flush(void);
 // Whether timings are real (hardware or KVM), not QEMU TCG's.
 bool croi_timing_is_real(void);
 
+// This program's PT_GNU_RELRO pages as loaded (run addresses, page
+// rounded as loaders protect them): false if it has none.
+bool croi_relro(uint64_t *start, uint64_t *end);
+
+// Whether the loader made those pages read only: 1, 0 if any is writable
+// (or not mapped), -1 if there are none or the maps can't be read.
+int croi_relro_read_only(void);
+
 // Ends the process (flushing stdout).
 [[noreturn]] void croi_exit(int64_t code);
 

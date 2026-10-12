@@ -834,6 +834,10 @@ THREAD, VMO, maps, handle table) and the NAME property.
   system_get_event, eviction at critical, OOM eviction then reboot),
   KMEM_STATS' reclaim fields, committed_change_events. Not yet: jobkill
   at OOM, compression, zero-page dedupe, page-table reclaim, page loaning.
+- **K14c: RELRO.** **Done** (2026-10-11): PT_GNU_RELRO's pages read only
+  once relocated, in the kernel's loader and userboot's, checked by the
+  programs themselves (user/test/swift, bin/m2: their own mappings through
+  PROCESS_MAPS; each fails with its loader's protect removed).
 - **K14b: timer queues.** **Done** (2026-10-11): each CPU's timers are a
   list (owned nodes for thread timeouts, timer objects and timelines, so
   arming those never fails; 32 slots stay for the kernel's fixed timers),
@@ -887,7 +891,6 @@ from Zircon, see docs/zircon-divergences.md.
   to job debuggers), the ktrace/sampler syscalls (croi has its own).
 
 **Kernel internals**
-- PT_GNU_RELRO enforcement in the loaders.
 - amd64 5-level paging, KASLR, VHE-only arm64 CPUs, pointer
   authentication (EL2 doesn't un-trap it yet).
 - IOMMUs: ATS, two-level SMMUv3 stream tables, stage 2, posted

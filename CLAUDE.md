@@ -512,7 +512,8 @@ syscalls 110-112):
   256 KiB) and a bootstrap channel whose first message is Zircon's
   processargs: PROC_SELF, THREAD_SELF, VMAR_ROOT, then the caller's
   handles (PA_FD 1 = stdout debuglog, PA_RESOURCE, ...), argv[0], the
-  environment. Not yet: PT_GNU_RELRO stays writable. Static PIEs load at a random base (K11b).
+  environment. PT_GNU_RELRO's pages are read only once relocated (K14c).
+  Static PIEs load at a random base (K11b).
 - User programs (`croi_user_program` in cmake/CroiUser.cmake): C and/or
   Embedded Swift, linked at 0x1000000 with separate page-aligned
   segments, against the user runtime (user/lib/runtime, C: `_start` reads
@@ -1628,8 +1629,16 @@ ProgramLoader `randomBase`, userboot `randomPlace`; cmake `PIE`):
 - Relocations: R_*_RELATIVE only; `ElfImage.forEachRelocation(in:)`
   reads PT_DYNAMIC and the RELA table from the file, and the loaders
   write `base - linkBase + addend` into the segment's VMO before mapping
-  it (so RELRO-to-be pages are written while writable; PT_GNU_RELRO
-  still isn't enforced).
+  it (so RELRO-to-be pages are written while writable).
+- RELRO (K14c): `ElfImage.relro` is PT_GNU_RELRO's pages (it must lie in
+  one writable PT_LOAD; both ends rounded down to a page, glibc's rule;
+  lld makes it a page-padded RW segment of its own), and both loaders
+  make them read only after relocating (ProgramLoader `protect`,
+  userboot `vmar_protect`). The runtime's `croi_relro_read_only()`
+  (user/lib/runtime/image.c: the program's own headers via
+  `__ehdr_start`, then PROCESS_MAPS) is checked by user/test/swift (the
+  kernel's loader, PIE and ET_EXEC) and bin/m2 (userboot's). Todhchai's
+  loader must do the same for its programs.
 - Bases: a random page in the lower half of the user range (kernel:
   `Random.word()`, `UserAspace.isRangeFree`, 16 tries; userboot:
   cprng_draw and `vmar_allocate` with SPECIFIC, croi's now as Zircon's,

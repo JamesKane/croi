@@ -3,7 +3,9 @@
 /// static executable) and userboot (programs from bootfs). Page-aligned
 /// PT_LOAD segments, sorted and not overlapping, never writable and
 /// executable; static PIEs may carry R_*_RELATIVE relocations only.
-/// Parsing reads only through bounds-checked loads.
+/// PT_GNU_RELRO must lie in one writable PT_LOAD; loaders make its pages
+/// read only once they have written the relocations. Parsing reads only
+/// through bounds-checked loads.
 public struct ElfImage {
     public enum Kind: UInt16 {
         case executable = 2  // ET_EXEC: runs at its link address
@@ -56,6 +58,11 @@ public struct ElfImage {
     public private(set) var segmentCount = 0
     /// PT_GNU_STACK's size, if the link set one (`-z stack-size=`).
     public private(set) var stackSize: UInt64?
+    /// PT_GNU_RELRO's pages (link-time addresses, page aligned): read
+    /// only once relocated. Both ends rounded down to a page, glibc's rule
+    /// (the start is the segment's in what lld makes, the end padded to a
+    /// page); nil if there is none or it rounds to nothing.
+    public private(set) var relro: (start: UInt64, end: UInt64)?
     /// PT_DYNAMIC address, if any.
     private var dynamic: UInt64?
 
@@ -80,6 +87,7 @@ public struct ElfImage {
 
         let badPhdr = Error("program header out of bounds")
         var end: UInt64 = 0
+        var relroRange: (vaddr: UInt64, memsz: UInt64)?
         for i in 0..<phnum {
             let ph = phoff &+ i &* phentsize
             let type = try file.elfRead(UInt32.self, at: ph, else: badPhdr)
@@ -89,6 +97,11 @@ public struct ElfImage {
             if type == 0x6474_E551 {  // PT_GNU_STACK
                 let size = try file.elfRead(UInt64.self, at: ph + 40, else: badPhdr)
                 if size != 0 { stackSize = size }
+            }
+            if type == 0x6474_E552 {  // PT_GNU_RELRO
+                guard relroRange == nil else { throw Error("two PT_GNU_RELRO headers") }
+                relroRange = (try file.elfRead(UInt64.self, at: ph + 16, else: badPhdr),
+                              try file.elfRead(UInt64.self, at: ph + 40, else: badPhdr))
             }
             guard type == 1 else { continue }  // PT_LOAD
 
@@ -124,6 +137,16 @@ public struct ElfImage {
         guard segmentCount > 0 else { throw Error("no PT_LOAD segments") }
         guard entry >= base, entry < end else { throw Error("entry point outside the image") }
         size = (end - base + Self.pageSize - 1) & ~(Self.pageSize - 1)
+        if let (vaddr, memsz) = relroRange, memsz > 0 {
+            var inside = false
+            for i in 0..<segmentCount where segments[i].writable && vaddr >= segments[i].vaddr
+                && vaddr - segments[i].vaddr <= segments[i].memsz && memsz <= segments[i].memsz - (vaddr - segments[i].vaddr) {
+                inside = true
+            }
+            guard inside else { throw Error("PT_GNU_RELRO outside a writable PT_LOAD") }
+            let start = vaddr & ~(Self.pageSize - 1), stop = (vaddr + memsz) & ~(Self.pageSize - 1)
+            if stop > start { relro = (start, stop) }
+        }
     }
 
     /// Copies the segments into `image` (zeroed, `size` bytes) and applies

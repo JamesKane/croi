@@ -6,7 +6,8 @@ import CroiRuntime
 /// and the kernel command line as its environment. It finds the program
 /// `userboot.next=` names in bootfs (default bin/launcher), loads its ELF
 /// into a new process (read-only segments mapped straight from the bootfs
-/// VMO, writable ones copied, a stack from PT_GNU_STACK), hands it
+/// VMO, writable ones copied, PT_GNU_RELRO then read only, a stack from
+/// PT_GNU_STACK), hands it
 /// everything userboot was given in a processargs message, starts it and
 /// reports when it exits; with `userboot.shutdown=` it then powers the
 /// machine off or resets it.
@@ -102,6 +103,11 @@ struct Userboot {
         for i in 0..<elf.segmentCount {
             try load(elf.segments[i], of: elf, file: file, fileBytes: fileBytes, bootfs: bootfs,
                      bootfsBase: bootfsBase, vmar: target.vmar, vmarBase: target.base, delta: delta)
+        }
+        if let relro = elf.relro {  // relocated: read only from here on
+            try call("protecting its RELRO", sys(CROI_SYS_VMAR_PROTECT,
+                                                 UInt64(target.vmar) | UInt64(CROI_VM_PERM_READ) << 32,
+                                                 relro.start &+ delta, relro.end - relro.start))
         }
         if target.vmar != vmar { _ = sys(CROI_SYS_HANDLE_CLOSE, UInt64(target.vmar)) }  // the region stays
         let stackSize = ((elf.stackSize ?? defaultStackSize) + pageSize - 1) & ~(pageSize - 1)

@@ -8,7 +8,8 @@ import Fmt
 /// loaded by user space.
 ///
 /// The program gets a new process in `job`: each PT_LOAD segment copied
-/// into a VMO of its own and mapped with the segment's permissions, a
+/// into a VMO of its own and mapped with the segment's permissions
+/// (PT_GNU_RELRO's pages read only, once relocated), a
 /// stack (PT_GNU_STACK's size, else 256 KiB) placed first fit, and a
 /// bootstrap channel whose first message is Zircon's processargs
 /// (processargs.h): its own process, thread and root VMAR, then the
@@ -52,6 +53,13 @@ enum ProgramLoader {
             let delta = runBase &- elf.base
             for i in 0..<elf.segmentCount {
                 try load(elf.segments[i], of: elf, from: image, into: record, delta: delta)
+            }
+            if let relro = elf.relro {  // relocated: read only from here on
+                try vmStatus { () throws(VmError) in
+                    try UserAspace.withView(record) { (aspace: borrowing UserAspace) throws(VmError) in
+                        try aspace.protect(relro.start &+ delta, size: relro.end - relro.start, rights: .read)
+                    }
+                }
             }
             lastBase = runBase
             let stackSize = ((elf.stackSize ?? defaultStackSize) + KernelLayout.pageSize - 1) & ~(KernelLayout.pageSize - 1)
