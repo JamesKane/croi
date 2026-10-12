@@ -68,25 +68,42 @@ extension Syscalls {
                 guard !a[2].addingReportingOverflow(a[3]).overflow, a[2] <= vmo.pointee.size else { throw .outOfRange }
                 return
             }
-            var pages = UniqueArray<UInt64>()
+            // The pager VMO's range before anything is taken, and the move
+            // in 2 MiB chunks (review fix: `take` listed every page of the
+            // range at once, under the aux VMO's spinlock: a 2^40-byte
+            // supply ran the heap out or held a CPU masked for minutes).
+            // A range that doesn't fit leaves the aux pages where they are
+            // (Zircon takes them first; only a range that could never be
+            // supplied differs).
+            guard !a[2].addingReportingOverflow(a[3]).overflow, a[2] + a[3] <= vmo.pointee.size else { throw .outOfRange }
             do throws(VmError) {
                 try Vmo.withBorrowed(aux) { (v: borrowing Vmo) throws(VmError) in
                     let held = v.record.pointee.lock.withLock { v.record.pinnedLocked(a[5], a[3]) }
                     guard !held else { throw .pinned }
-                    var taken = try v.take(offset: a[5], size: a[3])
-                    swap(&taken, &pages)
                 }
             } catch {
                 throw error.status
             }
-            var count: UInt64 = 0
-            for i in 0..<pages.count where pages[i] != 0 { count += 1 }
-            aux.pointee.account?.uncharge(count * page)
-            guard !a[2].addingReportingOverflow(a[3]).overflow, a[2] + a[3] <= vmo.pointee.size else {
-                for i in 0..<pages.count where pages[i] != 0 { pmm.free(pages[i]) }
-                throw .outOfRange
+            let chunk = 512 * page
+            var done: UInt64 = 0
+            while done < a[3] {
+                if Scheduler.current.pointee.killPending { throw .canceled }  // it exits on the way out
+                let length = min(a[3] - done, chunk)
+                var pages = UniqueArray<UInt64>()
+                do throws(VmError) {
+                    try Vmo.withBorrowed(aux) { (v: borrowing Vmo) throws(VmError) in
+                        var taken = try v.take(offset: a[5] + done, size: length)
+                        swap(&taken, &pages)
+                    }
+                } catch {
+                    throw error.status
+                }
+                var count: UInt64 = 0
+                for i in 0..<pages.count where pages[i] != 0 { count += 1 }
+                aux.pointee.account?.uncharge(count * page)
+                try Pagers.supply(vmo, offset: a[2] + done, pages: pages)
+                done += length
             }
-            try Pagers.supply(vmo, offset: a[2], pages: pages)
         case 206:  // pager_op_range(pager, op, vmo, offset, length, data)
             guard a[3] % page == 0, a[4] % page == 0 else { throw .invalidArgs }
             let pager = try table.get(handle, type: .pager, rights: .manageVmo)
@@ -105,8 +122,9 @@ extension Syscalls {
                 try Pagers.fail(vmo, offset: a[3], length: a[4], status: status)
             case UInt64(CROI_PAGER_OP_DIRTY):
                 guard a[5] == 0 else { throw .invalidArgs }
-                guard vmo.pointee.pager!.pointee.trapDirty else { throw .notSupported }
+                // The range first (Zircon's GetCowRange; review fix).
                 guard !a[3].addingReportingOverflow(a[4]).overflow, a[3] + a[4] <= vmo.pointee.size else { throw .outOfRange }
+                guard vmo.pointee.pager!.pointee.trapDirty else { throw .notSupported }
                 try Pagers.dirty(vmo, offset: a[3], length: a[4])
             case UInt64(CROI_PAGER_OP_WRITEBACK_BEGIN):
                 guard a[5] == 0 || a[5] == UInt64(CROI_VMO_DIRTY_RANGE_IS_ZERO) else { throw .invalidArgs }

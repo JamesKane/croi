@@ -5284,6 +5284,43 @@ static int64_t review_queues(const startup_t *s) {
   return 0;
 }
 
+// Negative tests from the second review (pager, VMO ops).
+static int64_t review_pager(const startup_t *s) {
+  (void)s;
+  uint32_t big = 0, anon = 0, ro = 0;
+  croi_info_vmo_t info;
+  zero_bytes(&info, sizeof info);  // (= {} calls memset, which this program lacks)
+  uint64_t counts[2];
+  CHECK(707, sys(CROI_SYS_VMO_CREATE, PAGE, CROI_VMO_RESIZABLE, (uint64_t)&big, 0, 0) == 0 &&
+                 sys(CROI_SYS_VMO_SET_SIZE, big, 0xFFFFFFFFFFFFF000ull, 0, 0, 0) == ERR_OUT_OF_RANGE &&
+                 sys(CROI_SYS_VMO_SET_SIZE, big, 0xFFFFFFFFFFFF0001ull, 0, 0, 0) == ERR_OUT_OF_RANGE);
+  // PREFETCH of an anonymous VMO commits nothing (through a READ handle).
+  CHECK(708, sys(CROI_SYS_VMO_CREATE, 4 * PAGE, 0, (uint64_t)&anon, 0, 0) == 0 &&
+                 sys(CROI_SYS_HANDLE_DUPLICATE, anon, RIGHT_READ, (uint64_t)&ro, 0, 0) == 0 &&
+                 sys6(CROI_SYS_VMO_OP_RANGE, ro, CROI_VMO_OP_PREFETCH, 0, 4 * PAGE, 0, 0) == 0 &&
+                 sys6(CROI_SYS_OBJECT_GET_INFO, anon, CROI_INFO_VMO, (uint64_t)&info, sizeof info, (uint64_t)&counts[0],
+                      (uint64_t)&counts[1]) == 0 &&
+                 info.committed_bytes == 0);
+  // Hints on a VMO no pager backs are ignored, range and all; no
+  // invalidate (NOT_SUPPORTED before rights).
+  CHECK(709, sys6(CROI_SYS_VMO_OP_RANGE, anon, CROI_VMO_OP_DONT_NEED, 8 * PAGE, PAGE, 0, 0) == 0 &&
+                 sys6(CROI_SYS_VMO_OP_RANGE, anon, CROI_VMO_OP_ALWAYS_NEED, 0, ~0ull, 0, 0) == 0);
+  CHECK(710, sys6(CROI_SYS_VMO_OP_RANGE, ro, CROI_VMO_OP_CACHE_INVALIDATE, 0, PAGE, 0, 0) == ERR_NOT_SUPPORTED);
+  // A supply far past the pager VMO is refused before anything is taken
+  // (it listed every page of the 1 TiB range); DIRTY's range before TRAP_DIRTY.
+  uint32_t pg = 0, port = 0, paged = 0, aux = 0;
+  CHECK(711, sys(CROI_SYS_PAGER_CREATE, 0, (uint64_t)&pg, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_PORT_CREATE, 0, (uint64_t)&port, 0, 0, 0) == 0 &&
+                 sys6(CROI_SYS_PAGER_CREATE_VMO, pg, 0, port, 1, 4 * PAGE, (uint64_t)&paged) == 0 &&
+                 sys(CROI_SYS_VMO_CREATE, 1ull << 40, 0, (uint64_t)&aux, 0, 0) == 0 &&
+                 sys6(CROI_SYS_PAGER_SUPPLY_PAGES, pg, paged, 0, 1ull << 40, aux, 0) == ERR_OUT_OF_RANGE);
+  CHECK(712, sys6(CROI_SYS_PAGER_OP_RANGE, pg, CROI_PAGER_OP_DIRTY, paged, 8 * PAGE, PAGE, 0) == ERR_OUT_OF_RANGE &&
+                 sys6(CROI_SYS_PAGER_OP_RANGE, pg, CROI_PAGER_OP_DIRTY, paged, 0, PAGE, 0) == ERR_NOT_SUPPORTED);
+  uint32_t handles[] = {big, anon, ro, pg, port, paged, aux};
+  for (int i = 0; i < 7; i++) sys(CROI_SYS_HANDLE_CLOSE, handles[i], 0, 0, 0, 0);
+  return 0;
+}
+
 static uint64_t pac_sign(uint64_t value, uint64_t modifier) {
 #if defined(__aarch64__)
   register uint64_t x17 __asm__("x17") = value;
@@ -5502,6 +5539,8 @@ static int64_t extensions(const startup_t *s, uint64_t vdso_base) {
   if (low != 0) return low;
   int64_t queues = review_queues(s);
   if (queues != 0) return queues;
+  int64_t pagerReview = review_pager(s);
+  if (pagerReview != 0) return pagerReview;
   int64_t signedPointers = pointer_auth(s);
   if (signedPointers != 0) return signedPointers;
   int64_t guardedCode = guarded_pages(s);

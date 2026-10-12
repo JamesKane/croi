@@ -78,7 +78,8 @@ struct VmoObject: ~Copyable {
         let vmo = holder.sizeOwner  // K14g: a reference resizes its root (Zircon's pass-through)
         guard case .anonymous = vmo.pointee.kind else { throw .unavailable }
         let pageMask = KernelLayout.pageSize - 1
-        guard size <= UInt64.max - pageMask else { throw .outOfRange }
+        // Zircon's MAX_SIZE (review fix: only the rounding was checked).
+        guard size <= Vmos.maxSize else { throw .outOfRange }
         guard vmo.pointee.resizable else { throw .unavailable }
         let rounded = (size + pageMask) & ~pageMask
         do throws(VmError) {

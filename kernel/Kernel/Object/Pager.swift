@@ -370,6 +370,9 @@ enum Pagers {
         guard vmo.pointee.pager != nil || vmo.pointee.readsFromPager else { return }
         var at = offset
         while at < offset + size {
+            // A kill ends it (review fix: over an UNBOUNDED range of zero
+            // intervals nothing waited, so a task_kill never took effect).
+            if Scheduler.current.pointee.killPending { throw .canceled }
             try ensure(vmo, at, readAhead: offset + size - at)
             at += KernelLayout.pageSize
         }
@@ -725,6 +728,7 @@ enum Pagers {
     /// ends; under TRAP_DIRTY, and for a child reading through to a pager,
     /// every page, as before.
     static func ensureWritableForZero(_ vmo: VmoPointer, _ offset: UInt64, _ size: UInt64) throws(Status) {
+        guard size > 0 else { return }  // nothing to zero dirties nothing (review fix; Zircon's loop)
         let page = KernelLayout.pageSize
         let first = offset & ~(page - 1), last = (offset + size + page - 1) & ~(page - 1)
         guard let source = vmo.pointee.pager, !source.pointee.trapDirty else {

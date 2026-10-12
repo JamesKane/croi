@@ -188,6 +188,9 @@ extension Syscalls {
             try need(op == UInt32(CROI_VMO_OP_COMMIT) ? .write : .read)
             try inRange()
             guard size > 0 else { return }
+            // Zircon's PrefetchRange commits nothing of a VMO no pager backs
+            // (review fix: a READ handle committed anonymous pages).
+            if op == UInt32(CROI_VMO_OP_PREFETCH), record.pointee.pager == nil, !record.pointee.readsFromPager { return }
             let start = at & ~(page - 1), end = (at + size + page - 1) & ~(page - 1)
             try Pagers.ensureRange(record, start, end - start)
             try vm { () throws(VmError) in
@@ -241,7 +244,8 @@ extension Syscalls {
             try need(.read)
             cacheOp = CROI_CACHE_CLEAN_INVALIDATE
         case UInt32(CROI_VMO_OP_CACHE_INVALIDATE):
-            try need(.write)
+            // Zircon checks its debugging-syscalls switch before the right;
+            // croi has no invalidate at all (review fix: ACCESS_DENIED first).
             throw .notSupported  // Zircon: debugging syscalls only (it can drop dirty lines)
         case UInt32(CROI_VMO_OP_LOCK):  // K14a: discardable VMOs only
             guard rights.contains(.read) || rights.contains(.write) else { throw .accessDenied }
@@ -265,6 +269,9 @@ extension Syscalls {
             try Reclaim.unlock(record, offset: offset, size: size)
             return
         case UInt32(CROI_VMO_OP_DONT_NEED), UInt32(CROI_VMO_OP_ALWAYS_NEED):  // hints: no rights (Zircon's)
+            // A VMO no pager backs ignores them, range and all (Zircon's
+            // HintRange; review fix: OUT_OF_RANGE first).
+            guard record.pointee.pager != nil || record.pointee.readsFromPager else { return }
             try inRange()
             Reclaim.hint(record, offset: at, size: size, alwaysNeed: op == UInt32(CROI_VMO_OP_ALWAYS_NEED))
             return

@@ -918,6 +918,21 @@ THREAD, VMO, maps, handle table) and the NAME property.
     re-arm correctly. A failure now also prints the sampler's lapses and
     arm failures and Scheduler.dump (each CPU's timers and hardware), to
     tell a dead timer from a stalled vCPU next time.
+  - Second review (2026-10-12, sockets/FIFOs/streams and pager/VMO ops;
+    checks 703-712, each fix seen to fail without it except 706, 709,
+    710): socket trim freeing unread pages (data lost, socket wedged),
+    a page-in overflow trap (stream iovecs, vmo_read/write near 2^64),
+    FIFO check order, a 1 TiB pager supply that crashed the kernel (now
+    range-checked first and moved in 2 MiB chunks, killable),
+    vmo_set_size past MAX_SIZE, PREFETCH committing anonymous pages,
+    hints and CACHE_INVALIDATE check order, ZERO of 0 bytes dirtying a
+    page, ALWAYS_NEED/COMMIT over UNBOUNDED ranges unkillable, DIRTY's
+    check order. Open: op DIRTY on a dirty zero interval (NOT_FOUND;
+    Zircon allocates zero pages), a reader that registers just after a
+    ZERO waits to the pager timeout, Streams.sizeLock held across pager
+    waits (a pager-backed stream write stalls every stream size change),
+    vmo_set_stream_size's size check outside the locks, NO_MEMORY
+    reported as SHOULD_WAIT/INVALID_ARGS by socket page allocation.
   - left, as Zircon does or unverified: NMI/#MC still choose GS from the
     saved CS (no paranoid entry; NMIs are fatal); REMAP_IRQ resources
     checked against the ISA number; iommu_create's reserved ranges
