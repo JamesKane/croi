@@ -42,8 +42,8 @@ extension Syscalls {
                 : try Streams.read(stream.object, at: a[2], a[3], a[4])
             if a[5] != 0 { try put(moved, a[5]) }
         case 199:  // stream_seek(stream, whence, offset, out)
-            let stream = try table.get(handle, type: .stream)
-            let rights = try table.rights(of: handle)
+            var rights = Rights()
+            let stream = try table.get(handle, type: .stream, have: &rights)
             guard rights.contains(.read) || rights.contains(.write) else { throw .accessDenied }
             if a[3] != 0 { try check(a[3], MemoryLayout<UInt64>.size) }
             let at = try Streams.seek(stream.object, whence: UInt32(truncatingIfNeeded: a[1]), Int64(bitPattern: a[2]))

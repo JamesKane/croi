@@ -21,10 +21,11 @@ extension Syscalls {
             let debugger = a[1] != 0
             try Policy.check(UInt32(CROI_POL_NEW_CHANNEL))
             try check(a[2], 4)
-            let task = try table.get(handle, rights: .inspect | .duplicate | .transfer | .manageThread)
+            var have = Rights()
+            let task = try table.get(handle, rights: .inspect | .duplicate | .transfer | .manageThread, have: &have)
             if task.type == .thread, debugger { throw .invalidArgs }
             guard task.type == .thread || task.type == .process || task.type == .job else { throw .wrongType }
-            if task.type != .thread, !(try table.rights(of: handle)).contains(.enumerate) { throw .accessDenied }
+            if task.type != .thread, !have.contains(.enumerate) { throw .accessDenied }
             let channel = try Exceptions.createChannel(for: task.object, debugger: debugger)
             try put(try table.add(channel, rights: .transfer | .wait | .read), a[2])
         case 101, 102:  // exception_get_thread / exception_get_process(exception, out)

@@ -168,6 +168,10 @@ enum Observers {
         guard options & ~(edge | timestamp) == 0 else { throw .invalidArgs }
         let object = try table.get(handle, rights: .wait)
         let port = try table.get(portHandle, type: .port, rights: .write)
+        // Zircon raises at its observer limit and still registers (review fix).
+        if Ports.overObserverLimit(port.object) {
+            Policy.limitException(UInt32(CROI_EXCP_POLICY_CODE_PORT_TOO_MANY_OBSERVERS))
+        }
         let record = try QueuedPacketPointer.allocate(PortPacket(key: key, type: PortPacket.signalOne),
                                                       table: table.address, handle: handle)
         port.object.retain()  // the observer's
@@ -300,14 +304,24 @@ enum ObjectWait {
         var satisfied = false
         for i in 0..<items.count where !satisfied {
             let object = ObjectPointer(address: objects[i])
-            try object.header.lock.withLock { () throws(Status) in
-                if object.header.signals & items[i].waitFor != 0 {
-                    satisfied = true
-                    return
+            do throws(Status) {
+                try object.header.lock.withLock { () throws(Status) in
+                    if object.header.signals & items[i].waitFor != 0 {
+                        satisfied = true
+                        return
+                    }
+                    observers[i] = try Observers.add(object, Observer(
+                        kind: .wait(state: state.address, index: i), trigger: items[i].waitFor,
+                        table: table.address, handle: items[i].handle)).address
                 }
-                observers[i] = try Observers.add(object, Observer(
-                    kind: .wait(state: state.address, index: i), trigger: items[i].waitFor,
-                    table: table.address, handle: items[i].handle)).address
+            } catch {
+                // The ones registered so far go before the state is freed
+                // (review fix: a later notify finished a freed WaitState).
+                for j in 0..<i where observers[j] != 0 {
+                    let earlier = ObjectPointer(address: objects[j])
+                    earlier.header.lock.withLock { Observers.remove(earlier, ObserverPointer(address: observers[j])) }
+                }
+                throw error
             }
         }
         var timedOut = false

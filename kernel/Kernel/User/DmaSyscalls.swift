@@ -67,8 +67,8 @@ extension Syscalls {
         let page = KernelLayout.pageSize
         let bti = try table.get(UInt32(truncatingIfNeeded: a[0]), type: .bti, rights: .map)
         guard offset % page == 0, size % page == 0, count <= 64 * page / 8 else { throw .invalidArgs }
-        let vmo = try table.get(vmoHandle, type: .vmo, rights: .map)
-        let vmoRights = try table.rights(of: vmoHandle)
+        var vmoRights = Rights()
+        let vmo = try table.get(vmoHandle, type: .vmo, rights: .map, have: &vmoRights)
         let holder = VmoPointer(address: UnsafeVmoObject(vmo.object).vmo)
         // K14g: an alias pins its root's pages, inside its own window.
         let (record, shift) = holder.target

@@ -302,7 +302,18 @@ enum Channels {
     /// Delivers `message` to the peer of `object`: as the reply to a call
     /// waiting there with its txid, or into the peer's queue. Consumes the
     /// message, even on failure (PEER_CLOSED).
-    static func write(_ object: ObjectPointer, _ message: MessagePointer) throws(Status) {
+    /// Zircon's limit on a channel's queue: a write past it raises a
+    /// CHANNEL_FULL_WRITE policy exception on the writer (the message is
+    /// still queued). Review fix: queues had no bound.
+    static let maxPending = 3500
+
+    /// Queues `message` on the peer, or hands it to a pending call whose
+    /// txid it carries (`matchingCalls`; a call's own request never is a
+    /// reply: review fix, both ends' first txids are the same). True when
+    /// the peer's queue is now past `maxPending`.
+    @discardableResult
+    static func write(_ object: ObjectPointer, _ message: MessagePointer, matchingCalls: Bool = true) throws(Status)
+        -> Bool {
         let me = ChannelPointer(object: object)
         let shared = me.pointee.shared
         message.pointee.flow = croi_flow_id(shared.pointee.id, message.pointee.txid)
@@ -311,11 +322,12 @@ enum Channels {
         var peer: ObjectPointer? = nil
         var replied: CallRecordPointer? = nil
         var becameReadable = false
+        var full = false
         let delivered = shared.pointee.lock.withLock { () -> Bool in
             guard me.pointee.peer != 0 else { return false }
             let other = ObjectPointer(address: me.pointee.peer)
             let them = ChannelPointer(object: other)
-            if message.pointee.txid != 0 {
+            if matchingCalls, message.pointee.txid != 0 {
                 for i in 0..<them.pointee.calls.count {
                     let call = CallRecordPointer(address: them.pointee.calls[i])
                     if call.pointee.txid == message.pointee.txid, call.pointee.state == .pending {
@@ -335,6 +347,7 @@ enum Channels {
             }
             them.pointee.tail = message.address
             them.pointee.queued += 1
+            full = them.pointee.queued > maxPending
             if becameReadable, other.tryRetain() { peer = other }
             return true
         }
@@ -347,6 +360,7 @@ enum Channels {
             peer.updateSignals(clear: 0, set: CROI_SIGNAL_READABLE)
             peer.release()
         }
+        return full
     }
 
     /// The next message's size, without taking it: nil if there is none
@@ -442,7 +456,11 @@ enum Channels {
         message.pointee.call = call.address
         var failure: Status? = nil
         do throws(Status) {
-            try write(object, message)
+            // A request never matches a pending call (Zircon writes it with
+            // write_self_locked).
+            if try write(object, message, matchingCalls: false) {
+                Policy.limitException(UInt32(CROI_EXCP_POLICY_CODE_CHANNEL_FULL_WRITE))
+            }
         } catch {
             failure = error
         }

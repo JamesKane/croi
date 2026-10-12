@@ -39,7 +39,9 @@ extension Syscalls {
                                     handleCount: a[5])
             message.pointee.txid = message.pointee.bytes >= 4
                 ? unsafe UnsafePointer<UInt32>(bitPattern: UInt(message.data))!.pointee : 0
-            try Channels.write(channel.object, message)
+            if try Channels.write(channel.object, message) {
+                Policy.limitException(UInt32(CROI_EXCP_POLICY_CODE_CHANNEL_FULL_WRITE))
+            }
         case 82, 214:  // channel_read(_etc)(channel, options, bytes, handles, num_bytes | num_handles << 32, actuals)
             // Zircon's order: the handle, then the options (MAY_DISCARD).
             let channel = try table.get(handle, type: .channel, rights: .read)
@@ -76,7 +78,9 @@ extension Syscalls {
                                     handleCount: a[5], dispositions: true)
             message.pointee.txid = message.pointee.bytes >= 4
                 ? unsafe UnsafePointer<UInt32>(bitPattern: UInt(message.data))!.pointee : 0
-            try Channels.write(channel.object, message)
+            if try Channels.write(channel.object, message) {
+                Policy.limitException(UInt32(CROI_EXCP_POLICY_CODE_CHANNEL_FULL_WRITE))
+            }
         case 215:  // channel_call_etc(channel, options, deadline, croi_channel_call_etc_args_t *, actual_bytes, actual_handles)
             var args = croi_channel_call_etc_args_t()
             let copied = withUnsafeMutableBytes(of: &args) { raw in
@@ -298,8 +302,8 @@ extension Syscalls {
             guard a[1] == UInt64(CROI_INFO_HANDLE_BASIC) else { throw .notSupported }
             guard a[3] >= UInt64(MemoryLayout<croi_info_handle_basic_t>.size) else { throw .bufferTooSmall }
             try check(a[2], MemoryLayout<croi_info_handle_basic_t>.size)
-            let rights = try table.rights(of: handle)
-            let object = try table.get(handle)
+            var rights = Rights()
+            let object = try table.get(handle, have: &rights)
             try put(croi_info_handle_basic_t(koid: object.koid, rights: rights.rawValue, type: object.type.rawValue,
                                              related_koid: Channels.relatedKoid(object.object), reserved: (0, 0)),
                     a[2])
@@ -422,8 +426,9 @@ extension Syscalls {
                 case UInt32(CROI_HANDLE_OP_MOVE):
                     (object, rights) = try table.take(entry.handle)
                 case UInt32(CROI_HANDLE_OP_DUPLICATE):
-                    let ref = try table.get(entry.handle)
-                    rights = try table.rights(of: entry.handle)
+                    var have = Rights()
+                    let ref = try table.get(entry.handle, have: &have)
+                    rights = have
                     ref.object.retain()  // the message's own
                     object = ref.object
                 default:

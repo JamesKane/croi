@@ -318,7 +318,6 @@ enum Syscalls {
             try VmoObject.createChildCall(a, table)
         case 49:  // vmo_replace_as_executable(vmo, vmex, out), K13b: the handle goes either way
             try check(a[2], MemoryLayout<UInt32>.size)
-            let rights = try table.rights(of: handle)
             _ = try table.get(handle, type: .vmo)
             do throws(Status) {
                 try Resources.check(table, UInt32(truncatingIfNeeded: a[1]), system: UInt64(CROI_RSRC_SYSTEM_VMEX_BASE))
@@ -326,7 +325,11 @@ enum Syscalls {
                 try? table.close(handle)
                 throw error
             }
-            let (object, _) = try table.take(handle)
+            let (object, rights) = try table.take(handle)  // its rights from the same lookup (review fix)
+            guard object.header.type == .vmo else {  // replaced meanwhile: gone either way
+                object.release()
+                throw .wrongType
+            }
             do throws(Status) {
                 try put(try table.add(object, rights: rights | .execute), a[2])
             } catch {

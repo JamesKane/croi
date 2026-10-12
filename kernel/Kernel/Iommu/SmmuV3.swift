@@ -325,6 +325,16 @@ enum Iort {
                 at += length
             }
         }
+        // The kernel's registers from boot (review fix: they joined the root
+        // filter's list only at the first iommu_create, and a physical VMO
+        // made before then kept working).
+        let page = KernelLayout.pageSize
+        for i in 0..<smmuCount where smmus[i].registerBase != 0 {
+            RootFilter.recordKernelMmio(smmus[i].registerBase, 0x2_0000)  // SMMUv3: pages 0 and 1
+        }
+        for i in 0..<v2Count where v2Nodes[i].registerBase != 0 {
+            RootFilter.recordKernelMmio(v2Nodes[i].registerBase, (v2Nodes[i].span + page - 1) & ~(page - 1))
+        }
     }
 
     static func smmuIndex(_ base: UInt64) -> Int? {

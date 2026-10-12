@@ -81,7 +81,8 @@ enum Exceptions {
     /// `frame`) to its handlers, Zircon's order (K13g): the process's
     /// debugger first; the thread's, the process's channel; the debugger
     /// again if it asked for a second chance; then each job's up the tree.
-    static func raise(_ type: UInt32, frame: UnsafeMutablePointer<arch_exception_frame_t>) -> Disposition {
+    static func raise(_ type: UInt32, frame: UnsafeMutablePointer<arch_exception_frame_t>,
+                      synthCode: UInt32 = 0) -> Disposition {
         let me = Scheduler.current
         guard me.pointee.object != 0 else { return .unhandled }  // a kernel test's bare user thread
         let thread = ObjectPointer(address: me.pointee.object)
@@ -100,7 +101,9 @@ enum Exceptions {
                           UInt32(CROI_EXCEPTION_CHANNEL_TYPE_JOB))
             job = JobPointer(object: current).pointee.parent
         }
-        return unsafe deliver(type, frame: UInt64(UInt(bitPattern: frame)), report: report(type, frame.pointee), handlers)
+        var report = unsafe report(type, frame.pointee)
+        report.context.synth_code = synthCode
+        return unsafe deliver(type, frame: UInt64(UInt(bitPattern: frame)), report: report, handlers)
     }
 
     /// The synthetic exceptions (K13g): THREAD_STARTING to the process's
@@ -599,6 +602,20 @@ enum Policy {
             if action == UInt32(CROI_POL_ACTION_DENY_EXCEPTION) { throw .accessDenied }
         default:
             throw .accessDenied
+        }
+    }
+
+    /// A resource limit passed by the calling thread's syscall (Zircon's
+    /// SignalPolicyException): POLICY_ERROR with `code` as synth_code; a
+    /// handler may resume it, unhandled the process is killed. No locks held.
+    static func limitException(_ code: UInt32) {
+        let me = Scheduler.current
+        guard me.pointee.object != 0 else { return }
+        let frame = unsafe UserTraps.userFrame(of: me)
+        switch unsafe Exceptions.raise(UInt32(CROI_EXCP_POLICY_ERROR), frame: frame, synthCode: code) {
+        case .resume: break
+        case .exitThread: Scheduler.locked { Scheduler.interrupt(me) }
+        case .unhandled: killProcess(TaskReturnCode.exceptionKill)
         }
     }
 

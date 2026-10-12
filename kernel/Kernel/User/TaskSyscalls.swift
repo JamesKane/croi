@@ -118,8 +118,8 @@ extension Syscalls {
         guard options & ~(canMap | UInt32(CROI_VM_SPECIFIC)) == 0, specific || a[1] == 0 else { throw .invalidArgs }
         try check(a[3], 4)
         try check(a[4], 8)
-        let parent = try table.get(UInt32(truncatingIfNeeded: a[0]), type: .vmar)
-        let parentRights = try table.rights(of: UInt32(truncatingIfNeeded: a[0]))
+        var parentRights = Rights()
+        let parent = try table.get(UInt32(truncatingIfNeeded: a[0]), type: .vmar, have: &parentRights)
         var rights: Rights = .transfer | .inspect | .destroy
         if options & UInt32(CROI_VM_CAN_MAP_READ) != 0 { rights.insert(.read) }
         if options & UInt32(CROI_VM_CAN_MAP_WRITE) != 0 { rights.insert(.write) }
@@ -157,10 +157,10 @@ extension Syscalls {
         } else {
             guard a[1] == 0 else { throw .invalidArgs }
         }
-        let vmo = try VmoObject.forMapping(table, UInt32(truncatingIfNeeded: a[2]), rights)
-        defer { vmo.release() }
         // What a later vmar_protect may grant: the VMO handle's rights.
-        let vmoRights = try table.rights(of: UInt32(truncatingIfNeeded: a[2]))
+        var vmoRights = Rights()
+        let vmo = try VmoObject.forMapping(table, UInt32(truncatingIfNeeded: a[2]), rights, have: &vmoRights)
+        defer { vmo.release() }
         var ceiling = VmRights()
         if vmoRights.contains(.read) { ceiling.insert(.read) }
         if vmoRights.contains(.write) { ceiling.insert(.write) }
@@ -182,9 +182,8 @@ extension Syscalls {
     private static func transfer(_ value: UInt32, from table: borrowing HandleTable,
                                  into process: ObjectPointer) throws(Status) -> UInt32 {
         guard value != 0 else { return 0 }
-        let rights = try table.rights(of: value)
-        guard rights.contains(.transfer) else { throw .accessDenied }
-        let object = try table.get(value)
+        var rights = Rights()
+        let object = try table.get(value, rights: .transfer, have: &rights)
         let p = ProcessPointer(object: process)
         object.object.retain()  // the new handle's
         let added = try process.header.lock.withLock { () throws(Status) -> UInt32 in
@@ -241,8 +240,8 @@ extension Syscalls {
     /// (pagers may be waited for); the first error stops it.
     private static func vmarOpRange(_ table: borrowing HandleTable, _ a: InlineArray<6, UInt64>) throws(Status) {
         let handle = UInt32(truncatingIfNeeded: a[0])
-        let vmar = try table.get(handle, type: .vmar)
-        let rights = try table.rights(of: handle)
+        var rights = Rights()
+        let vmar = try table.get(handle, type: .vmar, have: &rights)
         let op = a[1]
         let commitOp = UInt64(CROI_VMO_OP_COMMIT), decommitOp = UInt64(CROI_VMO_OP_DECOMMIT)
         let mapRangeOp: UInt64 = 3, zeroOp = UInt64(CROI_VMO_OP_ZERO), dontNeedOp: UInt64 = 12, alwaysNeedOp: UInt64 = 13
@@ -330,10 +329,11 @@ extension Syscalls {
               options & ~(UInt32(CROI_VM_PERM_READ) | UInt32(CROI_VM_SPECIFIC)) == 0 else { throw .invalidArgs }
         guard a[4] == KernelLayout.pageSize else { throw .invalidArgs }
         let clockHandle = UInt32(truncatingIfNeeded: a[3])
-        let clock = try table.get(clockHandle, type: .clock)
+        var clockRights = Rights()
+        let clock = try table.get(clockHandle, type: .clock, have: &clockRights)
         guard let page = ClockPointer(object: clock.object).pointee.page else { throw .invalidArgs }
         let vmar = try table.get(UInt32(truncatingIfNeeded: a[0]), type: .vmar, rights: .read)
-        guard try table.rights(of: clockHandle).contains(.read | .map) else { throw .accessDenied }
+        guard clockRights.contains(.read | .map) else { throw .accessDenied }
         try check(a[5], 8)
         let v = VmarPointer(object: vmar.object).info
         var at: UInt64? = nil

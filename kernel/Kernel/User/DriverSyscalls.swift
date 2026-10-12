@@ -165,8 +165,8 @@ extension Syscalls {
     /// take bytes (cache ops refuse size 0). Out of the VMO: OUT_OF_RANGE.
     private static func vmoOpRange(_ table: borrowing HandleTable, _ handle: UInt32, op: UInt32, offset: UInt64,
                                    size: UInt64, buffer: UInt64, bufferSize: UInt64) throws(Status) {
-        let ref = try table.get(handle, type: .vmo)
-        let rights = try table.rights(of: handle)
+        var rights = Rights()
+        let ref = try table.get(handle, type: .vmo, have: &rights)
         let holder = VmoPointer(address: UnsafeVmoObject(ref.object).vmo)
         // K14g: an alias's pages are its root's, from its offset there.
         let (record, shift) = holder.target

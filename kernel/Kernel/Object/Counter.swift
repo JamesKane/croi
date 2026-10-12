@@ -117,6 +117,10 @@ enum Counters {
                           target: Int64) throws(Status) {
         let object = try waitable(table, handle, rights: .wait | .read)
         let port = try table.get(portHandle, type: .port, rights: .write)
+        // Zircon raises at its observer limit and still registers (review fix).
+        if Ports.overObserverLimit(port.object) {
+            Policy.limitException(UInt32(CROI_EXCP_POLICY_CODE_PORT_TOO_MANY_OBSERVERS))
+        }
         let record = try QueuedPacketPointer.allocate(PortPacket(key: key, type: UInt32(CROI_PKT_TYPE_COUNTER)),
                                                       table: table.address, handle: handle)
         port.object.retain()  // the observer's

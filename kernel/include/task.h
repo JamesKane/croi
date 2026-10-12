@@ -99,6 +99,15 @@ enum : uint32_t {
   CROI_THREAD_STATE_SINGLE_STEP = 5,  // uint32_t: 0 or 1 (not on rv64)
 };
 
+// A POLICY_ERROR's synth_code for Zircon's resource limits (review round
+// 1): a write past a channel's 3500 queued messages, more than 4096 user
+// packets queued on a port, a port's 50000th async wait.
+enum : uint32_t {
+  CROI_EXCP_POLICY_CODE_CHANNEL_FULL_WRITE = 16u,
+  CROI_EXCP_POLICY_CODE_PORT_TOO_MANY_PACKETS = 17u,
+  CROI_EXCP_POLICY_CODE_PORT_TOO_MANY_OBSERVERS = 19u,
+};
+
 typedef struct {
   uint64_t pid;
   uint64_t tid;

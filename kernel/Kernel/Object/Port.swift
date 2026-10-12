@@ -81,6 +81,9 @@ struct PortObject: ~Copyable {
     var head: UInt64 = 0
     var tail: UInt64 = 0
     var queued = 0
+    /// port_queue's packets among them (review fix: they had no bound;
+    /// Zircon's limit is `Ports.maxUserPackets`).
+    var userQueued = 0
     let waiters = QueuePointer.allocate()
     let bindToInterrupt: Bool
     var interruptHead: UInt64 = 0
@@ -93,6 +96,13 @@ struct PortObject: ~Copyable {
 
     /// ZX_DEFAULT_PORT_RIGHTS: no WAIT (ports are waited on with port_wait).
     static var defaultRights: Rights { Rights.basic.subtracting(.wait).union(.read | .write) }
+}
+
+extension QueuedPacketPointer {
+    /// A port_queue packet: no source, no origin handle, not an interrupt's.
+    var isUserPacket: Bool {
+        pointee.source == 0 && pointee.originTable == 0 && pointee.packet.type == PortPacket.user
+    }
 }
 
 @safe struct PortPointer {
@@ -185,6 +195,7 @@ enum Ports {
             port.pointee.head = record.pointee.next
             if port.pointee.head == 0 { port.pointee.tail = 0 }
             port.pointee.queued -= 1
+            if record.isUserPacket { port.pointee.userQueued -= 1 }
             return (record.pointee.packet, record)
         }
     }
@@ -248,11 +259,35 @@ enum Ports {
     // MARK: Syscall-shaped operations
 
     /// port_queue: a user packet (its type is forced to user).
+    /// Zircon's per-port limits (kMaxAllocatedPacketCountPerPort, the
+    /// kernel.port.max-observers default).
+    static let maxUserPackets = 4096
+    static let maxObservers = 50_000
+
     static func queue(_ table: borrowing HandleTable, _ handle: UInt32, _ packet: PortPacket) throws(Status) {
         let ref = try table.get(handle, type: .port, rights: .write)
+        let port = PortPointer(object: ref.object)
         var user = packet
         user.type = PortPacket.user
-        enqueue(PortPointer(object: ref.object), try QueuedPacketPointer.allocate(user))
+        let record = try QueuedPacketPointer.allocate(user)
+        let full = port.pointee.packetsLock.withLock { () -> Bool in
+            guard port.pointee.userQueued <= maxUserPackets else { return true }
+            port.pointee.userQueued += 1
+            return false
+        }
+        guard !full else {
+            record.free()
+            // The caller sees the exception; unhandled, it is killed.
+            Policy.limitException(UInt32(CROI_EXCP_POLICY_CODE_PORT_TOO_MANY_PACKETS))
+            throw .shouldWait
+        }
+        enqueue(port, record)
+    }
+
+    /// A wait_async to `port` would be its `maxObservers`th or more.
+    static func overObserverLimit(_ port: ObjectPointer) -> Bool {
+        let p = PortPointer(object: port)
+        return p.pointee.packetsLock.withLock { p.pointee.watched.count >= maxObservers }
     }
 
     /// port_wait: the next packet, waiting until `deadline` (timedOut).
@@ -387,6 +422,7 @@ enum Ports {
                     if previous != 0 { QueuedPacketPointer(address: previous).pointee.next = record.pointee.next } else { port.pointee.head = record.pointee.next }
                     if port.pointee.tail == record.address { port.pointee.tail = previous }
                     port.pointee.queued -= 1
+                    if record.isUserPacket { port.pointee.userQueued -= 1 }
                     removed.append(record)
                 } else {
                     previous = record.address

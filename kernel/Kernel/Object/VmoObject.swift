@@ -71,9 +71,10 @@ struct VmoObject: ~Copyable {
     /// pinned pages cut off. The content size becomes `size` exactly and
     /// the last page's tail past it reads zero.
     static func setSize(_ table: borrowing HandleTable, _ handle: UInt32, _ size: UInt64) throws(Status) {
-        let ref = try table.get(handle, type: .vmo, rights: .write)
+        var have = Rights()
+        let ref = try table.get(handle, type: .vmo, rights: .write, have: &have)
         let holder = VmoPointer(address: UnsafeVmoObject(ref.object).vmo)
-        if holder.pointee.resizable, !(try table.rights(of: handle)).contains(.resize) { throw .accessDenied }
+        if holder.pointee.resizable, !have.contains(.resize) { throw .accessDenied }
         let vmo = holder.sizeOwner  // K14g: a reference resizes its root (Zircon's pass-through)
         guard case .anonymous = vmo.pointee.kind else { throw .unavailable }
         let pageMask = KernelLayout.pageSize - 1
@@ -124,8 +125,9 @@ struct VmoObject: ~Copyable {
         if options & noWrite != 0, options & resizableChild != 0 { throw .invalidArgs }
         var kind = options & ~noWrite
         let passThrough = kind & resizableChild != 0 && kind & reference != 0
-        let ref = try table.get(handle, type: .vmo, rights: passThrough ? .duplicate | .read | .resize : .duplicate | .read)
-        var rights = try table.rights(of: handle)
+        var rights = Rights()
+        let ref = try table.get(handle, type: .vmo, rights: passThrough ? .duplicate | .read | .resize : .duplicate | .read,
+                                have: &rights)
         let parent = VmoPointer(address: UnsafeVmoObject(ref.object).vmo)
         guard !parent.pointee.discardable else { throw .notSupported }  // K14a, Zircon's
         var snapshot = false
@@ -185,11 +187,18 @@ struct VmoObject: ~Copyable {
     /// right, plus read, write and execute rights for each access asked
     /// for (Zircon's rule). A reference the caller releases.
     static func forMapping(_ table: borrowing HandleTable, _ handle: UInt32, _ rights: VmRights) throws(Status) -> VmoPointer {
+        var have = Rights()
+        return try forMapping(table, handle, rights, have: &have)
+    }
+
+    /// `forMapping`, with the handle's rights from the same lookup.
+    static func forMapping(_ table: borrowing HandleTable, _ handle: UInt32, _ rights: VmRights,
+                           have: inout Rights) throws(Status) -> VmoPointer {
         var needed: Rights = .map
         if rights.contains(.read) { needed.insert(.read) }
         if rights.contains(.write) { needed.insert(.write) }
         if rights.contains(.execute) { needed.insert(.execute) }
-        let ref = try table.get(handle, type: .vmo, rights: needed)
+        let ref = try table.get(handle, type: .vmo, rights: needed, have: &have)
         let vmo = VmoPointer(address: UnsafeVmoObject(ref.object).vmo)
         vmo.retain()
         return vmo

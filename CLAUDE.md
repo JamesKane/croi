@@ -209,6 +209,14 @@ User address spaces and VMOs (K4a, Kernel/Vm/):
   them after `flushOthers`; a failed eager map in `insert` unmaps what it
   mapped; `process_read_memory` retains the VMO under the aspace lock and
   `privatize` returns its child retained.
+- Review round 1, part 3: Zircon's resource limits raise POLICY_ERROR
+  with the code as synth_code (`Policy.limitException`, task.h
+  CROI_EXCP_POLICY_CODE_*): a channel write leaving more than
+  `Channels.maxPending` (3500) queued (the message still goes),
+  port_queue past `Ports.maxUserPackets` (4096 user packets, then
+  SHOULD_WAIT), a port's `maxObservers`th (50000) async wait (still
+  registered). Unhandled, the process dies. `HandleTable.get(have:)`
+  returns a handle's rights from the same lookup as its object.
 - Mapping ceilings (review round 1): each `Mapping` keeps `ceiling`, the
   rights it may ever have (vmar_map: the VMO handle's read/write/execute;
   kernel mappings: what they were mapped with; a `sharedReadOnly` VMO:

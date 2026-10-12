@@ -141,6 +141,11 @@ enum Futexes {
                 let current = FutexPointer(address: me.pointee.futex)
                 me.pointee.futex = 0
                 current.pointee.users -= 1
+                // The last waiter gone (a timeout, a kill): no owner either,
+                // as in Zircon (review fix: owned records never retired).
+                if current.pointee.users == 0, current.pointee.queue.pointee.isEmpty {
+                    Scheduler.setOwner(current.queue, nil)
+                }
                 retired = retire(current)
                 return .done(result)
             }

@@ -5018,6 +5018,100 @@ static int64_t review_fixes(const startup_t *s) {
   return 0;
 }
 
+// Review round 1, the medium items.
+typedef struct {
+  uint32_t channel, tag;
+  int64_t result;
+  uint32_t reply[2];
+} crossed_call_t;
+
+static void crossed_caller(uint64_t arg) {
+  crossed_call_t *c = (crossed_call_t *)arg;
+  uint32_t request[2] = {0, c->tag};
+  croi_channel_call_args_t args = {(uint64_t)request, 0, (uint64_t)c->reply, 0, sizeof request, 0, sizeof c->reply, 0};
+  uint32_t bytes = 0, handles = 0;
+  c->result = sys6(CROI_SYS_CHANNEL_CALL, c->channel, 0, now_ns() + 3000000000ull, (uint64_t)&args, (uint64_t)&bytes,
+                   (uint64_t)&handles);
+  sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
+}
+
+// Answers the call waiting in `channel` with tag + 100.
+static int answer(uint32_t channel) {
+  uint32_t message[2] = {0, 0}, actual[2] = {0, 0};
+  if (!(wait_for(channel, CROI_SIGNAL_READABLE, 2000000000ull) & CROI_SIGNAL_READABLE) ||
+      chan_read(channel, message, 0, sizeof message, 0, actual) != 0 || actual[0] != sizeof message)
+    return 0;
+  message[1] += 100;
+  return chan_write(channel, message, sizeof message, 0, 0) == 0;
+}
+
+typedef struct {
+  uint32_t channel, port;
+  volatile int32_t refusedAt;
+} flood_t;
+
+static void flood(uint64_t arg) {
+  flood_t *f = (flood_t *)arg;
+  uint64_t message = 0;
+  for (int i = 0; i < 3501; i++) chan_write(f->channel, &message, sizeof message, 0, 0);
+  croi_port_packet_t packet = {};
+  for (int i = 0; i < 5000; i++) {
+    if (sys(CROI_SYS_PORT_QUEUE, f->port, (uint64_t)&packet, 0, 0, 0) == ERR_SHOULD_WAIT) {
+      f->refusedAt = i;
+      break;
+    }
+  }
+  sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
+}
+
+// The next exception is a POLICY_ERROR with `code`; resumed.
+static int policy_exception(uint32_t channel, uint32_t code) {
+  croi_exception_info_t info = {};
+  uint32_t exception = 0, thread = 0, handled = CROI_EXCEPTION_STATE_HANDLED;
+  croi_exception_report_t report = {};
+  uint64_t counts[2];
+  int ok = next_exception(channel, &info, &exception) && info.type == CROI_EXCP_POLICY_ERROR &&
+           sys(CROI_SYS_EXCEPTION_GET_THREAD, exception, (uint64_t)&thread, 0, 0, 0) == 0 &&
+           sys6(CROI_SYS_OBJECT_GET_INFO, thread, CROI_INFO_THREAD_EXCEPTION_REPORT, (uint64_t)&report, sizeof report,
+                (uint64_t)&counts[0], (uint64_t)&counts[1]) == 0 &&
+           report.context.synth_code == code &&
+           sys(CROI_SYS_OBJECT_SET_PROPERTY, exception, CROI_PROP_EXCEPTION_STATE, (uint64_t)&handled, 4, 0) == 0;
+  sys(CROI_SYS_HANDLE_CLOSE, thread, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, exception, 0, 0, 0, 0);
+  return ok;
+}
+
+static int64_t review_medium(const startup_t *s) {
+  // Both ends call at once: each request reaches the other end's queue
+  // (their first txids are equal, and B's request was taken as A's reply).
+  uint32_t a = 0, b = 0;
+  CHECK(695, sys(CROI_SYS_CHANNEL_CREATE, 0, (uint64_t)&a, (uint64_t)&b, 0, 0) == 0);
+  crossed_call_t x = {a, 1, 1, {0, 0}}, y = {b, 2, 1, {0, 0}};
+  uint32_t tx = start_thread(s, crossed_caller, (uint64_t)&x);
+  sleep_ns(20000000);
+  uint32_t ty = start_thread(s, crossed_caller, (uint64_t)&y);
+  sleep_ns(20000000);
+  CHECK(695, answer(b) && answer(a) && ended(tx) && ended(ty) && x.result == 0 && x.reply[1] == 101 &&
+                 y.result == 0 && y.reply[1] == 102);
+  sys(CROI_SYS_HANDLE_CLOSE, a, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, b, 0, 0, 0, 0);
+  // Zircon's limits: a channel's 3501st queued message and a port's user
+  // packets past 4096 raise policy exceptions (here handled and resumed).
+  flood_t f = {0, 0, -1};
+  uint32_t reader = 0;
+  uint64_t sp = 0;
+  CHECK(696, sys(CROI_SYS_CHANNEL_CREATE, 0, (uint64_t)&f.channel, (uint64_t)&reader, 0, 0) == 0 &&
+                 sys(CROI_SYS_PORT_CREATE, 0, (uint64_t)&f.port, 0, 0, 0) == 0);
+  uint32_t flooder = unstarted_thread(s, &sp), channel = exception_channel(flooder);
+  CHECK(696, sys(CROI_SYS_THREAD_START, flooder, (uint64_t)flood, sp, (uint64_t)&f, 0) == 0 &&
+                 policy_exception(channel, CROI_EXCP_POLICY_CODE_CHANNEL_FULL_WRITE));
+  CHECK(697, policy_exception(channel, CROI_EXCP_POLICY_CODE_PORT_TOO_MANY_PACKETS) && ended(flooder) &&
+                 f.refusedAt == 4097);
+  uint32_t handles[] = {channel, f.channel, reader, f.port};
+  for (int i = 0; i < 4; i++) sys(CROI_SYS_HANDLE_CLOSE, handles[i], 0, 0, 0, 0);
+  return 0;
+}
+
 static uint64_t pac_sign(uint64_t value, uint64_t modifier) {
 #if defined(__aarch64__)
   register uint64_t x17 __asm__("x17") = value;
@@ -5228,6 +5322,8 @@ static int64_t extensions(const startup_t *s, uint64_t vdso_base) {
   if (ceilings != 0) return ceilings;
   int64_t fixes = review_fixes(s);
   if (fixes != 0) return fixes;
+  int64_t medium = review_medium(s);
+  if (medium != 0) return medium;
   int64_t signedPointers = pointer_auth(s);
   if (signedPointers != 0) return signedPointers;
   int64_t guardedCode = guarded_pages(s);

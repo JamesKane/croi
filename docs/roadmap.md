@@ -855,14 +855,17 @@ THREAD, VMO, maps, handle table) and the NAME property.
   timer_set under one lock, futex cycles through the waiter refused,
   wrapping or 64-bit-overflowing arithmetic in trace_configure, slice
   op_range, the CBS rule and bti_pin. Not a bug after all: READABLE
-  (Channels' read re-checks after clearing). Open, by severity:
-  - medium: handle object and
-    rights read in two lookups; channel_call txids collide when both ends
-    call; futex records leak when a timed-out waiter named an owner;
-    SMMU registers grantable before the first iommu_create; no caps on
-    port packets, channel queues, async waits; ObjectWait.many leaves
-    observers on allocation failure; resource_create overflow (fixed
-    with the wrap check).
+  (Channels' read re-checks after clearing). Part 3, the medium items
+  (checks 695-697; 695 and the channel cap seen to fail without their
+  fixes): a handle's object and rights from one lookup (`HandleTable.get
+  (have:)`), a call's request never matched as a reply (Zircon's
+  write_self_locked), Zircon's limits as policy exceptions with
+  synth_code (channel past 3500 queued: CHANNEL_FULL_WRITE; port past
+  4096 user packets: PORT_TOO_MANY_PACKETS, SHOULD_WAIT; a port's 50000th
+  async wait: PORT_TOO_MANY_OBSERVERS), a futex's owner cleared with its
+  last waiter so the record retires, SMMU registers in the root filter
+  from boot, ObjectWait.many unregisters on a failed add. Open, by
+  severity:
   - low: the EFI seed isn't wiped from the handoff page or stacks;
     userboot/ElfImage overflow traps on malformed ELFs; PPTT short
     nodes; SMC filter misses SYSTEM_OFF2; arm64 msi_create cleanup

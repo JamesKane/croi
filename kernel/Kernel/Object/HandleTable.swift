@@ -112,6 +112,25 @@ struct HandleTable: ~Copyable {
         return ObjectRef(object: object)
     }
 
+    /// `get`, with the handle's rights in `have` from the same lookup
+    /// (review fix: `get` then `rights(of:)` took the lock twice, and a
+    /// slot reused in between paired one object with another's rights).
+    func get(_ handle: UInt32, type: ObjectType? = nil, rights: Rights = Rights(),
+             have: inout Rights) throws(Status) -> ObjectRef {
+        let (object, held) = try table.pointee.lock.withLock { () throws(Status) -> (ObjectPointer, Rights) in
+            let index = try slot(handle)
+            let entry = table.pointee.slots[index]
+            let object = ObjectPointer(address: entry.object)
+            if let type, object.header.type != type { throw .wrongType }
+            guard entry.rights.isSuperset(of: rights) else { throw .accessDenied }
+            object.retain()
+            return (object, entry.rights)
+        }
+        have = held
+        return ObjectRef(object: object)
+    }
+
+    /// A handle's rights alone (no object to pair them with).
     func rights(of handle: UInt32) throws(Status) -> Rights {
         try table.pointee.lock.withLock { () throws(Status) -> Rights in
             table.pointee.slots[try slot(handle)].rights
@@ -152,8 +171,8 @@ struct HandleTable: ~Copyable {
     /// A second handle to the same object with `rights` (a subset of the
     /// original's, or sameRights). Needs the duplicate right.
     func duplicate(_ handle: UInt32, rights: Rights) throws(Status) -> UInt32 {
-        let ref = try get(handle, rights: .duplicate)
-        let have = try self.rights(of: handle)
+        var have = Rights()
+        let ref = try get(handle, rights: .duplicate, have: &have)
         let wanted = rights.contains(.sameRights) ? have : rights
         guard have.isSuperset(of: wanted) else { throw .invalidArgs }
         ref.object.retain()
@@ -168,9 +187,9 @@ struct HandleTable: ~Copyable {
     /// Replaces `handle` with a new one with `rights` (a subset); the old
     /// handle is gone even if this fails.
     func replace(_ handle: UInt32, rights: Rights) throws(Status) -> UInt32 {
-        let have = try self.rights(of: handle)
+        var have = Rights()
+        let ref = try get(handle, have: &have)
         let wanted = rights.contains(.sameRights) ? have : rights
-        let ref = try get(handle)
         guard have.isSuperset(of: wanted) else {
             try close(handle)
             throw .invalidArgs

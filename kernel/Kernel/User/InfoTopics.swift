@@ -76,8 +76,8 @@ extension Syscalls {
             case UInt64(CROI_INFO_VMO_V1): size = 104
             default: return false
             }
-            let ref = try table.get(handle, type: .vmo)  // no rights needed (Zircon's)
-            let rights = try table.rights(of: handle)
+            var rights = Rights()
+            let ref = try table.get(handle, type: .vmo, have: &rights)  // no rights needed (Zircon's)
             let vmo = VmoPointer(address: UnsafeVmoObject(ref.object).vmo)
             try single(vmoInfo(vmo, via: UInt32(CROI_INFO_VMO_VIA_HANDLE), rights: rights.rawValue), size, a)
         case UInt32(CROI_INFO_PROCESS_VMOS_V1):
