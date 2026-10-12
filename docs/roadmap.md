@@ -842,6 +842,13 @@ THREAD, VMO, maps, handle table) and the NAME property.
   ALWAYS_NEED) and their eviction when a lender wants its page. On by
   default (`croi.ppb.loan=off`). Requirement 3's pool no longer holds
   memory idle.
+- **K15b: reservations, atomic views and the JIT in user space (ext 7,
+  F-218).** Agreed with Todhchai 2026-10-12: vmar_allocate RESERVATION
+  and JIT, vmar_map_view (atomic), protect/op_range/unmap on views,
+  SPECIFIC reservations (the SDK's CodeModule), guards by omission;
+  protection keys per address space with a quiet fall back to views;
+  VMEX as the entitlement gate. Fixed on the way: user PKRU wasn't saved
+  at switch-out.
 - **K15a: memory accounts in user space (Todhchai ext 6, F-109).**
   Agreed with Todhchai 2026-10-12: an account object per process budget
   (warning and critical levels, a pressure port, a limit that never

@@ -263,6 +263,25 @@ extension Syscalls {
                 try put(croi_info_thread_trace_t(trace_id: Processes.traceId(thread.object), reserved: 0), a[2])
                 return
             }
+            if a[1] == UInt64(CROI_INFO_VMAR_JIT) {  // K15b
+                guard a[3] >= UInt64(MemoryLayout<croi_info_vmar_jit_t>.size) else { throw .bufferTooSmall }
+                try check(a[2], MemoryLayout<croi_info_vmar_jit_t>.size)
+                let vmar = try table.get(handle, type: .vmar, rights: .inspect)
+                let v = VmarPointer(object: vmar.object).info
+                let kind = try vmStatus { () throws(VmError) -> (reservation: Bool, jit: Bool, key: UInt8) in
+                    try UserAspace.withView(v.aspace) { (aspace: borrowing UserAspace) throws(VmError) -> (reservation: Bool, jit: Bool, key: UInt8) in
+                        try aspace.regionKind(v.region)
+                    }
+                }
+                var info = croi_info_vmar_jit_t()
+                info.flags = (kind.reservation ? UInt32(CROI_VMAR_JIT_FLAG_RESERVATION) : 0)
+                    | (kind.jit ? UInt32(CROI_VMAR_JIT_FLAG_JIT) : 0)
+                info.mechanism = !kind.reservation ? UInt32(CROI_JIT_MECHANISM_NONE)
+                    : kind.key != 0 ? UInt32(CROI_JIT_MECHANISM_PROTECTION_KEYS) : UInt32(CROI_JIT_MECHANISM_VIEWS)
+                info.key = UInt32(kind.key)
+                try put(info, a[2])
+                return
+            }
             if a[1] == UInt64(CROI_INFO_MEMORY_ACCOUNT) {  // K15a
                 guard a[3] >= UInt64(MemoryLayout<croi_info_memory_account_t>.size) else { throw .bufferTooSmall }
                 try check(a[2], MemoryLayout<croi_info_memory_account_t>.size)

@@ -13,6 +13,18 @@ enum : uint32_t {  // vmar options (Zircon's ZX_VM_*)
   // for code built with landing pads; accepted and ignored elsewhere.
   // vmar_protect replaces it like the other permissions.
   CROI_VM_PERM_GUARDED = 1u << 30,
+  // croi (K15b, ext 7): vmar_allocate options. RESERVATION: the child
+  // holds its range for views only (vmar_map_view); vmar_map and
+  // sub-VMARs there are refused; vmar_unmap, vmar_protect and
+  // vmar_op_range work on its views; an unviewed page faults. JIT (implies
+  // RESERVATION): on amd64 with PKU it gets a protection key (per address
+  // space, 1-15) and its views may be read/write/execute, writes opened
+  // per thread with WRPKRU (threads start with keys 1-15 write-disabled);
+  // with no key (other arches, or none left) it is views-only, and
+  // CROI_INFO_VMAR_JIT says so. Executable views need a VMO handle with
+  // EXECUTE (vmo_replace_as_executable: the VMEX resource).
+  CROI_VM_RESERVATION = 1u << 28,
+  CROI_VM_JIT = 1u << 29,
   CROI_VM_SPECIFIC = 1u << 4,
   CROI_VM_REQUIRE_NON_RESIZABLE = 1u << 11,  // K13h: NOT_SUPPORTED for a resizable VMO
   CROI_VM_ALLOW_FAULTS = 1u << 12,           // accepted (Zircon doesn't require it either)
@@ -228,6 +240,24 @@ static_assert(sizeof(croi_info_task_stats_t) == 40);
 enum : uint32_t {
   CROI_INFO_THREAD_TRACE = 0x10001,
 };
+
+// object_get_info(vmar, CROI_INFO_VMAR_JIT) (croi's, K15b; INSPECT): what
+// kind of region the VMAR is and how a JIT writes there.
+enum : uint32_t {
+  CROI_INFO_VMAR_JIT = 0x10004,
+  CROI_VMAR_JIT_FLAG_RESERVATION = 1u << 0,
+  CROI_VMAR_JIT_FLAG_JIT = 1u << 1,
+  CROI_JIT_MECHANISM_NONE = 0,             // not a reservation
+  CROI_JIT_MECHANISM_VIEWS = 1,            // dual views: RW and RX, never RWX
+  CROI_JIT_MECHANISM_PROTECTION_KEYS = 2,  // RWX under `key`, writes per thread (WRPKRU)
+};
+
+typedef struct {
+  uint32_t flags;      // CROI_VMAR_JIT_FLAG_*
+  uint32_t mechanism;  // CROI_JIT_MECHANISM_*
+  uint32_t key;        // the protection key (1-15), or 0
+  uint32_t padding;
+} croi_info_vmar_jit_t;
 
 typedef struct {
   uint32_t trace_id;

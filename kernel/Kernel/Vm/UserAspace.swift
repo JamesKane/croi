@@ -109,6 +109,11 @@ struct UserAspaceRecord: ~Copyable {
     let asid: UInt64
     let lock = SpinLock()
     var mappings = UniqueArray<Mapping>()
+    /// Ext 7 (K15b): the protection keys its JIT reservations hold (bit n:
+    /// key n; key 0 is everything else's). Keys are per address space: a
+    /// PTE's key and a thread's PKRU mean nothing outside it (K4c had 15
+    /// for the whole system).
+    var jitKeys: UInt16 = 1
     /// arm64 (K14s): this process's own pointer authentication key (APIA),
     /// random at creation; each CPU loads it at returns to EL0 of its threads.
     var pacKeyLo: UInt64 = 0
@@ -236,12 +241,16 @@ struct UserAspace: ~Copyable {
                         at fixed: UInt64? = nil, reservation: Bool = false, jit: Bool = false) throws(VmError) -> Region {
         guard size > 0, size % KernelLayout.pageSize == 0, alignment % KernelLayout.pageSize == 0,
               alignment & (alignment - 1) == 0, !jit || reservation else { throw .invalidArgument }
-        var key: UInt8 = 0
-        if jit, Jit.mechanism == .protectionKeys {
-            guard let allocated = Jit.allocateKey() else { throw .noSpace }
-            key = allocated
-        }
         return try record.pointee.lock.withLock { () throws(VmError) -> Region in
+            // A key where the hardware has them and one is left; else the
+            // reservation is views-only (key 0: never RWX).
+            var key: UInt8 = 0
+            if jit, Jit.mechanism == .protectionKeys {
+                for k in 1..<16 where record.pointee.jitKeys & (1 << UInt16(k)) == 0 {
+                    key = UInt8(k)
+                    break
+                }
+            }
             let container = try region(parent)
             guard !container.reservation else { throw .invalidArgument }
             let base: UInt64
@@ -255,9 +264,9 @@ struct UserAspace: ~Copyable {
                     base = try findGap(size, alignment, in: container)
                 }
             } catch {
-                Jit.freeKey(key)
                 throw error
             }
+            record.pointee.jitKeys |= 1 << UInt16(key)
             let region = Region(id: record.pointee.nextRegion, base: base, size: size, parent: parent,
                                 reservation: reservation, jit: jit, jitKey: key)
             record.pointee.nextRegion += 1
@@ -288,7 +297,7 @@ struct UserAspace: ~Copyable {
             while i < record.pointee.regions.count {
                 let r = record.pointee.regions[i]
                 if target.contains(r.base, r.size) {
-                    Jit.freeKey(r.jitKey)
+                    if r.jitKey != 0 { record.pointee.jitKeys &= ~(1 << UInt16(r.jitKey)) }
                     _ = record.pointee.regions.remove(at: i)
                 } else {
                     i += 1
@@ -331,7 +340,7 @@ struct UserAspace: ~Copyable {
     /// see the old view or the new one, never a hole (their faults wait for
     /// the lock and find the new mapping).
     func mapView(_ vmo: borrowing Vmo, offset: UInt64 = 0, size: UInt64, at base: UInt64, in id: UInt32,
-                 rights: VmRights) throws(VmError) {
+                 rights: VmRights, ceiling: VmRights? = nil) throws(VmError) {
         try checkMapping(vmo, offset, size, rights)
         let pointer = vmo.record
         var released = UniqueArray<UInt64>()
@@ -341,7 +350,11 @@ struct UserAspace: ~Copyable {
                   Jit.allows(rights, key: reservation.jitKey) else { throw .invalidArgument }
             try removeMappings(base, size, collecting: &released)
             try insert(Mapping(base: base, size: size, vmo: pointer, offset: offset, rights: rights,
-                               ceiling: rights.subtracting(.guarded), region: id, key: reservation.jitKey))
+                               ceiling: ceiling ?? rights.subtracting(.guarded), region: id,
+                               // Only an RWX view carries the key (K15b): RW and RX
+                               // views work as anywhere, so dual views stay usable in
+                               // a keyed reservation (threads start write-disabled).
+                               key: rights.contains(.write) && rights.contains(.execute) ? reservation.jitKey : 0))
         }
         release(released)
     }
@@ -471,6 +484,15 @@ struct UserAspace: ~Copyable {
               !offset.addingReportingOverflow(size).overflow else { throw .invalidArgument }
         if case .anonymous = vmo.record.pointee.kind, !vmo.record.pointee.slice { return }
         guard offset <= vmo.size, size <= vmo.size - offset else { throw .invalidArgument }
+    }
+
+    /// Ext 7 (K15b): whether region `id` is a reservation, a JIT one, and
+    /// its protection key (0: views only), for CROI_INFO_VMAR_JIT.
+    func regionKind(_ id: UInt32) throws(VmError) -> (reservation: Bool, jit: Bool, key: UInt8) {
+        try record.pointee.lock.withLock { () throws(VmError) -> (Bool, Bool, UInt8) in
+            let r = try region(id)
+            return (r.reservation, r.jit, r.jitKey)
+        }
     }
 
     private func region(_ id: UInt32) throws(VmError) -> Region {
@@ -621,7 +643,9 @@ struct UserAspace: ~Copyable {
         record.pointee.lock.withLock {
             record.pointee.dead = true
             record.pointee.mapGeneration.add(1, ordering: .releasing)
-            while let region = record.pointee.regions.popLast() { Jit.freeKey(region.jitKey) }
+            while let region = record.pointee.regions.popLast() {
+                if region.jitKey != 0 { record.pointee.jitKeys &= ~(1 << UInt16(region.jitKey)) }
+            }
             while let mapping = record.pointee.mappings.popLast() {
                 mapping.vmo.removeMapper(record.address)
                 released.append(mapping.holder.address)

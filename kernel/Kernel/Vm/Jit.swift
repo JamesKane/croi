@@ -21,9 +21,6 @@ enum Jit {
     enum Mechanism { case protectionKeys, views }
 
     nonisolated(unsafe) private(set) static var mechanism = Mechanism.views
-    /// Keys 1-15 in use (key 0 is everything else's).
-    nonisolated(unsafe) private static var keys: UInt16 = 1
-    private static let lock = SpinLock()
 
     /// A user thread's PKRU at start: writes disabled for keys 1-15.
     static var defaultUserPkru: UInt32 {
@@ -54,22 +51,6 @@ enum Jit {
         #else
         false
         #endif
-    }
-
-    /// A protection key for a JIT reservation (nil: none left).
-    static func allocateKey() -> UInt8? {
-        lock.withLock { () -> UInt8? in
-            for key in 1..<16 where keys & (1 << UInt16(key)) == 0 {
-                keys |= 1 << UInt16(key)
-                return UInt8(key)
-            }
-            return nil
-        }
-    }
-
-    static func freeKey(_ key: UInt8) {
-        guard key != 0 else { return }
-        lock.withLock { keys &= ~(1 << UInt16(key)) }
     }
 
     /// Whether `rights` may be mapped in a region with JIT key `key`.

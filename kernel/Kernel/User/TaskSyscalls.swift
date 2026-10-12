@@ -77,6 +77,7 @@ extension Syscalls {
             if info.exited { flags |= UInt32(CROI_PROCESS_INFO_EXITED) }
             try put(croi_process_info_t(return_code: info.returnCode, flags: flags, reserved: 0), a[1])
         case 70: try vmarAllocate(table, a)
+        case 244: try vmarMapView(table, a)  // K15b
         case 71: try vmarMap(table, a)
         case 72:  // vmar_unmap(vmar, addr, len)
             try vmarUnmap(table, a)
@@ -115,7 +116,12 @@ extension Syscalls {
         let options = UInt32(truncatingIfNeeded: a[0] >> 32)
         let canMap = UInt32(CROI_VM_CAN_MAP_READ | CROI_VM_CAN_MAP_WRITE | CROI_VM_CAN_MAP_EXECUTE)
         let specific = options & UInt32(CROI_VM_SPECIFIC) != 0
-        guard options & ~(canMap | UInt32(CROI_VM_SPECIFIC)) == 0, specific || a[1] == 0 else { throw .invalidArgs }
+        // Ext 7 (K15b): a reservation for views (vmar_map_view), a JIT one
+        // with a protection key where there is one.
+        let reserve = UInt32(CROI_VM_RESERVATION), jit = UInt32(CROI_VM_JIT)
+        guard options & ~(canMap | UInt32(CROI_VM_SPECIFIC) | reserve | jit) == 0, specific || a[1] == 0 else {
+            throw .invalidArgs
+        }
         try check(a[3], 4)
         try check(a[4], 8)
         var parentRights = Rights()
@@ -132,12 +138,44 @@ extension Syscalls {
         let region = try vm { () throws(VmError) -> Region in
             try UserAspace.withView(v.aspace) { (aspace: borrowing UserAspace) throws(VmError) -> Region in
                 try aspace.allocateRegion(size: a[2], in: v.region,
-                                          at: specific ? (a[1] <= UInt64.max - v.base ? v.base + a[1] : .max) : nil)
+                                          at: specific ? (a[1] <= UInt64.max - v.base ? v.base + a[1] : .max) : nil,
+                                          reservation: options & (reserve | jit) != 0, jit: options & jit != 0)
             }
         }
         let child = try Processes.makeVmar(v.aspace, region: region.id, base: region.base, size: region.size)
         try put(try table.add(child, rights: rights), a[3])
         try put(region.base, a[4])
+    }
+
+    /// vmar_map_view(vmar | perms << 32, vmar_offset, vmo, vmo_offset, len),
+    /// ext 7 (K15b): [vmar_offset, +len) of a reservation now shows the VMO
+    /// range, replacing whatever views were there atomically. Rights as
+    /// vmar_map's (the VMAR's CAN_MAP_*, the VMO handle's per permission);
+    /// W^X but in a JIT reservation with a key; the ceiling for later
+    /// vmar_protect is the VMO handle's.
+    private static func vmarMapView(_ table: borrowing HandleTable, _ a: InlineArray<6, UInt64>) throws(Status) {
+        let perms = UInt32(CROI_VM_PERM_READ | CROI_VM_PERM_WRITE | CROI_VM_PERM_EXECUTE) | UInt32(CROI_VM_PERM_GUARDED)
+        let options = UInt32(truncatingIfNeeded: a[0] >> 32)
+        guard options & ~perms == 0 else { throw .invalidArgs }
+        let rights = try vmRights(options)
+        let vmar = try table.get(UInt32(truncatingIfNeeded: a[0]), type: .vmar, rights: handleRights(rights))
+        let v = VmarPointer(object: vmar.object).info
+        guard a[1] <= v.size, a[4] <= v.size - a[1] else { throw .invalidArgs }
+        var vmoRights = Rights()
+        let vmo = try VmoObject.forMapping(table, UInt32(truncatingIfNeeded: a[2]), rights, have: &vmoRights)
+        defer { vmo.release() }
+        var ceiling = VmRights()
+        if vmoRights.contains(.read) { ceiling.insert(.read) }
+        if vmoRights.contains(.write) { ceiling.insert(.write) }
+        if vmoRights.contains(.execute) { ceiling.insert(.execute) }
+        try vm { () throws(VmError) in
+            try Vmo.withBorrowed(vmo) { (borrowed: borrowing Vmo) throws(VmError) in
+                try UserAspace.withView(v.aspace) { (aspace: borrowing UserAspace) throws(VmError) in
+                    try aspace.mapView(borrowed, offset: a[3], size: a[4], at: v.base + a[1], in: v.region,
+                                       rights: rights, ceiling: ceiling)
+                }
+            }
+        }
     }
 
     /// vmar_map(vmar | options << 32, vmar_offset, vmo, vmo_offset, len, out_addr).

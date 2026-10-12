@@ -1073,6 +1073,29 @@ CROI_IOMMU_TYPE_RISCV = 0x10001, descriptor { register_base }):
   (intremap=off: no MSI_FLAT) covers base contexts; test
   `boot-riscv-iommu-base`.
 
+Reservations, atomic views and the JIT, K15b (ext 7, F-218; task.h
+CROI_VM_RESERVATION/JIT, vmar_map_view 244, CROI_INFO_VMAR_JIT 0x10004;
+agreed with Todhchai 2026-10-12):
+- vmar_allocate's RESERVATION makes a child VMAR that holds its range for
+  views: vmar_map and sub-VMARs refused there; vmar_map_view installs a
+  view, atomically replacing what was there (K4b's `mapView`, with the VMO
+  handle's rights as the protect ceiling); vmar_unmap, vmar_protect and
+  vmar_op_range work on views; an unviewed page faults (guards by
+  omission). JIT implies RESERVATION and takes a protection key on amd64
+  with PKU: keys are per address space (`UserAspaceRecord.jitKeys`, 1-15;
+  K4c had 15 system-wide), and with none left the reservation is quietly
+  views-only (Todhchai's choice; the info says which). Executable views
+  need a VMO handle with EXECUTE (VMEX).
+- Only RWX views carry the key: RW and RX views are key 0, so dual views
+  work in a keyed reservation too (they faulted: threads start with
+  keyed writes disabled).
+- Threads open a key's writes themselves (WRPKRU; they start with keys
+  1-15 write-disabled); the scheduler reads the outgoing user thread's
+  PKRU back at every switch (it only loaded the stored one, so a user
+  WRPKRU was lost and the per-CPU cache could skip the next load).
+- Mode 17's `jit_views` (checks 722-728; 726 needs PKU, which TCG -cpu
+  max has, and fails without the switch-out PKRU save).
+
 Memory accounts, K15a (Kernel/Object/AccountObject.swift,
 Vm/MemoryAccount.swift, include/account.h, syscalls 240-243; Todhchai ext 6,
 its F-109; agreed with Todhchai 2026-10-12; croi's, Zircon has none):

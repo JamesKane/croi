@@ -1699,6 +1699,15 @@ enum Scheduler {
             UserAspaces.activate(next.pointee.aspace, replacing: cpus[me].activeAspace)
             cpus[me].activeAspace = next.pointee.aspace
         }
+        // Ext 7 (K15b): user code changes its own PKRU (WRPKRU opens a JIT
+        // key's writes), so the outgoing thread's is read back first; the
+        // per-CPU cache then matches the hardware for the next load.
+        #if arch(x86_64)
+        if Jit.mechanism == .protectionKeys, current.pointee.aspace != nil {
+            current.pointee.pkru = arch_read_pkru()
+            cpus[me].pkru = current.pointee.pkru
+        }
+        #endif
         loadPkru(next.pointee.pkru, me)
         switchUserTls(from: current, to: next, me)
         if next.pointee.debugState != 0 || cpus[me].debugLoaded { HardwareDebug.switchTo(next, loaded: &cpus[me].debugLoaded) }

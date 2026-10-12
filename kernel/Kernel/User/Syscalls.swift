@@ -400,7 +400,7 @@ enum Syscalls {
             try pmuConfigure(table, handle, a)
         case 75:
             return try unmapAndClose(a, table)
-        case 60...79:
+        case 60...79, 244:  // 244: vmar_map_view (K15b)
             try taskCall(number, a, table)
         case 45, 46, 47, 130...149:
             try driverCall(number, a, table)

@@ -47,23 +47,27 @@ enum JitSelfTest {
                 let other = spawn(max(0, Smp.count - 1), otherThread)
                 // Join both before judging: a failed guard ends the address
                 // space's lifetime early, while a thread may still use it.
-                let (wrote, refused) = (writer.join(), other.join())
-                guard wrote == 0, refused == 0, otherRefused.load(ordering: .relaxed) == 1 else {
+                let (wrote, otherCode) = (writer.join(), other.join())
+                guard wrote == 0, otherCode == 0, otherRefused.load(ordering: .relaxed) == 1 else {
                     panic("jit self-test: JIT writes weren't per thread")
                 }
                 guard let entry = a.query(code)?.attributes, entry.writable, entry.executable,
                       entry.protectionKey == key else { panic("jit self-test: JIT page entry") }
-                // Keys run out at 15 (key 0 is everyone's).
+                // Keys run out at 15 per address space (key 0 is everyone's);
+                // past that a JIT reservation is views-only (K15b: quietly,
+                // Todhchai's choice), never RWX.
                 var regions = UniqueArray<UInt32>()
-                while true {
-                    do throws(VmError) {
-                        regions.append(try a.allocateRegion(size: page, reservation: true, jit: true).id)
-                    } catch {
-                        break
-                    }
+                var fallback: Region? = nil
+                while fallback == nil {
+                    let r = try a.allocateRegion(size: page, reservation: true, jit: true)
+                    regions.append(r.id)
+                    if r.jitKey == 0 { fallback = r }
                 }
-                keysAvailable = regions.count + 1
-                guard keysAvailable == 15 else { panic("jit self-test: key count") }
+                keysAvailable = regions.count  // the fallback's slot stands for the first reservation's key
+                guard keysAvailable == 15, let viewsOnly = fallback,
+                      refused({ () throws(VmError) in
+                          try a.mapView(vmo, size: page, at: viewsOnly.base, in: viewsOnly.id, rights: rwx)
+                      }) else { panic("jit self-test: key count or fallback") }
                 while let id = regions.popLast() { try a.destroyRegion(id) }
                 let again = try a.allocateRegion(size: page, reservation: true, jit: true)
                 guard again.jitKey != 0 else { panic("jit self-test: keys not returned") }

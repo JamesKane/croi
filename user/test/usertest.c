@@ -5426,6 +5426,127 @@ static int64_t memory_accounts(const startup_t *s) {
   return 0;
 }
 
+// K15b: reservations, atomic views and the JIT (ext 7).
+static croi_info_vmar_jit_t vmar_jit_info(uint32_t vmar) {
+  croi_info_vmar_jit_t info = {0, 0, 0, 0};
+  uint64_t counts[2];
+  sys6(CROI_SYS_OBJECT_GET_INFO, vmar, CROI_INFO_VMAR_JIT, (uint64_t)&info, sizeof info, (uint64_t)&counts[0],
+       (uint64_t)&counts[1]);
+  return info;
+}
+
+#if defined(__x86_64__)
+static uint32_t read_pkru(void) {
+  uint32_t eax, edx;
+  __asm__ volatile("rdpkru" : "=a"(eax), "=d"(edx) : "c"(0));
+  return eax;
+}
+static void write_pkru(uint32_t value) { __asm__ volatile("wrpkru" ::"a"(value), "c"(0), "d"(0) : "memory"); }
+
+static void pkru_reader(uint64_t slot) {
+  *(volatile uint32_t *)slot = read_pkru();
+  sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
+}
+#endif
+
+// A function returning 42, as each arch encodes it.
+#if defined(__x86_64__)
+static const uint8_t answer_code[] = {0xb8, 0x2a, 0x00, 0x00, 0x00, 0xc3};  // mov $42, %eax; ret
+#elif defined(__aarch64__)
+static const uint32_t answer_code[] = {0x52800540, 0xd65f03c0};  // mov w0, #42; ret
+#else
+static const uint32_t answer_code[] = {0x02a00513, 0x00008067};  // li a0, 42; ret
+#endif
+
+static int64_t jit_views(const startup_t *s) {
+  const uint32_t all = CROI_VM_CAN_MAP_READ | CROI_VM_CAN_MAP_WRITE | CROI_VM_CAN_MAP_EXECUTE;
+  const uint32_t rw = CROI_VM_PERM_READ | CROI_VM_PERM_WRITE, rx = CROI_VM_PERM_READ | CROI_VM_PERM_EXECUTE;
+  uint32_t reservation = 0, a = 0, b = 0;
+  uint64_t base = 0, at = 0;
+  // A reservation: views only.
+  CHECK(722, sys6(CROI_SYS_VMAR_ALLOCATE, s->vmar | (uint64_t)(all | CROI_VM_RESERVATION) << 32, 0, 16 * PAGE,
+                  (uint64_t)&reservation, (uint64_t)&base, 0) == 0 &&
+                 vmar_jit_info(reservation).flags == CROI_VMAR_JIT_FLAG_RESERVATION &&
+                 vmar_jit_info(reservation).mechanism == CROI_JIT_MECHANISM_VIEWS &&
+                 vmar_jit_info(s->vmar).mechanism == CROI_JIT_MECHANISM_NONE &&
+                 sys(CROI_SYS_VMO_CREATE, 2 * PAGE, 0, (uint64_t)&a, 0, 0) == 0 &&
+                 sys(CROI_SYS_VMO_CREATE, 2 * PAGE, 0, (uint64_t)&b, 0, 0) == 0 &&
+                 sys6(CROI_SYS_VMAR_MAP, reservation | (uint64_t)rw << 32, 0, a, 0, PAGE, (uint64_t)&at) ==
+                     ERR_INVALID_ARGS);
+  // A view replaced by another VMO's pages.
+  uint32_t one = 1, two = 2;
+  volatile uint32_t *word = (volatile uint32_t *)base;
+  CHECK(723, sys(CROI_SYS_VMO_WRITE, a, (uint64_t)&one, 0, 4, 0) == 0 &&
+                 sys(CROI_SYS_VMO_WRITE, b, (uint64_t)&two, 0, 4, 0) == 0 &&
+                 sys(CROI_SYS_VMAR_MAP_VIEW, reservation | (uint64_t)rw << 32, 0, a, 0, 2 * PAGE) == 0 &&
+                 *word == 1 &&
+                 sys(CROI_SYS_VMAR_MAP_VIEW, reservation | (uint64_t)rw << 32, 0, b, 0, 2 * PAGE) == 0 && *word == 2);
+  // W^X outside a JIT reservation with a key; protect and commit on views.
+  // (an executable VMO, so that it is W^X that refuses, not the rights)
+  uint32_t plain = 0, exec = 0;
+  CHECK(724, sys(CROI_SYS_VMO_CREATE, PAGE, 0, (uint64_t)&plain, 0, 0) == 0 &&
+                 sys(CROI_SYS_VMO_REPLACE_AS_EXECUTABLE, plain, s->resource, (uint64_t)&exec, 0, 0) == 0 &&
+                 sys(CROI_SYS_VMAR_MAP_VIEW, reservation | (uint64_t)(rw | CROI_VM_PERM_EXECUTE) << 32, 4 * PAGE, exec,
+                     0, PAGE) == ERR_INVALID_ARGS &&
+                 sys(CROI_SYS_VMAR_MAP_VIEW, reservation | (uint64_t)rx << 32, 4 * PAGE, exec, 0, PAGE) == 0);
+  sys(CROI_SYS_HANDLE_CLOSE, exec, 0, 0, 0, 0);
+  CHECK(727, sys6(CROI_SYS_VMAR_OP_RANGE, reservation, CROI_VMO_OP_COMMIT, base, 2 * PAGE, 0, 0) == 0 &&
+                 sys(CROI_SYS_VMAR_PROTECT, reservation | (uint64_t)CROI_VM_PERM_READ << 32, base, 2 * PAGE, 0, 0) == 0 &&
+                 *word == 2);
+  sys(CROI_SYS_VMAR_DESTROY, reservation, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, reservation, 0, 0, 0, 0);
+  // A reservation at a chosen place.
+  uint32_t fixed = 0;
+  uint64_t fixed_base = 0, offset = 0x40000000ull;
+  CHECK(728, sys6(CROI_SYS_VMAR_ALLOCATE, s->vmar | (uint64_t)(all | CROI_VM_RESERVATION | CROI_VM_SPECIFIC) << 32,
+                  offset, 4 * PAGE, (uint64_t)&fixed, (uint64_t)&fixed_base, 0) == 0);
+  croi_info_vmar_t root = {0, 0};
+  uint64_t counts[2];
+  CHECK(728, sys6(CROI_SYS_OBJECT_GET_INFO, s->vmar, CROI_INFO_VMAR, (uint64_t)&root, sizeof root, (uint64_t)&counts[0],
+                  (uint64_t)&counts[1]) == 0 &&
+                 fixed_base == root.base + offset);
+  sys(CROI_SYS_VMAR_DESTROY, fixed, 0, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, fixed, 0, 0, 0, 0);
+  // A JIT by dual views: written through RW, called through RX, one
+  // executable VMO (VMEX).
+  uint32_t jit = 0, raw = 0, code = 0;
+  uint64_t jit_base = 0;
+  CHECK(725, sys6(CROI_SYS_VMAR_ALLOCATE, s->vmar | (uint64_t)(all | CROI_VM_JIT) << 32, 0, 8 * PAGE, (uint64_t)&jit,
+                  (uint64_t)&jit_base, 0) == 0 &&
+                 (vmar_jit_info(jit).flags & CROI_VMAR_JIT_FLAG_JIT) &&
+                 sys(CROI_SYS_VMO_CREATE, PAGE, 0, (uint64_t)&raw, 0, 0) == 0 &&
+                 sys(CROI_SYS_VMO_REPLACE_AS_EXECUTABLE, raw, s->resource, (uint64_t)&code, 0, 0) == 0 &&
+                 sys(CROI_SYS_VMAR_MAP_VIEW, jit | (uint64_t)rw << 32, 0, code, 0, PAGE) == 0 &&
+                 sys(CROI_SYS_VMAR_MAP_VIEW, jit | (uint64_t)rx << 32, 4 * PAGE, code, 0, PAGE) == 0);
+  volatile uint8_t *writable = (volatile uint8_t *)jit_base;
+  for (unsigned i = 0; i < sizeof answer_code; i++) writable[i] = ((const uint8_t *)answer_code)[i];
+  CHECK(725, sys6(CROI_SYS_VMO_OP_RANGE, code, CROI_VMO_OP_CACHE_SYNC, 0, PAGE, 0, 0) == 0 &&
+                 ((uint64_t (*)(void))(jit_base + 4 * PAGE))() == 42);
+#if defined(__x86_64__)
+  // With protection keys: an RWX view; writes open for this thread alone
+  // (WRPKRU), kept across a switch; another thread's stay closed.
+  if (vmar_jit_info(jit).mechanism == CROI_JIT_MECHANISM_PROTECTION_KEYS) {
+    uint32_t key = vmar_jit_info(jit).key, closed = read_pkru();
+    uint32_t open = closed & ~(3u << (2 * key));
+    volatile uint32_t other = 0;
+    CHECK(726, key >= 1 && key <= 15 && (closed & (2u << (2 * key))) &&
+                   sys(CROI_SYS_VMAR_MAP_VIEW, jit | (uint64_t)(rw | CROI_VM_PERM_EXECUTE) << 32, 2 * PAGE, code, 0,
+                       PAGE) == 0);
+    write_pkru(open);
+    sleep_ns(2000000);  // switched out and back: the PKRU it set comes back
+    uint32_t after = read_pkru();
+    uint32_t reader = start_thread(s, pkru_reader, (uint64_t)&other);
+    int reader_ok = ended(reader);
+    write_pkru(closed);
+    CHECK(726, after == open && reader_ok && (other & (2u << (2 * key))) != 0);
+  }
+#endif
+  sys(CROI_SYS_VMAR_DESTROY, jit, 0, 0, 0, 0);
+  uint32_t handles[] = {jit, code, a, b};
+  for (int i = 0; i < 4; i++) sys(CROI_SYS_HANDLE_CLOSE, handles[i], 0, 0, 0, 0);
+  return 0;
+}
+
 static uint64_t pac_sign(uint64_t value, uint64_t modifier) {
 #if defined(__aarch64__)
   register uint64_t x17 __asm__("x17") = value;
@@ -5648,6 +5769,8 @@ static int64_t extensions(const startup_t *s, uint64_t vdso_base) {
   if (pagerReview != 0) return pagerReview;
   int64_t accounts = memory_accounts(s);
   if (accounts != 0) return accounts;
+  int64_t views = jit_views(s);
+  if (views != 0) return views;
   int64_t signedPointers = pointer_auth(s);
   if (signedPointers != 0) return signedPointers;
   int64_t guardedCode = guarded_pages(s);
