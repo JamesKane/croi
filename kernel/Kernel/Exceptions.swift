@@ -299,6 +299,7 @@ enum ExceptionFrame {
         case 0x07: "FP/SIMD access"
         case 0x0E: "illegal execution state"
         case 0x15: "SVC"
+        case 0x1C: "pointer authentication failure"  // FEAT_FPAC (K14p)
         case 0x20, 0x21: "instruction abort"
         case 0x22: "PC alignment fault"
         case 0x24, 0x25: "data abort"

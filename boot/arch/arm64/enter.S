@@ -69,6 +69,7 @@ croi_arch_enter_kernel:
     isb
 
     mov     x9, #HCR_EL2_RW
+    movk    x9, #0x300, lsl #32     // API | APK: EL1's pointer authentication untrapped (K14p)
     msr     hcr_el2, x9
     isb
 

@@ -4892,6 +4892,22 @@ static int64_t zero_intervals(const startup_t *s) {
   return 0;
 }
 
+// K14p: user code's pointer authentication key isn't the kernel's. User
+// code signs a value with PACIA1716 (hint-space: unchanged where PAC is off)
+// and asks the kernel for its own key's signature of the same value.
+static int64_t pointer_auth(void) {
+#if defined(__aarch64__)
+  const uint64_t value = 0x0000000001234560ull, modifier = 7;
+  register uint64_t x17 __asm__("x17") = value;
+  register uint64_t x16 __asm__("x16") = modifier;
+  __asm__ volatile("hint #8" : "+r"(x17) : "r"(x16));  // pacia1716
+  uint64_t kernel = (uint64_t)sys6(CROI_SYS_TEST_PROFILE, 11, value, modifier, 0, 0, 0);
+  if (kernel == value) return 0;  // PAC off (croi.pac=off, or not implemented)
+  CHECK(676, x17 != value && x17 != kernel);
+#endif
+  return 0;
+}
+
 // K11b: the kernel's CPRNG.
 static int64_t cprng_checks(void) {
   uint8_t a[256], b[256];
@@ -5010,6 +5026,8 @@ static int64_t extensions(const startup_t *s) {
   if (unbound != 0) return unbound;
   int64_t zeroed = zero_intervals(s);
   if (zeroed != 0) return zeroed;
+  int64_t signedPointers = pointer_auth();
+  if (signedPointers != 0) return signedPointers;
   int64_t fifos = fifos_and_exec(s);
   if (fifos != 0) return fifos;
   int64_t socks = sockets(s);

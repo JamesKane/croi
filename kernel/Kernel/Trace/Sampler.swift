@@ -152,7 +152,11 @@ enum Sampler {
             let record = UInt64(bitPattern: Int64(bitPattern: fp) + recordOffset)
             guard record >= base, record + 16 <= base + size, fp >= stack else { break }
             let words = unsafe UnsafePointer<UInt64>(bitPattern: UInt(record))!
+            #if arch(arm64)
+            let (previous, ret) = unsafe (words[0], arch_pac_strip(words[1]))  // signed (K14p)
+            #else
             let (previous, ret) = unsafe (words[0], words[1])
+            #endif
             guard ret != 0 else { break }
             frames[count] = encode ? encodeKernel(ret) : ret
             count += 1

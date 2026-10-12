@@ -123,6 +123,23 @@ void arch_breakpoint(void);
 #if defined(__aarch64__)
 // Assembly (arch/arm64/start.S). The current exception level.
 uint64_t arch_current_el(void);
+
+// Pointer authentication (K14p, arch/arm64/cpu.S): the kernel's and user
+// space's APIA keys, swapped at every entry from and return to EL0, and
+// whether arch_pac_enable sets SCTLR_EL1.EnIA. Written once, by the boot
+// CPU, before any CPU enables it.
+typedef struct {
+  uint64_t kernel_lo, kernel_hi;
+  uint64_t user_lo, user_hi;
+  uint32_t enabled;
+  uint32_t reserved;
+} croi_pac_keys_t;
+extern croi_pac_keys_t croi_pac_keys;
+uint64_t arch_pac_supported(void);
+void arch_pac_load_kernel_key(void);
+void arch_pac_load_user_key(void);
+uint64_t arch_pac_sign(uint64_t pointer, uint64_t modifier);
+uint64_t arch_pac_strip(uint64_t pointer);
 #endif
 
 #if defined(__x86_64__)

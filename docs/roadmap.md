@@ -842,6 +842,13 @@ THREAD, VMO, maps, handle table) and the NAME property.
   ALWAYS_NEED) and their eviction when a lender wants its page. On by
   default (`croi.ppb.loan=off`). Requirement 3's pool no longer holds
   memory idle.
+- **K14p: arm64 pointer authentication.** **Done** (2026-10-12): the
+  kernel signs return addresses (pac-ret, APIA) with a random per-boot key,
+  user space gets another (swapped at every entry and return), EL2 drops
+  untrap PAC, stack walks strip signatures. Swift 6.4 passes
+  -Xcc -mbranch-protection=pac-ret through to its code generation (checked
+  first). QEMU -cpu max covers it (EL1 and EL2 boots). Not yet: BTI,
+  per-process user keys.
 - **K14o: cross-CPU port wake, looked at.** (2026-10-12) m2's port wake
   profile (`m2.portwake_profile=1`) puts the ~1.65 us in a dozen steps of
   100-250 ns: the signaller's handle lookup and object retain (cache lines
@@ -989,8 +996,8 @@ from Zircon, see docs/zircon-divergences.md.
   its own).
 
 **Kernel internals**
-- amd64 5-level paging, VHE-only arm64 CPUs, pointer
-  authentication (EL2 doesn't un-trap it yet).
+- amd64 5-level paging, VHE-only arm64 CPUs. (Kernel pointer
+  authentication came in K14p; per-process user keys and BTI not yet.)
 - IOMMUs: ATS, two-level SMMUv3 stream tables, stage 2, posted
   interrupts, source verification for MSI-X, identity-level MSI isolation
   on rv64; SMMUv2 and every unit unverified on hardware.

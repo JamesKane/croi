@@ -154,8 +154,50 @@ func kernel_main(_ handoffAddress: UInt64) -> Never {
     } catch {
         panic("no memory for the boot thread's stack")
     }
+    #if arch(arm64)
+    PointerAuth.configure()  // the keys; arch_continue_on_stack turns it on
+    #endif
     arch_continue_on_stack(bootThreadStack.top)
 }
+
+#if arch(arm64)
+/// Pointer authentication (K14p): the kernel is built with
+/// -mbranch-protection=pac-ret, so every non-leaf function signs its return
+/// address with the APIA key on entry and authenticates it before
+/// returning; a return address overwritten on the stack fails (a fault with
+/// FEAT_FPAC, else a non-canonical address). One random kernel key per boot
+/// on every CPU (threads migrate), another for user space, swapped at each
+/// entry from and return to EL0 (cpu.S), so user code can't sign with the
+/// kernel's. `croi.pac=off`, or no address authentication: unsigned (the
+/// hint-space instructions are NOPs).
+enum PointerAuth {
+    nonisolated(unsafe) private(set) static var enabled = false
+
+    static func configure() {
+        guard arch_pac_supported() != 0, !BootOptions.has("croi.pac=off") else { return }
+        unsafe croi_pac_keys.kernel_lo = Random.word()
+        unsafe croi_pac_keys.kernel_hi = Random.word()
+        unsafe croi_pac_keys.user_lo = Random.word()
+        unsafe croi_pac_keys.user_hi = Random.word()
+        unsafe croi_pac_keys.enabled = 1
+        enabled = true
+    }
+
+    /// Signing changes a pointer, and the two keys sign it differently
+    /// (the user key loaded for the moment, interrupts masked).
+    static func selfTest() -> Bool {
+        let pointer = kernel_image_start() + 0x40, modifier: UInt64 = 0x1234
+        let kernel = arch_pac_sign(pointer, modifier)
+        guard enabled else { return kernel == pointer }
+        let saved = arch_interrupts_save()
+        arch_pac_load_user_key()
+        let user = arch_pac_sign(pointer, modifier)
+        arch_pac_load_kernel_key()
+        arch_interrupts_restore(saved)
+        return kernel != pointer && user != pointer && user != kernel && arch_pac_sign(pointer, modifier) == kernel
+    }
+}
+#endif
 
 /// A copy of the loader's handoff (the original is reclaimed by the PMM).
 nonisolated(unsafe) var bootHandoff = croi_handoff_t()
@@ -185,6 +227,11 @@ func kernel_main_continue() -> Never {
         console.write("; guards, protect, large-page split, table reclaim\n")
         framebufferSelfTest(console)
         kernelStackSelfTest()
+        #if arch(arm64)
+        guard PointerAuth.selfTest() else { panic("pac self-test: signing or the key swap") }
+        console.write(PointerAuth.enabled ? "  pac:    return addresses signed (APIA), user and kernel keys apart\n"
+                                          : "  pac:    off (croi.pac=off, or no address authentication)\n")
+        #endif
     }
     console.write("  stacks: boot thread on a guarded stack at ")
     console.write(hex: bootThreadStack.base)

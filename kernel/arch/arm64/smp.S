@@ -34,6 +34,7 @@ arch_ap_entry:
     b.ne    1f
     // EL2: keep out of the way and drop to EL1 (see boot/arch/arm64/enter.S).
     mov     x9, #HCR_EL2_RW
+    movk    x9, #0x300, lsl #32     // API | APK: EL1's pointer authentication untrapped (K14p)
     msr     hcr_el2, x9
     mov     x9, #3                  // CNTHCTL_EL2: EL1PCTEN | EL1PCEN
     msr     cnthctl_el2, x9
@@ -131,6 +132,7 @@ ap_continue:
     isb
     mov     x29, xzr
     mov     x30, xzr
+    bl      arch_pac_enable         // K14p: the boot CPU's keys; never returns past here
     mov     x0, x21
     bl      kernel_ap_main
     udf     #0

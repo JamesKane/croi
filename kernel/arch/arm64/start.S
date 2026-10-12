@@ -49,6 +49,7 @@ arch_continue_on_stack:
     mov     x29, xzr
     mov     x30, xzr
     msr     tpidr_el1, xzr          // no per-CPU record yet
+    bl      arch_pac_enable         // K14p: nothing below returns
     bl      kernel_main_continue
     udf     #0
 .size arch_continue_on_stack, . - arch_continue_on_stack

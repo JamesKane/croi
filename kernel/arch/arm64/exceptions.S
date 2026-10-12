@@ -161,10 +161,12 @@ exception_common_user:
     stp     x1, x2, [sp, #FRAME_ESR]
     str     x0, [sp, #FRAME_SLOT]
 
+    bl      arch_pac_load_kernel_key  // K14p: before any signed code
     mov     x0, sp
     bl      arch_exception
 
     msr     daifset, #0xf
+    bl      arch_pac_load_user_key    // K14p: x30 comes back from the frame
     ldp     x1, x2, [sp, #FRAME_ELR]
     msr     elr_el1, x1
     msr     spsr_el1, x2
@@ -196,6 +198,7 @@ exception_common_user:
 .type arch_enter_user, %function
 arch_enter_user:
     msr     daifset, #0xf
+    bl      arch_pac_load_user_key  // K14p (x9-x11 only; x30 is cleared below)
     mov     sp, x5
     msr     sp_el0, x1
     msr     elr_el1, x0

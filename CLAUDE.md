@@ -2187,7 +2187,8 @@ volatile access, or LLVM may delete it (e.g. stores to const symbols).
 
 Kernel enters on the loader's page tables with the handoff's physical
 address as its argument, at EL1 on arm64: if firmware ran at EL2, the
-trampoline neutralizes EL2 (HCR_EL2 = RW only; timer, PMU and GICv3 sysregs
+trampoline neutralizes EL2 (HCR_EL2 = RW, plus API and APK since K14p;
+timer, PMU and GICv3 sysregs
 handed to EL1) and drops to EL1 after ExitBootServices. Not yet supported:
 amd64 5-level paging, CPUs where HCR_EL2.E2H is RES1 (VHE-only).
 
@@ -2209,8 +2210,29 @@ addresses in a log map to the ELF's as address - start + link.
 qemu.sh's `--registers-on` backtraces do that (qemu-monitor.py `backtrace
 <start> <end> <link>`). Physical placement isn't randomized (the physmap
 shows it anyway).
-EL2 does not yet un-trap pointer authentication (HCR_EL2.API/APK), so the
-kernel must not use PAC until it does.
+
+Pointer authentication, arm64 (K14p; Main.swift `PointerAuth`, cpu.S
+`arch_pac_*`, `croi_pac_keys` in kernel.h): the kernel's Swift and C are
+built with -mbranch-protection=pac-ret (kernel/CMakeLists.txt), so every
+non-leaf function signs its return address with the APIA key and checks
+it before returning (paciasp/autiasp: hint space, NOPs without PAuth or
+with it off). One random kernel key per boot on every CPU and another for
+user space, chosen before `arch_continue_on_stack`; the key registers
+serve EL0 and EL1 alike, so entry from EL0 loads the kernel's
+(`arch_pac_load_kernel_key`, before any signed code) and every return to
+EL0 the user's (`arch_pac_load_user_key`, also in `arch_enter_user`).
+SCTLR_EL1.EnIA is set only on paths that never return through an earlier
+frame (`arch_pac_enable` in `arch_continue_on_stack` and before
+`kernel_ap_main`): a function entered before it would fail its own check.
+Both EL2 drops set HCR_EL2.API|APK (else the instructions trap to an EL2
+with no handler). Kernel stack walks strip the signatures
+(`arch_pac_strip`, XPACLRI; qemu-monitor.py does the same by bit 55); a
+failure with FEAT_FPAC is EC 0x1C, "pointer authentication failure".
+`croi.pac=off`, or no address authentication (ID_AA64ISAR1/2): unsigned.
+The boot self-test checks signing and that the keys differ; mode 17's
+check 676 that user code's signature isn't the kernel's (it failed with
+the return path's key load removed). User programs aren't built with it
+(their own choice; the user key is per boot, not per process).
 - `ld/image.ld` Shared linker script: one PT_LOAD per permission (W^X).
 - `cmake/`    Toolchain file, per-arch settings, `croi_image()` helper.
 

@@ -1120,3 +1120,114 @@ arch_debug_read:
 arch_debug_write:
     ret
 .size arch_debug_write, . - arch_debug_write
+
+// Pointer authentication (K14p): return addresses signed with the APIA key
+// (the kernel is built with -mbranch-protection=pac-ret; paciasp/autiasp
+// are hint-space, so NOPs where PAC isn't implemented or enabled). The key
+// registers serve EL1 and EL0 alike, so the kernel's key is loaded on every
+// entry from EL0 and a user key on every return: user code can't sign or
+// check with the kernel's. These functions use x9-x11 only (callers in the
+// entry and exit paths rely on it) and are never signed themselves.
+#define APIAKEYLO_EL1 S3_0_C2_C1_0
+#define APIAKEYHI_EL1 S3_0_C2_C1_1
+#define ID_AA64ISAR2_EL1 S3_0_C0_C6_2
+
+.section .text.arch_pac, "ax", %progbits
+
+// void arch_pac_load_kernel_key(void) / arch_pac_load_user_key(void):
+// nothing unless croi_pac_keys.enabled.
+.globl arch_pac_load_kernel_key
+.type arch_pac_load_kernel_key, %function
+arch_pac_load_kernel_key:
+    adrp    x9, croi_pac_keys
+    add     x9, x9, :lo12:croi_pac_keys
+    ldr     w10, [x9, #32]
+    cbz     w10, 1f
+    ldp     x10, x11, [x9, #0]
+    msr     APIAKEYLO_EL1, x10
+    msr     APIAKEYHI_EL1, x11
+    isb
+1:  ret
+.size arch_pac_load_kernel_key, . - arch_pac_load_kernel_key
+
+.globl arch_pac_load_user_key
+.type arch_pac_load_user_key, %function
+arch_pac_load_user_key:
+    adrp    x9, croi_pac_keys
+    add     x9, x9, :lo12:croi_pac_keys
+    ldr     w10, [x9, #32]
+    cbz     w10, 1f
+    ldp     x10, x11, [x9, #16]
+    msr     APIAKEYLO_EL1, x10
+    msr     APIAKEYHI_EL1, x11
+    isb
+1:  ret
+.size arch_pac_load_user_key, . - arch_pac_load_user_key
+
+// void arch_pac_enable(void): this CPU on the kernel's key with
+// SCTLR_EL1.EnIA set, if croi_pac_keys.enabled. Only from a path that never
+// returns through a frame entered before it (its return address unsigned,
+// it would fail authentication): arch_continue_on_stack, the AP entry.
+.globl arch_pac_enable
+.type arch_pac_enable, %function
+arch_pac_enable:
+    mov     x12, x30
+    bl      arch_pac_load_kernel_key
+    mov     x30, x12
+    adrp    x9, croi_pac_keys
+    add     x9, x9, :lo12:croi_pac_keys
+    ldr     w10, [x9, #32]
+    cbz     w10, 1f
+    mrs     x10, sctlr_el1
+    orr     x10, x10, #(1 << 31)        // EnIA
+    msr     sctlr_el1, x10
+    isb
+1:  ret
+.size arch_pac_enable, . - arch_pac_enable
+
+// uint64_t arch_pac_supported(void): address authentication with any
+// algorithm (ID_AA64ISAR1_EL1 APA or API, ID_AA64ISAR2_EL1 APA3).
+.globl arch_pac_supported
+.type arch_pac_supported, %function
+arch_pac_supported:
+    mrs     x0, id_aa64isar1_el1
+    and     x0, x0, #0xff0
+    mrs     x1, ID_AA64ISAR2_EL1
+    ubfx    x1, x1, #12, #4
+    orr     x0, x0, x1
+    ret
+.size arch_pac_supported, . - arch_pac_supported
+
+// uint64_t arch_pac_sign(uint64_t pointer, uint64_t modifier): PACIA1716
+// with the key loaded now (the pointer back unchanged when PAC is off).
+.globl arch_pac_sign
+.type arch_pac_sign, %function
+arch_pac_sign:
+    mov     x17, x0
+    mov     x16, x1
+    hint    #8                          // pacia1716
+    mov     x0, x17
+    ret
+.size arch_pac_sign, . - arch_pac_sign
+
+// The keys (Pac.swift fills them before arch_pac_enable runs anywhere).
+.section .bss.croi_pac_keys, "aw", %nobits
+.balign 16
+.globl croi_pac_keys
+croi_pac_keys:
+    .skip   40
+
+// uint64_t arch_pac_strip(uint64_t pointer): the pointer without its PAC
+// (XPACLRI on x30; a NOP, the pointer as it was, without PAuth). For
+// frame-pointer walks over signed return addresses.
+.section .text.arch_pac_strip, "ax", %progbits
+.globl arch_pac_strip
+.type arch_pac_strip, %function
+arch_pac_strip:
+    mov     x9, x30
+    mov     x30, x0
+    hint    #7                          // xpaclri
+    mov     x0, x30
+    mov     x30, x9
+    ret
+.size arch_pac_strip, . - arch_pac_strip

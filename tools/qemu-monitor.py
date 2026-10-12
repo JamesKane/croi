@@ -47,6 +47,9 @@ class Monitor:
 
 def backtrace(monitor, image=None):
     def at_link(address):
+        # arm64 return addresses are signed (K14p): the PAC bits off first
+        # (bit 55 says which half), a no-op for canonical addresses.
+        address = address | 0xFFFF000000000000 if (address >> 55) & 1 else address & 0x0000FFFFFFFFFFFF
         if image and image[0] <= address < image[1]:
             return address - image[0] + image[2]
         return address

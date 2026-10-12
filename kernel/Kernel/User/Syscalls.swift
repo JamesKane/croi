@@ -202,7 +202,13 @@ enum Syscalls {
         case 1: return write(a[0], a[1])
         case 2: Processes.exitThread(Int(Int64(bitPattern: a[0])))
         case 63: Processes.exitProcess(Int64(bitPattern: a[0]))  // process_exit: no handles needed
-        case 6: return (6...9).contains(a[0]) ? Reclaim.testHook(a) : TestHooks.profile(a[0])
+        case 6:
+            #if arch(arm64)
+            // K14p: the kernel key's signature of a[1] (modifier a[2]), for
+            // a user test to compare with its own key's.
+            if a[0] == 11 { return Int64(bitPattern: arch_pac_sign(a[1], a[2])) }
+            #endif
+            return (6...9).contains(a[0]) ? Reclaim.testHook(a) : TestHooks.profile(a[0])
         case 3: return Int64(bitPattern: Clock.now())
         case 4:
             Scheduler.sleepInterruptible(until: a[0])
