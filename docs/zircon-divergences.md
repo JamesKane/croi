@@ -85,19 +85,19 @@ matches the pinned tree where upstream docs or expectations say otherwise).
   the child's parent limit permanently. Kind: deliberate (simplification).
   Impact: low; within at-least-on-write semantics. Fix: a per-child parent
   limit clamped at shrink.
-- **Untracked zeroing past a stream size** (K14i) — vmo_set_stream_size
-  zeroes up to the new size's page end as Zircon does; past it Zircon
-  zeroes "untracked" with zero markers, croi decommits a plain VMO's pages
-  and zeroes a pager VMO's or a child's committed pages in place, so their
-  absent pages there still read as the pager's or the parent's. Kind:
-  deliberate (no zero intervals). Impact: vmo_read past the stream size of
-  a pager VMO or a child.
+- **Untracked zeroing past a stream size of a child** (K14i) —
+  vmo_set_stream_size zeroes up to the new size's page end as Zircon
+  does; past it a plain VMO's pages are decommitted and a pager VMO's
+  become an untracked zero interval (K14k), but a snapshot child's (or a
+  slice's) committed pages are zeroed in place, so its absent pages there
+  still read as its parent's (Zircon inserts zero markers). Kind:
+  deliberate (no markers in children). Impact: vmo_read past the stream
+  size of a child.
 - **Per-page range operations** (K14i) — decommit, ZERO, cache ops, page
-  states and dirty ranges are sparse; COMMIT, PREFETCH, ALWAYS_NEED and a
-  pager VMO's ZERO still touch every page of their range (Zircon's do the
-  same work, but its zero intervals make ZERO cheap). Kind: not yet.
-  Impact: such an operation over most of an UNBOUNDED VMO runs until
-  memory or the pager gives out.
+  states and dirty ranges are sparse; COMMIT, PREFETCH, ALWAYS_NEED, a
+  child's ZERO and a TRAP_DIRTY pager VMO's ZERO still touch every page of
+  their range. Kind: not yet. Impact: such an operation over most of an
+  UNBOUNDED VMO runs until memory or the pager gives out.
 - **K11a children copy on first touch** — a SNAPSHOT_AT_LEAST_ON_WRITE
   child copies a parent page at its first read or write (allowed by "at
   least on write"; no hidden nodes); DECOMMIT on a child is NOT_SUPPORTED
@@ -124,10 +124,12 @@ matches the pinned tree where upstream docs or expectations say otherwise).
   invalidate-only behind a debugging option (croi keeps the gate closed).
   Kind: deliberate. Impact: none for correct DMA code (use
   CLEAN_INVALIDATE).
-- **No zero intervals** — ZERO on a pager VMO zeroes pages in place
-  (Zircon makes a zero interval); WRITEBACK_BEGIN's IS_ZERO is a no-op
-  (K13h's grown space is the one dirty-zero range). Kind: not yet. Impact:
-  memory use for sparse zeroed files.
+- **Zero intervals** (K14k) — as Zircon's (dirty, awaiting clean,
+  untracked), kept as a sorted list per VMO rather than markers in the
+  page list, and exact where Zircon tracks one awaiting-clean length per
+  interval. Under TRAP_DIRTY, ZERO still zeroes page by page (Zircon asks
+  the pager to dirty the range first). Kind: deliberate / not yet.
+  Impact: TRAP_DIRTY pagers zeroing large ranges.
 - **KMEM_STATS fields** — total, free, wired, heap, vmo, mmu, other and
   (K14a) the reclaim and discardable fields filled; loaned, ipc, cache,
   slab, zram and reclaim_disabled are 0. Kind: not yet. Impact: memory

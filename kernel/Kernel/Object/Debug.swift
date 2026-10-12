@@ -203,6 +203,9 @@ enum Debug {
             case .copied:
                 done += chunk
                 faults = 0
+            case .absent where !write && vmo.readsAsZero(at):  // a zero interval (K14k)
+                guard VmoUserCopy.zeros(to: buffer + done, chunk) == .copied else { throw .invalidArgs }
+                done += chunk
             case .absent:
                 do throws(Status) {
                     try VmoUserCopy.commit(vmo, at)

@@ -842,6 +842,13 @@ THREAD, VMO, maps, handle table) and the NAME property.
   ALWAYS_NEED) and their eviction when a lender wants its page. On by
   default (`croi.ppb.loan=off`). Requirement 3's pool no longer holds
   memory idle.
+- **K14k: zero intervals.** **Done** (2026-10-12): pager VMOs keep
+  Zircon's zero intervals (dirty, awaiting clean, untracked): ZERO, a
+  grow and a stream size cut make them, reads copy zeros without
+  committing, writes split them, query_dirty_ranges reports them
+  (IS_ZERO), WRITEBACK_BEGIN/END hand them back to the pager. An
+  UNBOUNDED pager VMO zeroes whole in one step. Fixed on the way: a
+  kernel write to an absent page of a grown range looped in prepareWrite.
 - **K14j: KASLR.** **Done** (2026-10-12): the loader maps the kernel at a
   random 2 MiB-aligned base below its link address (~2^18 bases on amd64
   and arm64, ~2^15 on rv64) from EFI_RNG_PROTOCOL, the CPU's RNG or (weak,
@@ -935,7 +942,7 @@ from Zircon, see docs/zircon-divergences.md.
 
 **Zircon pieces not yet in croi**
 - VM: done (eviction and reclaim in K14a, the other child kinds in
-  K14g, UNBOUNDED VMOs in K14i); zero intervals remain.
+  K14g, UNBOUNDED VMOs in K14i, zero intervals in K14k).
 - IOB, restricted mode, membarrier, the ktrace/sampler syscalls (croi has
   its own).
 

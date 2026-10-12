@@ -121,15 +121,115 @@ struct PagerObject: ~Copyable {
     }
 }
 
+/// A pager VMO's range of absent pages reading as zeros (K14k, Zircon's
+/// zero intervals): made by ZERO, a grow (K13h) and a stream size cut, never
+/// requested from the pager. Dirty ones are reported by query_dirty_ranges
+/// (IS_ZERO) and go to awaiting clean at WRITEBACK_BEGIN, then away at
+/// WRITEBACK_END (the pager supplies the range again); untracked ones
+/// (past a stream size) are never reported. A page committed inside one
+/// (a write or a fault) is zeroed and dirty, and splits it.
+struct ZeroInterval {
+    enum State: UInt8 { case dirty, awaitingClean, untracked }
+    var start: UInt64
+    var end: UInt64
+    var state: State
+}
+
 extension VmoPointer {
+    /// The state of the zero interval holding byte `offset`, if any. Lock held.
+    func zeroStateLocked(_ offset: UInt64) -> ZeroInterval.State? {
+        var low = 0, high = pointee.zeros.count
+        while low < high {
+            let mid = (low + high) / 2
+            let interval = pointee.zeros[mid]
+            if offset < interval.start {
+                high = mid
+            } else if offset >= interval.end {
+                low = mid + 1
+            } else {
+                return interval.state
+            }
+        }
+        return nil
+    }
+
+    /// Takes [start, end) out of the zero intervals, returning the pieces
+    /// that were there (in order). Lock held.
+    @discardableResult
+    func carveZerosLocked(_ start: UInt64, _ end: UInt64) -> UniqueArray<ZeroInterval> {
+        var removed = UniqueArray<ZeroInterval>()
+        guard start < end else { return removed }
+        var i = 0
+        while i < pointee.zeros.count {
+            let interval = pointee.zeros[i]
+            guard interval.start < end, start < interval.end else {
+                i += 1
+                continue
+            }
+            removed.append(ZeroInterval(start: max(start, interval.start), end: min(end, interval.end), state: interval.state))
+            _ = pointee.zeros.remove(at: i)
+            if interval.end > end {
+                pointee.zeros.insert(ZeroInterval(start: end, end: interval.end, state: interval.state), at: i)
+            }
+            if interval.start < start {
+                pointee.zeros.insert(ZeroInterval(start: interval.start, end: start, state: interval.state), at: i)
+                i += 1
+            }
+        }
+        return removed
+    }
+
+    /// Makes [start, end) one interval of `state` (replacing what was
+    /// there), merged with touching neighbours of the same state. Lock held.
+    func addZerosLocked(_ start: UInt64, _ end: UInt64, _ state: ZeroInterval.State) {
+        guard start < end else { return }
+        carveZerosLocked(start, end)
+        var i = 0
+        while i < pointee.zeros.count, pointee.zeros[i].start < start { i += 1 }
+        var merged = ZeroInterval(start: start, end: end, state: state)
+        if i > 0, pointee.zeros[i - 1].end == start, pointee.zeros[i - 1].state == state {
+            merged.start = pointee.zeros[i - 1].start
+            _ = pointee.zeros.remove(at: i - 1)
+            i -= 1
+        }
+        if i < pointee.zeros.count, pointee.zeros[i].start == end, pointee.zeros[i].state == state {
+            merged.end = pointee.zeros[i].end
+            _ = pointee.zeros.remove(at: i)
+        }
+        pointee.zeros.insert(merged, at: i)
+    }
+
+    /// Intervals in [start, end) that are `from` become `to`. Lock held.
+    func changeZerosLocked(_ start: UInt64, _ end: UInt64, from: ZeroInterval.State, to: ZeroInterval.State?) {
+        let pieces = carveZerosLocked(start, end)
+        for i in 0..<pieces.count {
+            let piece = pieces[i]
+            if piece.state != from {
+                addZerosLocked(piece.start, piece.end, piece.state)
+            } else if let to {
+                addZerosLocked(piece.start, piece.end, to)
+            }
+        }
+    }
+
+    /// Whether byte `offset` of this pager VMO is in a zero interval and
+    /// absent: a reader copies zeros (K14k), committing nothing.
+    func readsAsZero(_ offset: UInt64) -> Bool {
+        guard pointee.pager != nil else { return false }
+        return pointee.lock.withLock {
+            !pointee.zeros.isEmpty && zeroStateLocked(offset) != nil
+                && pointee.pages.lookup(Int(offset / KernelLayout.pageSize)) == 0
+        }
+    }
+
     /// The pager-backed VMO and offset whose missing page byte `offset`
     /// would read as (its own, or a snapshot ancestor's), if any.
     func pagerGap(at offset: UInt64) -> (VmoPointer, UInt64)? {
         guard offset < pointee.size, pointee.pager != nil || pointee.readsFromPager else { return nil }
         if lookup(at: offset) != nil { return nil }
         if pointee.pager != nil {
-            // Grown space is zeros nobody is asked for (K13h).
-            return offset >= pointee.lock.withLock({ pointee.pagerZeroFrom }) ? nil : (self, offset)
+            // A zero interval's pages are nobody's to supply (K14k).
+            return pointee.lock.withLock({ zeroStateLocked(offset) }) != nil ? nil : (self, offset)
         }
         guard offset < pointee.parentLimit, let parent = pointee.parent else { return nil }  // K14g
         return parent.pagerGap(at: pointee.parentOffset + offset)
@@ -306,7 +406,14 @@ enum Pagers {
             switch done {
             case true: return
             case false: try wait(vmo, at, length: min(max(ahead, page), maxRequest), dirty: true)
-            case nil: try ensure(vmo, at)  // gone (detach dropped it): BAD_STATE
+            case nil:
+                // A zero interval's page (K14k) is committed zeroed and dirty;
+                // anything else gone (detach dropped it) is BAD_STATE.
+                if vmo.readsAsZero(at) {
+                    guard vmo.commit(at: at) != nil else { throw .noMemory }
+                } else {
+                    try ensure(vmo, at)
+                }
             }
         }
     }
@@ -365,7 +472,8 @@ enum Pagers {
                 guard let packet else { return Status.noMemory.rawValue }
                 var cut = offset + page
                 while cut < end, !satisfied(root, cut, dirty: dirty),
-                      !dirty || root.lookup(at: cut) != nil {  // DIRTY: a run of present pages
+                      !dirty || root.lookup(at: cut) != nil,  // DIRTY: a run of present pages
+                      dirty || !root.readsAsZero(cut) {  // READ: not into a zero interval (K14k)
                     cut += page
                 }
                 source.pointee.ranges.append(PageRange(offset: offset, end: cut, dirty: dirty))
@@ -555,7 +663,10 @@ enum Pagers {
         let first = Int(offset / page)
         vmo.pointee.lock.withLock {
             for i in 0..<pages.count {
-                if vmo.pointee.pages.lookup(first + i) == 0, vmo.pointee.pages.set(first + i, pages[i]) {
+                // A zero interval's page stays zeros (K14k): not the pager's now.
+                let at = UInt64(first + i) * page
+                if vmo.pointee.pages.lookup(first + i) == 0, vmo.pointee.zeros.isEmpty || vmo.zeroStateLocked(at) == nil,
+                   vmo.pointee.pages.set(first + i, pages[i]) {
                     vmo.pointee.committedPages += 1
                     pages[i] = 0
                 }
@@ -568,6 +679,62 @@ enum Pagers {
             resolveLocked(source) { at, dirty in !dirty && vmo.lookup(at: at) != nil ? 0 : nil }
         }
         wakeWaiters(source)
+    }
+
+    /// [start, end) (page aligned) of a pager VMO becomes a zero interval
+    /// of `state` (K14k): its pages taken out and freed (a pinned one is
+    /// zeroed in place and made dirty instead, and stays outside), its
+    /// mappings gone, and readers waiting for the pager there let go.
+    static func zeroPages(_ vmo: VmoPointer, _ start: UInt64, _ end: UInt64, _ state: ZeroInterval.State) {
+        guard start < end, let source = vmo.pointee.pager else { return }
+        let page = KernelLayout.pageSize
+        var freed = UniqueArray<UInt64>()
+        vmo.pointee.lock.withLock {
+            vmo.addZerosLocked(start, end, state)
+            var i = Int(start / page)
+            while let (index, phys) = vmo.pointee.pages.next(from: i, before: Int(end / page)) {
+                i = index + 1
+                let at = UInt64(index) * page
+                if vmo.pinnedLocked(at, page) {
+                    unsafe UnsafeMutableRawPointer(bitPattern: UInt(KernelLayout.physmap(phys)))!
+                        .initializeMemory(as: UInt8.self, repeating: 0, count: Int(page))
+                    vmo.setDirtLocked(at, PageDirt.dirty)
+                    vmo.carveZerosLocked(at, at + page)
+                    continue
+                }
+                freed.append(vmo.pointee.pages.clear(index))
+                vmo.setDirtLocked(at, 0)
+                vmo.pointee.committedPages -= 1
+            }
+            vmo.pointee.modified = true
+        }
+        vmo.unmapEverywhere(start, end - start)
+        for i in 0..<freed.count { pmm.free(freed[i]) }
+        vmo.pointee.account?.uncharge(UInt64(freed.count) * page)
+        source.pointee.lock.withLock {
+            trimLocked(source, start, end, dirty: false)
+            trimLocked(source, start, end, dirty: true)
+            resolveLocked(source) { at, _ in start <= at && at < end ? 0 : nil }
+        }
+        wakeWaiters(source)
+    }
+
+    /// Before zeroing [offset, +size) of `vmo` (ZERO, a stream size): the
+    /// pages written in place made present and dirty. A pager VMO's whole
+    /// pages become a zero interval instead (K14k), so only its partial
+    /// ends; under TRAP_DIRTY, and for a child reading through to a pager,
+    /// every page, as before.
+    static func ensureWritableForZero(_ vmo: VmoPointer, _ offset: UInt64, _ size: UInt64) throws(Status) {
+        let page = KernelLayout.pageSize
+        let first = offset & ~(page - 1), last = (offset + size + page - 1) & ~(page - 1)
+        guard let source = vmo.pointee.pager, !source.pointee.trapDirty else {
+            return try ensureWritableRange(vmo, first, last - first)
+        }
+        Loans.ensure(vmo, offset, size)
+        if offset % page != 0 { try ensureWritable(vmo, first, ahead: page) }
+        if (offset + size) % page != 0, (offset + size) & ~(page - 1) >= first + (offset % page != 0 ? page : 0) {
+            try ensureWritable(vmo, (offset + size) & ~(page - 1), ahead: page)
+        }
     }
 
     /// A resizable pager VMO shrank to `end` (K13h): requests past it go,
@@ -649,38 +816,40 @@ enum Pagers {
     /// unmapped so the next write faults and dirties them again. With
     /// IS_ZERO only zero intervals would change (croi has none).
     static func writebackBegin(_ vmo: VmoPointer, offset: UInt64, length: UInt64, zeroRange: Bool) {
-        guard !zeroRange, length > 0 else { return }
+        guard length > 0 else { return }
         let page = KernelLayout.pageSize
         vmo.pointee.lock.withLock {
+            // Dirty zero intervals await clean either way; pages only when
+            // the pager isn't writing zeros (IS_ZERO: a page dirtied since it
+            // looked would be cleaned without being written, Zircon's race).
+            vmo.changeZerosLocked(offset, offset + length, from: .dirty, to: .awaitingClean)
+            guard !zeroRange else { return }
             vmo.forEachStateLocked(offset, offset + length) { at, state in
                 if state == PageDirt.dirty, !vmo.pinnedLocked(at, page) { vmo.setDirtLocked(at, PageDirt.awaitingClean) }
             }
         }
-        vmo.unmapEverywhere(offset, length)
+        if !zeroRange { vmo.unmapEverywhere(offset, length) }
     }
 
-    /// WRITEBACK_END: pages still awaiting clean are clean.
+    /// WRITEBACK_END: pages still awaiting clean are clean, and zero
+    /// intervals still awaiting clean go (K14k): the pager has the zeros
+    /// and supplies the range from now on.
     static func writebackEnd(_ vmo: VmoPointer, offset: UInt64, length: UInt64) {
         vmo.pointee.lock.withLock {
             vmo.forEachStateLocked(offset, offset + length) { at, state in
                 if state == PageDirt.awaitingClean { vmo.setDirtLocked(at, 0) }
             }
-            // Grown zeros written back (K13h): from now on the pager's.
-            let zeroFrom = vmo.pointee.pagerZeroFrom
-            if offset <= zeroFrom, zeroFrom < offset + length {
-                vmo.pointee.pagerZeroFrom = offset + length >= vmo.pointee.size ? .max : offset + length
-            }
+            vmo.changeZerosLocked(offset, offset + length, from: .awaitingClean, to: nil)
         }
     }
 
     /// query_dirty_ranges: the runs of pages not clean in [offset, end)
-    /// (page aligned), as (offset, length).
+    /// (page aligned), as (offset, length): pages dirty or awaiting clean
+    /// (`states` holds only those, walked sparsely: K14i), and zero
+    /// intervals not untracked (IS_ZERO, K14k), in offset order.
     static func dirtyRanges(_ vmo: VmoPointer, offset: UInt64, end: UInt64) -> UniqueArray<PageRange> {
         let page = KernelLayout.pageSize
         var ranges = UniqueArray<PageRange>()
-        // Pages not clean (`states` holds only those) and, where the VMO
-        // grew (K13h), the pages never written there, in offset order;
-        // both found sparsely (K14i: an UNBOUNDED VMO's range is huge).
         func add(_ ranges: inout UniqueArray<PageRange>, _ at: UInt64, _ length: UInt64, zero: Bool) {
             if ranges.count > 0, ranges[ranges.count - 1].end == at, ranges[ranges.count - 1].zero == zero {
                 ranges[ranges.count - 1].end = at + length
@@ -691,23 +860,23 @@ enum Pagers {
         vmo.pointee.lock.withLock {
             let last = Int((end + page - 1) / page)
             var dirty = Int(offset / page)
-            var gap = Int(max(offset, vmo.pointee.pagerZeroFrom) / page)  // the next grown page not yet considered
-            let grown = vmo.pointee.pagerZeroFrom < end
+            var z = 0  // the next zero interval to report
+            while z < vmo.pointee.zeros.count, vmo.pointee.zeros[z].end <= offset { z += 1 }
             while true {
                 let nextDirty = vmo.pointee.states.next(from: dirty, before: last)
-                let dirtyAt = nextDirty.map { $0.index } ?? last
-                if grown, gap < dirtyAt {
-                    // Grown pages before the next dirty one: the absent ones are zeros.
-                    let present = vmo.pointee.pages.next(from: gap, before: dirtyAt)
-                    let gapEnd = present.map { $0.index } ?? dirtyAt
-                    if gapEnd > gap { add(&ranges, UInt64(gap) * page, UInt64(gapEnd - gap) * page, zero: true) }
-                    gap = present.map { $0.index + 1 } ?? dirtyAt
-                    continue
+                let dirtyAt = nextDirty.map { UInt64($0.index) * page } ?? end
+                // Zero intervals before the next dirty page (pages and
+                // intervals never overlap).
+                while z < vmo.pointee.zeros.count, vmo.pointee.zeros[z].start < min(dirtyAt, end) {
+                    let interval = vmo.pointee.zeros[z]
+                    z += 1
+                    guard interval.state != .untracked else { continue }
+                    let from = max(interval.start, offset), to = min(interval.end, end)
+                    if from < to { add(&ranges, from, to - from, zero: true) }
                 }
                 guard let (index, _) = nextDirty else { break }
                 if vmo.pointee.pages.lookup(index) != 0 { add(&ranges, UInt64(index) * page, page, zero: false) }
                 dirty = index + 1
-                gap = max(gap, dirty)
             }
         }
         return ranges

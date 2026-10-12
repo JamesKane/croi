@@ -1280,8 +1280,27 @@ instruction sync (`forEachPage`), resize, pager detach, writeback
 (`forEachStateLocked`), dirty ranges, and ALWAYS_NEED's swaps back.
 vmo_set_stream_size zeroes up to the new size's page end and, past it,
 only what is committed (Zircon's untracked zeroing, without zero
-markers). Still per page: COMMIT, PREFETCH, ALWAYS_NEED's paging in, a
-pager VMO's ZERO. Mode 17's `unbounded` (checks 663-668).
+markers; K14k: a pager VMO's become an untracked zero interval). Still
+per page: COMMIT, PREFETCH, ALWAYS_NEED's paging in, ZERO under
+TRAP_DIRTY. Mode 17's `unbounded` (checks 663-668).
+
+Zero intervals, K14k (Pager.swift `ZeroInterval`, `VmoRecord.zeros`;
+Zircon's): a pager VMO keeps sorted, disjoint ranges of absent pages that
+read as zeros the pager is never asked for, each dirty, awaiting clean or
+untracked (`zeroStateLocked` binary-searches; `carveZerosLocked`,
+`addZerosLocked` merging neighbours, `changeZerosLocked`). Made by ZERO
+(`Pagers.zeroPages`: whole pages dropped, pinned ones zeroed in place and
+dirty instead, waiting readers let go; `ensureWritableForZero` makes only
+the partial ends present), a grow (dirty) and a stream size cut past its
+page end (untracked). Reads copy zeros and commit nothing
+(`readsAsZero`, `VmoUserCopy.zeros`); a write, fault or `prepareWrite`
+commits a zeroed, dirty page and splits the interval; supply skips them;
+read-ahead requests stop at one. query_dirty_ranges reports dirty and
+awaiting ones with IS_ZERO; WRITEBACK_BEGIN makes dirty ones awaiting
+clean (with IS_ZERO it leaves pages alone: Zircon's race), END removes
+the awaiting ones (the pager supplies the range again). Under TRAP_DIRTY
+ZERO still zeroes page by page (the pager would have to approve the
+dirtying first). Mode 17's `zero_intervals` (checks 669-675).
 
 Copies between user memory and VMO pages, K14h (Vm/Vmo.swift
 `VmoUserCopy`; vmo_read/write, streams, process_read/write_memory): a
@@ -1412,9 +1431,9 @@ syscalls 202-208; vmo.h; Todhchai's page cache and mmap for Taisce):
   the fault handler (retains the mapping's VMO and waits outside the
   aspace lock, then retries; a fault taken with interrupts masked doesn't
   wait), vmo_read/write (the rest of the copy as read-ahead), streams,
-  vmo_op_range COMMIT/PREFETCH/ZERO, bti_pin. ZERO on a pager VMO zeroes
-  in place (no decommit; Zircon makes a zero interval); DECOMMIT is
-  NOT_SUPPORTED.
+  vmo_op_range COMMIT/PREFETCH/ZERO, bti_pin. ZERO on a pager VMO makes
+  a zero interval of its whole pages (K14k; TRAP_DIRTY VMOs zero in
+  place); DECOMMIT is NOT_SUPPORTED.
 - FAIL: waiters whose page is in the range get the status (vmo_read
   returns it; a fault is refused: exception); others on an overlapping
   request ask again. Detach (pager_detach_vmo, or the VMO's last
@@ -1432,17 +1451,17 @@ syscalls 202-208; vmo.h; Todhchai's page cache and mmap for Taisce):
   (vmo_write, streams, ZERO) go through `ensureWritable`. op DIRTY
   (TRAP_DIRTY only, else NOT_SUPPORTED; a page not supplied NOT_FOUND),
   WRITEBACK_BEGIN (dirty -> awaiting clean, unmapped everywhere:
-  `VmoPointer.unmapEverywhere`, so a write meanwhile dirties again; IS_ZERO
-  is a no-op, croi has no zero intervals), WRITEBACK_END (awaiting ->
-  clean). pager_query_dirty_ranges (207: pager | vmo << 32, offset,
+  `VmoPointer.unmapEverywhere`, so a write meanwhile dirties again; dirty
+  zero intervals too, and with IS_ZERO only those, K14k), WRITEBACK_END
+  (awaiting -> clean; zero intervals awaiting clean go). pager_query_dirty_ranges (207: pager | vmo << 32, offset,
   length, buffer, buffer_size, size_t out[2] = actual, avail; ranges of
   pages not clean, options 0) and pager_query_vmo_stats (208; MODIFIED,
   RESET_VMO_STATS).
 - Differences from Zircon: a packet per request (Zircon: one in flight
   per VMO), none withdrawn when a request resolves before it is read; the
   source holds its port.
-- Not yet: zero intervals, unbounded pager VMOs. (Eviction of clean
-  pages and the hints came in K14a, resizable pager VMOs in K13h.)
+- (Eviction of clean pages and the hints came in K14a, resizable pager
+  VMOs in K13h, unbounded ones in K14i, zero intervals in K14k.)
 - Mode 17's `pager`: a pager thread serving a fault, a two-page vmo_read
   (one request), a FAIL, a snapshot child reading through; writes through
   a mapping and vmo_write, dirty ranges, stats, a writeback with a write
@@ -1653,11 +1672,9 @@ PageList `grow`, syscall 233; vmo.h, task.h):
   meanwhile). An anonymous VMO may be mapped past its end (Zircon's: it
   may grow); vmar_map takes REQUIRE_NON_RESIZABLE (NOT_SUPPORTED on a
   resizable VMO) and ALLOW_FAULTS (accepted).
-- A pager VMO's grown space (`pagerZeroFrom`, Zircon's dirty zero
-  interval) is zeros owed to nobody: committed zeroed and dirty when
-  touched, never requested; query_dirty_ranges reports what is untouched
-  there with IS_ZERO; WRITEBACK_END over its start hands it back to the
-  pager.
+- A pager VMO's grown space is a dirty zero interval (K14k's
+  `ZeroInterval`): zeros owed to nobody, reported with IS_ZERO, handed
+  back to the pager by WRITEBACK_BEGIN then END.
 - Differences: a snapshot child of a parent that shrinks reads zeros past
   the cut only while the parent is that small (Zircon clamps it for good);
   streams still never grow their VMO (the pinned tree's either).

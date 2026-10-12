@@ -1,5 +1,6 @@
 import CHandoff
 import CKernel
+import Fmt
 /// Fixed regions of the kernel's virtual address space. The low half is
 /// left empty for user address spaces.
 enum KernelLayout {

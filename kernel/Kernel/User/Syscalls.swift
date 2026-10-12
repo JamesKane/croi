@@ -540,6 +540,9 @@ enum Syscalls {
             case .copied:
                 done += chunk
                 faults = 0
+            case .absent where toUser && vmo.readsAsZero(at):  // a zero interval (K14k): nothing committed
+                guard VmoUserCopy.zeros(to: user + done, chunk) == .copied else { throw .invalidArgs }
+                done += chunk
             case .absent:
                 try VmoUserCopy.commit(vmo, at)
             case .faulted:

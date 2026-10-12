@@ -3755,8 +3755,13 @@ static int64_t resizing(const startup_t *s) {
                  sys(CROI_SYS_VMO_READ, paged, (uint64_t)&byte, 2 * PAGE, 1, 0) == 0 && byte == 0 &&
                  sys6(CROI_SYS_PAGER_OP_RANGE, pg, CROI_PAGER_OP_WRITEBACK_END, paged, PAGE, 2 * PAGE, 0) == 0 &&
                  sys6(CROI_SYS_PAGER_QUERY_DIRTY_RANGES, pg | (uint64_t)paged << 32, 0, 3 * PAGE, (uint64_t)ranges,
-                      sizeof ranges, (uint64_t)counts) == 0 && counts[1] == 1 && ranges[0].offset == 2 * PAGE &&
-                 ranges[0].options == 0);  // the page read (committed, dirty) stays
+                      sizeof ranges, (uint64_t)counts) == 0 && counts[1] == 1 && ranges[0].length == 2 * PAGE &&
+                 // (K14k: the read committed nothing; END without BEGIN
+                 // cleans nothing; BEGIN then END hands the zeros back.)
+                 sys6(CROI_SYS_PAGER_OP_RANGE, pg, CROI_PAGER_OP_WRITEBACK_BEGIN, paged, PAGE, 2 * PAGE, 0) == 0 &&
+                 sys6(CROI_SYS_PAGER_OP_RANGE, pg, CROI_PAGER_OP_WRITEBACK_END, paged, PAGE, 2 * PAGE, 0) == 0 &&
+                 sys6(CROI_SYS_PAGER_QUERY_DIRTY_RANGES, pg | (uint64_t)paged << 32, 0, 3 * PAGE, (uint64_t)ranges,
+                      sizeof ranges, (uint64_t)counts) == 0 && counts[1] == 0);
   sys(CROI_SYS_VMAR_UNMAP, s->vmar, at, 4 * PAGE, 0, 0);
   uint32_t rest[8] = {vmo, plain, weak, child, fixed, pg, port, paged};
   sys(CROI_SYS_HANDLE_CLOSE_MANY, (uint64_t)rest, 8, 0, 0, 0);
@@ -4804,6 +4809,89 @@ static int64_t unbounded(const startup_t *s) {
   return 0;
 }
 
+// K14k: zero intervals. Every page is supplied up front, so nothing here
+// waits for a pager; a page the pager is asked for again is supplied.
+static int dirty_ranges(uint32_t pg, uint32_t vmo, uint64_t end, croi_vmo_dirty_range_t *ranges, uint64_t *count) {
+  uint64_t counts[2] = {0, 0};
+  if (sys6(CROI_SYS_PAGER_QUERY_DIRTY_RANGES, pg | (uint64_t)vmo << 32, 0, end, (uint64_t)ranges,
+           8 * sizeof *ranges, (uint64_t)counts) != 0)
+    return 0;
+  *count = counts[0];
+  return 1;
+}
+
+static int range_is(const croi_vmo_dirty_range_t *r, uint64_t offset, uint64_t length, uint64_t options) {
+  return r->offset == offset && r->length == length && r->options == options;
+}
+
+static int64_t zero_intervals(const startup_t *s) {
+  const uint64_t Z = CROI_VMO_DIRTY_RANGE_IS_ZERO;
+  uint32_t pg = 0, port = 0, vmo = 0, aux = 0, iommu = 0, bti = 0, pmt = 0;
+  uint64_t n = 0, addr = 0, mapped = 0;
+  uint8_t desc = 0;
+  croi_vmo_dirty_range_t r[8];
+  CHECK(669, sys(CROI_SYS_PAGER_CREATE, 0, (uint64_t)&pg, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_PORT_CREATE, 0, (uint64_t)&port, 0, 0, 0) == 0 &&
+                 sys6(CROI_SYS_PAGER_CREATE_VMO, pg, 0, port, 95, 8 * PAGE, (uint64_t)&vmo) == 0 &&
+                 sys(CROI_SYS_VMO_CREATE, 8 * PAGE, 0, (uint64_t)&aux, 0, 0) == 0);
+  for (int i = 0; i < 8; i++) vmo_put(aux, (uint64_t)i * PAGE, (uint8_t)('a' + i)), vmo_put(aux, (uint64_t)i * PAGE + 99, 'q');
+  // ZERO from inside page 1 to page 6: page 1's tail zeroed in place (dirty),
+  // pages 2-5 a dirty zero interval, dropped; reading it commits nothing.
+  CHECK(670, sys6(CROI_SYS_PAGER_SUPPLY_PAGES, pg, vmo, 0, 8 * PAGE, aux, 0) == 0 &&
+                 sys(CROI_SYS_HANDLE_CLOSE, aux, 0, 0, 0, 0) == 0 &&  // emptied: a fresh one for later supplies
+                 sys(CROI_SYS_VMO_CREATE, 8 * PAGE, 0, (uint64_t)&aux, 0, 0) == 0 &&
+                 sys6(CROI_SYS_VMO_OP_RANGE, vmo, CROI_VMO_OP_ZERO, PAGE + 100, 5 * PAGE - 100, 0, 0) == 0 &&
+                 vmo_byte(vmo, PAGE + 99) == 'q' && vmo_byte(vmo, PAGE + 100) == 0 && vmo_byte(vmo, 3 * PAGE) == 0 &&
+                 vmo_byte(vmo, 6 * PAGE) == 'g' && committed_of(vmo, 0) == 4 * PAGE &&
+                 dirty_ranges(pg, vmo, 8 * PAGE, r, &n) && n == 2 && range_is(&r[0], PAGE, PAGE, 0) &&
+                 range_is(&r[1], 2 * PAGE, 4 * PAGE, Z));
+  // A write and a read fault inside it commit dirty zero pages, splitting it.
+  CHECK(671, vmo_put(vmo, 4 * PAGE, 'W') && vmo_byte(vmo, 4 * PAGE) == 'W' &&
+                 sys6(CROI_SYS_VMAR_MAP, s->vmar | (uint64_t)CROI_VM_PERM_READ << 32, 0, vmo, 3 * PAGE, PAGE,
+                      (uint64_t)&mapped) == 0 &&
+                 *(volatile uint8_t *)mapped == 0 && sys(CROI_SYS_VMAR_UNMAP, s->vmar, mapped, PAGE, 0, 0) == 0 &&
+                 dirty_ranges(pg, vmo, 8 * PAGE, r, &n) && n == 4 && range_is(&r[0], PAGE, PAGE, 0) &&
+                 range_is(&r[1], 2 * PAGE, PAGE, Z) && range_is(&r[2], 3 * PAGE, 2 * PAGE, 0) &&
+                 range_is(&r[3], 5 * PAGE, PAGE, Z));
+  // Written back as zeros (IS_ZERO): the intervals go, the pages stay
+  // dirty; the pager owns pages 2 and 5 again (a supply lands).
+  CHECK(672, sys6(CROI_SYS_PAGER_OP_RANGE, pg, CROI_PAGER_OP_WRITEBACK_BEGIN, vmo, 0, 8 * PAGE, Z) == 0 &&
+                 sys6(CROI_SYS_PAGER_OP_RANGE, pg, CROI_PAGER_OP_WRITEBACK_END, vmo, 0, 8 * PAGE, 0) == 0 &&
+                 dirty_ranges(pg, vmo, 8 * PAGE, r, &n) && n == 2 && range_is(&r[0], PAGE, PAGE, 0) &&
+                 range_is(&r[1], 3 * PAGE, 2 * PAGE, 0) && vmo_put(aux, 2 * PAGE, 'C') && vmo_put(aux, 5 * PAGE, 'F') &&
+                 sys6(CROI_SYS_PAGER_SUPPLY_PAGES, pg, vmo, 2 * PAGE, PAGE, aux, 2 * PAGE) == 0 &&
+                 sys6(CROI_SYS_PAGER_SUPPLY_PAGES, pg, vmo, 5 * PAGE, PAGE, aux, 5 * PAGE) == 0 &&
+                 vmo_byte(vmo, 2 * PAGE) == 'C' && vmo_byte(vmo, 5 * PAGE) == 'F');
+  // A stream size cut: zeroed up to its page end (dirty), past it an
+  // untracked interval (page 7 dropped, reading zero, never reported).
+  CHECK(673, sys(CROI_SYS_VMO_SET_STREAM_SIZE, vmo, 6 * PAGE + 10, 0, 0, 0) == 0 &&
+                 vmo_byte(vmo, 6 * PAGE) == 'g' && vmo_byte(vmo, 6 * PAGE + 99) == 0 && vmo_byte(vmo, 7 * PAGE) == 0 &&
+                 dirty_ranges(pg, vmo, 8 * PAGE, r, &n) && n == 3 && range_is(&r[2], 6 * PAGE, PAGE, 0));
+  // A pinned page in a ZERO is zeroed in place, stays, and is dirty.
+  CHECK(674, sys(CROI_SYS_IOMMU_CREATE, s->resource, CROI_IOMMU_TYPE_STUB, (uint64_t)&desc, 1, (uint64_t)&iommu) == 0 &&
+                 sys(CROI_SYS_BTI_CREATE, iommu, 0, 0, (uint64_t)&bti, 0) == 0 &&
+                 bti_pin(bti, CROI_BTI_PERM_READ, vmo, 1, 0, PAGE, &addr, &pmt) == 0 &&
+                 sys6(CROI_SYS_VMO_OP_RANGE, vmo, CROI_VMO_OP_ZERO, 0, PAGE, 0, 0) == 0 && vmo_byte(vmo, 0) == 0 &&
+                 dirty_ranges(pg, vmo, 8 * PAGE, r, &n) && n == 3 && range_is(&r[0], 0, 2 * PAGE, 0) &&
+                 sys(CROI_SYS_PMT_UNPIN, pmt, 0, 0, 0, 0) == 0);
+  sys(CROI_SYS_PAGER_DETACH_VMO, pg, vmo, 0, 0, 0);
+  sys(CROI_SYS_HANDLE_CLOSE, vmo, 0, 0, 0, 0);
+  // All of an UNBOUNDED pager VMO zeroed at once: one interval.
+  const uint64_t max = 0xFFFFFFFFFFFF0000ull;
+  CHECK(675, sys6(CROI_SYS_PAGER_CREATE_VMO, pg, CROI_VMO_UNBOUNDED, port, 96, 0, (uint64_t)&vmo) == 0 &&
+                 sys6(CROI_SYS_PAGER_SUPPLY_PAGES, pg, vmo, 1ull << 50, PAGE, aux, 0) == 0 &&
+                 sys6(CROI_SYS_VMO_OP_RANGE, vmo, CROI_VMO_OP_ZERO, 0, max, 0, 0) == 0 && committed_of(vmo, 0) == 0 &&
+                 vmo_byte(vmo, 1ull << 50) == 0 && dirty_ranges(pg, vmo, max, r, &n) && n == 1 &&
+                 range_is(&r[0], 0, max, Z) &&
+                 sys6(CROI_SYS_PAGER_OP_RANGE, pg, CROI_PAGER_OP_WRITEBACK_BEGIN, vmo, 0, max, 0) == 0 &&
+                 sys6(CROI_SYS_PAGER_OP_RANGE, pg, CROI_PAGER_OP_WRITEBACK_END, vmo, 0, max, 0) == 0 &&
+                 dirty_ranges(pg, vmo, max, r, &n) && n == 0);
+  sys(CROI_SYS_PAGER_DETACH_VMO, pg, vmo, 0, 0, 0);
+  uint32_t handles[] = {vmo, aux, port, pg, bti, iommu};
+  for (int i = 0; i < 6; i++) sys(CROI_SYS_HANDLE_CLOSE, handles[i], 0, 0, 0, 0);
+  return 0;
+}
+
 // K11b: the kernel's CPRNG.
 static int64_t cprng_checks(void) {
   uint8_t a[256], b[256];
@@ -4920,6 +5008,8 @@ static int64_t extensions(const startup_t *s) {
   if (raced != 0) return raced;
   int64_t unbound = unbounded(s);
   if (unbound != 0) return unbound;
+  int64_t zeroed = zero_intervals(s);
+  if (zeroed != 0) return zeroed;
   int64_t fifos = fifos_and_exec(s);
   if (fifos != 0) return fifos;
   int64_t socks = sockets(s);

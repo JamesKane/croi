@@ -90,6 +90,8 @@ enum Streams {
         if rest < vmo.pointee.size {
             if pages.pointee.pager == nil, !pages.pointee.readsFromPager, pages.pointee.parent == nil, !pages.pointee.clone {
                 try zero(vmo, rest, vmo.pointee.size - rest)  // absent reads zero: decommitted, sparsely
+            } else if let source = pages.pointee.pager, !source.pointee.trapDirty, pages == vmo {
+                Pagers.zeroPages(pages, rest, vmo.pointee.size, .untracked)  // K14k: Zircon's untracked zeros
             } else {
                 try? Vmo.withBorrowed(vmo) { (v: borrowing Vmo) throws(VmError) in v.zeroOwn(rest, vmo.pointee.size) }
             }
@@ -101,12 +103,8 @@ enum Streams {
         guard length > 0 else { return }
         let (vmo, shift) = holder.target
         let offset = offset + shift
-        if vmo.pointee.pager != nil || vmo.pointee.readsFromPager {  // zeroed in place: the pages first
-            var at = offset & ~(KernelLayout.pageSize - 1)
-            while at < offset + length {
-                try Pagers.ensureWritable(vmo, at, ahead: offset + length - at)
-                at += KernelLayout.pageSize
-            }
+        if vmo.pointee.pager != nil || vmo.pointee.readsFromPager {  // the pages written in place first
+            try Pagers.ensureWritableForZero(vmo, offset, length)
         }
         do throws(VmError) {
             try Vmo.withBorrowed(vmo) { (v: borrowing Vmo) throws(VmError) in try v.zero(offset: offset, size: length) }

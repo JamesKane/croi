@@ -39,10 +39,10 @@ struct VmoRecord: ~Copyable {
     /// (K13h: `Vmo.resize`), under the lock.
     var size: UInt64
     var resizable = false
-    /// K13h: a pager VMO's pages from here on (where it grew) are zeros it
-    /// owes nobody: committed zeroed and dirty, not requested (Zircon's
-    /// dirty zero interval); .max: none.
-    var pagerZeroFrom = UInt64.max
+    /// K14k: a pager VMO's zero intervals (Zircon's): ranges of absent
+    /// pages that read as zeros the pager isn't asked for, sorted and
+    /// disjoint (Pager.swift, `ZeroInterval`).
+    var zeros = UniqueArray<ZeroInterval>()
     /// Changed only while unmapped (`setCachePolicy`).
     var cache: CachePolicy
     /// Names the VMO in trace records (no kernel addresses there).
@@ -277,10 +277,10 @@ enum DiscardState: UInt8 {
                     if pointee.reclaimable { Reclaim.touch(present) }
                     return present
                 }
-                // A pager's page is the pager's to supply, except where the
-                // VMO grew: zeros, dirty (K13h).
-                let grown = pointee.pager != nil && offset >= pointee.pagerZeroFrom
-                if pointee.pager != nil, !grown { return nil }
+                // A pager's page is the pager's to supply, except in a zero
+                // interval (K13h's grown space, K14k): zeros, dirty.
+                let zero = pointee.pager != nil && !pointee.zeros.isEmpty && zeroStateLocked(offset) != nil
+                if pointee.pager != nil, !zero { return nil }
                 if let account = pointee.account, !account.charge(KernelLayout.pageSize) { return nil }
                 guard let phys = pmm.allocatePage(.vmo) else {
                     pointee.account?.uncharge(KernelLayout.pageSize)
@@ -307,8 +307,10 @@ enum DiscardState: UInt8 {
                     unsafe page.initializeMemory(as: UInt8.self, repeating: 0, count: Int(KernelLayout.pageSize))
                 }
                 pointee.committedPages += 1
-                if grown {
-                    setDirtLocked(offset & ~(KernelLayout.pageSize - 1), PageDirt.dirty)
+                if zero {
+                    let start = offset & ~(KernelLayout.pageSize - 1)
+                    carveZerosLocked(start, start + KernelLayout.pageSize)  // the page splits it
+                    setDirtLocked(start, PageDirt.dirty)
                     pointee.modified = true
                 }
                 Trace.event(CROI_TRACE_VM, UInt16(CROI_TK_COMMIT), pointee.traceId, UInt64(index))
@@ -929,12 +931,12 @@ struct Vmo: ~Copyable {
                         at = index + 1
                     }
                 }
-                if record.pointee.pagerZeroFrom >= newSize { record.pointee.pagerZeroFrom = .max }
+                record.carveZerosLocked(newSize, .max)
             } else if newSize > old {
                 let pages = Int(newSize / page)
                 guard record.pointee.pages.grow(toPages: pages),
                       record.pointee.pager == nil || record.pointee.states.grow(toPages: pages) else { throw .outOfMemory }
-                if record.pointee.pager != nil { record.pointee.pagerZeroFrom = min(record.pointee.pagerZeroFrom, old) }
+                if record.pointee.pager != nil { record.addZerosLocked(old, newSize, .dirty) }  // K13h: zeros, dirty
                 record.pointee.size = newSize
             }
             if record.pointee.pager != nil { record.pointee.modified = true }
@@ -1050,6 +1052,20 @@ struct Vmo: ~Copyable {
                     zeroOwn(head, tail)
                 }
             }
+            zeroOwn(tail, end)
+            return
+        }
+        // A pager VMO (K14k): its whole pages become a dirty zero interval
+        // (the partial ends were made writable, dirty, by the caller:
+        // `Pagers.ensureWritableForZero`). Not under TRAP_DIRTY, whose pager
+        // is asked before anything turns dirty: page by page there.
+        if let source = record.pointee.pager, !source.pointee.trapDirty {
+            let head = min(end, (offset + page - 1) & ~(page - 1))
+            let tail = max(head, end & ~(page - 1))
+            if offset < head { _ = record.commit(at: offset & ~(page - 1)) }
+            zeroOwn(offset, head)
+            Pagers.zeroPages(record, head, tail, .dirty)
+            if tail < end { _ = record.commit(at: tail) }
             zeroOwn(tail, end)
             return
         }
@@ -1335,6 +1351,21 @@ enum VmoUserCopy {
             at += page
         }
         return true
+    }
+
+    /// `length` zeros to user `user` (a read of a zero interval's page,
+    /// K14k, which commits nothing).
+    static func zeros(to user: UInt64, _ length: UInt64) -> Chunk {
+        var zeros = InlineArray<256, UInt8>(repeating: 0)
+        var span = zeros.mutableSpan
+        var done: UInt64 = 0
+        while done < length {
+            let piece = min(length - done, 256)
+            let failed = span.withUnsafeMutableBytes { unsafe UserCopy.to(user + done, UnsafeRawPointer($0.baseAddress!), piece) }
+            guard failed == 0 else { return .faulted }
+            done += piece
+        }
+        return .copied
     }
 
     /// After `.absent`: commits the page so the next try finds it (a read
