@@ -64,6 +64,7 @@ struct SpinLock: ~Copyable {
             }
             arch_interrupts_restore(saved.raw)
             while holder.load(ordering: .relaxed) != 0 {
+                Self.checkHolder(holder.load(ordering: .relaxed))
                 arch_spin_pause()
             }
             _ = arch_interrupts_save()
@@ -102,9 +103,17 @@ struct SpinLock: ~Copyable {
                 panic("spinlock: recursive acquire")
             }
             while holder.load(ordering: .relaxed) != 0 {
+                Self.checkHolder(holder.load(ordering: .relaxed))
                 arch_spin_pause()
             }
         }
+    }
+
+    /// A holder no CPU can be is a lock in freed memory (the heap poisons
+    /// with 0xA5) or a corrupt one: report it rather than spin forever
+    /// (a job kill locked a freed thread object that way).
+    private static func checkHolder(_ value: UInt32) {
+        if value > UInt32(Smp.maxCpus) { panic("spinlock: holder isn't a CPU (freed or corrupt lock)") }
     }
 
     /// One attempt at `lockMasked`.

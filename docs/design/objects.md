@@ -58,6 +58,13 @@ Processes (K7a, Kernel/Object/Process.swift, include/task.h, syscalls
   user mode (`UserTraps.leaving`) exits a marked thread. Return codes
   -1024 (killed), -1026 (policy) and -1028 (exception), Zircon's. Kernel-only waits stay
   uninterruptible.
+- A job's children and a process's threads are non-owning lists (an
+  object's destroy takes it out under the parent's lock): anything that
+  walks one and uses an entry after the lock drops takes a reference
+  with `tryRetain` under it. kill(process:) didn't, and a job kill
+  (Todhchai's shutdown, ~3 boots in 20 one afternoon) locked a thread
+  object freed meanwhile: its poisoned lock word spun forever. SpinLock
+  now panics on a holder that isn't a CPU.
 - VMARs wrap K4 regions (`UserAspace.withView`); `vmar_map` and friends
   pack handle | options << 32 into one register (six argument
   registers). A dead address space refuses operations under its lock

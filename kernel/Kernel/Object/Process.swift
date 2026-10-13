@@ -648,9 +648,20 @@ enum Processes {
             guard process.pointee.state == .initial || process.pointee.state == .running else { return }
             process.pointee.state = .dying
             process.pointee.returnCode = code
-            for i in 0..<process.pointee.threads.count { threads.append(process.pointee.threads[i]) }
+            // The list doesn't own its entries (destroyThread takes one out
+            // under this lock, then frees it): hold each across the kill.
+            // Without, a thread object freed meanwhile was locked through
+            // its poisoned lock word, spinning forever (Todhchai's job kill).
+            for i in 0..<process.pointee.threads.count {
+                let thread = ObjectPointer(address: process.pointee.threads[i])
+                if thread.tryRetain() { threads.append(thread.address) }
+            }
         }
-        for i in 0..<threads.count { kill(thread: ObjectPointer(address: threads[i]), sparing: spared) }
+        for i in 0..<threads.count {
+            let thread = ObjectPointer(address: threads[i])
+            kill(thread: thread, sparing: spared)
+            thread.release()
+        }
         // Never started: nothing will run to tear it down.
         if object.header.lock.withLock({ process.pointee.running == 0 && process.pointee.handles != nil }) {
             teardown(object)
@@ -793,11 +804,9 @@ enum Processes {
             for i in 0..<job.pointee.children.count {
                 let child = ObjectPointer(address: job.pointee.children[i])
                 // Only those still referenced elsewhere: a child on its way
-                // out (count 0) is skipped.
-                if child.header.references.load(ordering: .relaxed) > 0 {
-                    child.retain()
-                    children.append(child.address)
-                }
+                // out (count 0) is skipped. One step: its last release can
+                // come between a check and a retain.
+                if child.tryRetain() { children.append(child.address) }
             }
         }
         for i in 0..<children.count {
