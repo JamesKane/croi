@@ -5353,6 +5353,56 @@ static void race_reader(uint64_t arg) {
   sys(CROI_SYS_THREAD_EXIT, 0, 0, 0, 0, 0);
 }
 
+// K15d: object_get_child (Zircon's), for Todhchai's Inspector.
+static uint32_t handle_rights(uint32_t handle) {
+  croi_info_handle_basic_t info;
+  zero_bytes(&info, sizeof info);
+  sys(CROI_SYS_OBJECT_GET_INFO, handle, CROI_INFO_HANDLE_BASIC, (uint64_t)&info, sizeof info, 0);
+  return info.rights;
+}
+
+static int64_t get_child(const startup_t *s) {
+  const uint32_t enumerate = 1u << 8, destroy = 1u << 9, inspect = 1u << 15;
+  uint32_t job = 0, thread = 0, process = 0, found = 0, sub = 0, worker = 0, weak = 0, event = 0, none = 0;
+  CHECK(746, sys(CROI_SYS_JOB_CREATE, s->job, 0, (uint64_t)&job, 0, 0) == 0);
+  process = make_child(s, job, &thread);
+  uint64_t jk = koid_of(job), pk = koid_of(process), tk = koid_of(thread);
+  start_child(process, thread, 2);  // spins until killed
+  // A job's process and child job, by koid; a process's thread with fewer rights.
+  CHECK(746, sys(CROI_SYS_OBJECT_GET_CHILD, job, pk, RIGHT_SAME, (uint64_t)&found, 0) == 0 && koid_of(found) == pk &&
+                 handle_rights(found) == handle_rights(job));
+  CHECK(747, sys(CROI_SYS_OBJECT_GET_CHILD, s->job, jk, RIGHT_SAME, (uint64_t)&sub, 0) == 0 && koid_of(sub) == jk);
+  CHECK(748, sys(CROI_SYS_OBJECT_GET_CHILD, found, tk, RIGHT_READ | inspect, (uint64_t)&worker, 0) == 0 &&
+                 koid_of(worker) == tk && handle_rights(worker) == (RIGHT_READ | inspect));
+  // Refusals, in Zircon's order: a bad handle, no ENUMERATE, rights beyond
+  // the parent's, not a child (a grandchild, a thread of a job, nothing).
+  CHECK(749, sys(CROI_SYS_HANDLE_DUPLICATE, job, inspect | enumerate, (uint64_t)&weak, 0, 0) == 0 &&
+                 sys(CROI_SYS_HANDLE_DUPLICATE, job, inspect, (uint64_t)&none, 0, 0) == 0 &&
+                 sys(CROI_SYS_EVENT_CREATE, 0, (uint64_t)&event, 0, 0, 0) == 0 &&
+                 sys(CROI_SYS_OBJECT_GET_CHILD, 0x12340003, pk, RIGHT_SAME, (uint64_t)&found, 0) == ERR_BAD_HANDLE &&
+                 sys(CROI_SYS_OBJECT_GET_CHILD, none, pk, RIGHT_SAME, (uint64_t)&found, 0) == ERR_ACCESS_DENIED &&
+                 sys(CROI_SYS_OBJECT_GET_CHILD, event, pk, RIGHT_SAME, (uint64_t)&found, 0) == ERR_ACCESS_DENIED &&
+                 sys(CROI_SYS_OBJECT_GET_CHILD, weak, pk, inspect | destroy, (uint64_t)&found, 0) == ERR_ACCESS_DENIED &&
+                 sys(CROI_SYS_OBJECT_GET_CHILD, weak, pk, RIGHT_SAME | inspect, (uint64_t)&found, 0) == ERR_ACCESS_DENIED);
+  uint32_t got = 0;
+  CHECK(750, sys(CROI_SYS_OBJECT_GET_CHILD, weak, pk, RIGHT_SAME, (uint64_t)&got, 0) == 0 &&
+                 handle_rights(got) == (inspect | enumerate) &&
+                 sys(CROI_SYS_OBJECT_GET_CHILD, s->job, pk, RIGHT_SAME, (uint64_t)&found, 0) == ERR_NOT_FOUND &&
+                 sys(CROI_SYS_OBJECT_GET_CHILD, job, tk, RIGHT_SAME, (uint64_t)&found, 0) == ERR_NOT_FOUND &&
+                 sys(CROI_SYS_OBJECT_GET_CHILD, job, 1, RIGHT_SAME, (uint64_t)&found, 0) == ERR_NOT_FOUND);
+  // Dead children aren't found, though handles to them are still open.
+  uint32_t process2 = 0;
+  CHECK(751, sys(CROI_SYS_OBJECT_GET_CHILD, job, pk, RIGHT_SAME, (uint64_t)&process2, 0) == 0 &&
+                 sys(CROI_SYS_TASK_KILL, process, 0, 0, 0, 0) == 0 &&
+                 (wait_terminated(process) & CROI_SIGNAL_TASK_TERMINATED) &&
+                 sys(CROI_SYS_OBJECT_GET_CHILD, job, pk, RIGHT_SAME, (uint64_t)&found, 0) == ERR_NOT_FOUND &&
+                 sys(CROI_SYS_OBJECT_GET_CHILD, process2, tk, RIGHT_SAME, (uint64_t)&found, 0) == ERR_NOT_FOUND);
+  // found is still 746's handle: refused calls write nothing.
+  uint32_t handles[] = {job, thread, process, sub, worker, weak, event, none, got, process2, found};
+  for (int i = 0; i < 11; i++) sys(CROI_SYS_HANDLE_CLOSE, handles[i], 0, 0, 0, 0);
+  return 0;
+}
+
 static int64_t review_open(const startup_t *s) {
   // A stream write waiting for its VMO's pager holds that VMO's size lock
   // only: a write growing another VMO's stream goes ahead (737; one global
@@ -6029,6 +6079,8 @@ static int64_t extensions(const startup_t *s, uint64_t vdso_base) {
   if (pagerReview != 0) return pagerReview;
   int64_t open = review_open(s);
   if (open != 0) return open;
+  int64_t child_by_koid = get_child(s);
+  if (child_by_koid != 0) return child_by_koid;
   int64_t accounts = memory_accounts(s);
   if (accounts != 0) return accounts;
   int64_t views = jit_views(s);

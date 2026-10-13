@@ -456,6 +456,13 @@ Processes (K7a, Kernel/Object/Process.swift, include/task.h, syscalls
   is in the frame. thread_read/write_state carry them.
 - `vmo_create` rounds sizes up to a page (Zircon's RoundSize); size 0
   makes a zero-size VMO, as Zircon's (since K9a).
+- `object_get_child` (78, K15d; Zircon's, for Todhchai's Inspector,
+  `Processes.child`): a job's child job or process, or a process's
+  thread, by koid. ENUMERATE on the parent, SAME_RIGHTS (exactly) for the
+  parent handle's rights or a subset of them (else ACCESS_DENIED), a koid
+  not a live child NOT_FOUND (dead threads and processes stay listed
+  until their last reference, so they are filtered: Zircon drops them
+  at exit), other parents WRONG_TYPE. Mode 17's checks 746-751.
 - Lock order: job -> process -> thread object -> scheduler.
 
 Channels (K7b, Kernel/Object/Channel.swift, include/ipc.h, syscalls 80-86

@@ -68,6 +68,10 @@ extension Syscalls {
             case .job: Processes.kill(job: task.object)
             default: throw .wrongType
             }
+        case 78:  // object_get_child(parent, koid, rights, out)
+            try check(a[3], MemoryLayout<UInt32>.size)
+            let (child, rights) = try Processes.child(table, handle, koid: a[1], rights: UInt32(truncatingIfNeeded: a[2]))
+            try put(try table.add(child, rights: rights), a[3])
         case 68:  // process_info(process, out croi_process_info_t)
             try check(a[1], MemoryLayout<croi_process_info_t>.size)
             let process = try table.get(handle, type: .process, rights: .inspect)

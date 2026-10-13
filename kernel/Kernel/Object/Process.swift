@@ -210,6 +210,59 @@ enum TaskReturnCode {
 // MARK: Operations
 
 enum Processes {
+    /// object_get_child (Zircon's sys_object_get_child): a handle to a
+    /// job's child job or process, or a process's thread, by koid. ENUMERATE
+    /// on the parent (ACCESS_DENIED); SAME_RIGHTS alone means the parent
+    /// handle's rights, anything else must be a subset of them
+    /// (ACCESS_DENIED); a koid that isn't a live child NOT_FOUND (Zircon's
+    /// lists drop a thread when it exits and a process when it is dead);
+    /// other parents WRONG_TYPE. Returns the child retained.
+    static func child(_ table: borrowing HandleTable, _ handle: UInt32, koid: UInt64,
+                      rights wanted: UInt32) throws(Status) -> (ObjectPointer, Rights) {
+        var have = Rights()
+        let parent = try table.get(handle, have: &have)
+        guard have.contains(.enumerate) else { throw .accessDenied }
+        let rights = wanted == Rights.sameRights.rawValue ? have : Rights(rawValue: wanted)
+        guard have.isSuperset(of: rights) else { throw .accessDenied }
+        let found: ObjectPointer?
+        switch parent.type {
+        case .process:
+            found = parent.object.header.lock.withLock { () -> ObjectPointer? in
+                let process = ProcessPointer(object: parent.object)
+                for i in 0..<process.pointee.threads.count {
+                    let thread = ObjectPointer(address: process.pointee.threads[i])
+                    if thread.header.koid == koid { return thread.tryRetain() ? thread : nil }
+                }
+                return nil
+            }
+        case .job:
+            found = parent.object.header.lock.withLock { () -> ObjectPointer? in
+                let job = JobPointer(object: parent.object)
+                for i in 0..<job.pointee.children.count {
+                    let child = ObjectPointer(address: job.pointee.children[i])
+                    if child.header.koid == koid { return child.tryRetain() ? child : nil }
+                }
+                return nil
+            }
+        default:
+            throw .wrongType
+        }
+        guard let child = found else { throw .notFound }
+        // Dead children are still listed here until their last reference.
+        let dead = child.header.lock.withLock { () -> Bool in
+            switch child.header.type {
+            case .thread: return ThreadObjectPointer(object: child).pointee.state == .dead
+            case .process: return ProcessPointer(object: child).pointee.state == .dead
+            default: return JobPointer(object: child).pointee.dead
+            }
+        }
+        guard !dead else {
+            child.release()
+            throw .notFound
+        }
+        return (child, rights)
+    }
+
     nonisolated(unsafe) private(set) static var rootJob = ObjectPointer(address: 0)
     static let live = Atomic<Int>(0)
     private static let taskIds = Atomic<UInt32>(0)

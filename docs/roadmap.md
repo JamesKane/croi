@@ -842,6 +842,10 @@ THREAD, VMO, maps, handle table) and the NAME property.
   ALWAYS_NEED) and their eviction when a lender wants its page. On by
   default (`croi.ppb.loan=off`). Requirement 3's pool no longer holds
   memory idle.
+- **K15d: object_get_child (Todhchai's M6j Inspector).** Requested
+  2026-10-12: Zircon's call, koid to handle under ENUMERATE, so a holder
+  of the root job reaches processes started below services (their
+  threads, TASK_STATS, HANDLE_TABLE). Syscall 78.
 - **K15c: deadline-aware idle (Todhchai ext 11).** Agreed with Todhchai
   2026-10-12: one idle-state table per CPU, evaluated by devmgr (ACPI
   _LPI/_CST) and installed by the power service (cpu_set_idle_states,

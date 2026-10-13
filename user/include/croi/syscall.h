@@ -57,6 +57,7 @@ enum : uint64_t {
   CROI_SYS_VMAR_UNMAP_HANDLE_CLOSE_THREAD_EXIT = 75,  // (vmar, addr, len, close_handle): no return on success
   CROI_SYS_VMAR_OP_RANGE = 76,     // (vmar, op, addr, len, buffer 0, buffer_size 0), K13e
   CROI_SYS_VMAR_MAP_CLOCK = 77,    // (vmar, options, vmar_offset, clock, len, uint64_t *mapped_addr), K13f
+  CROI_SYS_OBJECT_GET_CHILD = 78,  // (job or process, koid, rights, uint32_t *out): Zircon's, K15d
   // Channels, eventpairs (K7b): Zircon's, except channel_read packs its
   // capacities (bytes | handles << 32) and writes both actuals (two
   // uint32_t) through one pointer.
@@ -174,13 +175,13 @@ enum : uint64_t {
   CROI_SYS_VMO_SET_SIZE = 233,          // (vmo, size): K13h, a resizable VMO
   CROI_SYS_SMC_CALL = 234,              // (SMC resource, const croi_smc_parameters_t *, croi_smc_result_t *): arm64
   CROI_SYS_SYSTEM_GET_EVENT = 235,      // (root job, kind, out): K14a, CROI_SYSTEM_EVENT_*
-  CROI_SYS_THREAD_RAISE_EXCEPTION = 236,
+  CROI_SYS_THREAD_RAISE_EXCEPTION = 236,  // (options, type, const croi_exception_context_t *): K14d
   CROI_SYS_ACCOUNT_CREATE = 240,        // (resource, limit, warning | critical << 32, out): account.h
   CROI_SYS_ACCOUNT_SET_LIMIT = 241,     // (account, limit)
   CROI_SYS_ACCOUNT_BIND_PRESSURE_PORT = 242,  // (account, port, key)
   CROI_SYS_PROCESS_SET_ACCOUNT = 243,   // (process, account)
   CROI_SYS_CPU_SET_IDLE_STATES = 245,   // (resource, cpu, const croi_idle_state_t *, count): power.h, K15c
-  CROI_SYS_VMAR_MAP_VIEW = 244,         // (vmar | perms << 32, vmar_offset, vmo, vmo_offset, len): task.h, K15b  // (options, type, const croi_exception_context_t *): K14d
+  CROI_SYS_VMAR_MAP_VIEW = 244,         // (vmar | perms << 32, vmar_offset, vmo, vmo_offset, len): task.h, K15b
   CROI_SYS_SYSTEM_POWERCTL = 180,       // (power resource, cmd, const croi_system_powerctl_arg_t *)
 
   // The kernel's CPRNG (K11b; Zircon's): at most CROI_CPRNG_MAX_LEN bytes.
