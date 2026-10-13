@@ -553,7 +553,7 @@ private func heapSelfTest() {
 /// Ownership-based allocation (no refcounting) must allocate on the heap
 /// and give everything back when values are consumed or go out of scope.
 /// Refcounted storage (classes, Array, String, Dictionary) does not work in
-/// the kernel: see "Embedded Swift and the higher half" in CLAUDE.md.
+/// the kernel: see the no-ARC rule in CLAUDE.md "Conventions".
 private func swiftAllocationSelfTest() {
     let bytesBefore = heap.bytesInUse
     do {

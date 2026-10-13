@@ -2,7 +2,7 @@
 
 Every place croi's behaviour or ABI knowingly differs from Zircon at the
 reference pin (`../fuchsia` at `e8b19ec722db74727411b941cf3cd5d1fae5dfc8`),
-gathered from CLAUDE.md and docs/roadmap.md and maintained alongside them:
+gathered from docs/design/ and docs/roadmap.md and maintained alongside them:
 a change that adds, removes or settles a divergence updates this file too.
 Each entry gives its kind: **deliberate** (a croi design choice), **not
 yet** (a Zircon feature croi hasn't implemented) or **quirk parity** (croi
@@ -39,7 +39,7 @@ matches the pinned tree where upstream docs or expectations say otherwise).
   `size_t`). Kind: deliberate. Impact: identical layout on 64-bit.
 - **CPU_STATS returns a count** — object_get_info CROI_INFO_CPU_STATS fills
   as many records as fit and returns the count, without actual/avail
-  pointers (CLAUDE.md K10f; other topics take Zircon's actual and avail as
+  pointers (docs/design/cpu.md, K10f; other topics take Zircon's actual and avail as
   fifth and sixth arguments since K13e). Kind: deliberate. Impact: m2 and
   stats tools.
 - **Test-only syscall 6** (`TestHooks`) — croi's self-test hook. Kind:

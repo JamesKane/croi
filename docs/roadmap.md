@@ -414,7 +414,7 @@ pinned DMA without a driver stack. The boot tests add it.
   below, plus I-cache sync after the kernel loads code and for
   CACHE_SYNC (arm64 hardware needed it; QEMU hid it), RESERVED memory
   ranges allowed under MMIO resources (PCIe ECAM sits in one on q35),
-  and UNCACHED mapped as device memory. Details in CLAUDE.md. Zircon's resource kinds and
+  and UNCACHED mapped as device memory. Details in docs/design/drivers.md. Zircon's resource kinds and
   numbers (MMIO 0, IRQ 1, IOPORT 2, SMC 4, SYSTEM 5) with ranges
   (`resource_create(parent, options, base, size, name)`, EXCLUSIVE, a
   child inside its parent's range; root mints all). An MMIO resource
@@ -439,7 +439,7 @@ pinned DMA without a driver stack. The boot tests add it.
   GOP framebuffer is a PCI BAR outside every firmware range), physical
   VMOs over firmware memory are always cached (the physmap maps it
   cached; other policies ACCESS_DENIED), and the boot data handle is
-  Zircon's PA_VMO_BOOTDATA. Details in CLAUDE.md. Zircon tells user
+  Zircon's PA_VMO_BOOTDATA. Details in docs/design/drivers.md. Zircon tells user
   space about firmware through ZBI items (RSDP, SMBIOS, framebuffer,
   memory ranges), and its drivers read ACPI tables through physical VMOs
   under an MMIO resource. croi has no ZBI, so:
@@ -469,7 +469,7 @@ pinned DMA without a driver stack. The boot tests add it.
   PL031 (arm64, level), goldfish (rv64, level). The budget isn't met
   under KVM yet: 11-18 us median from the fire to the woken thread, the
   interrupt on CPU 1 waking a thread on another CPU (VM exits for the
-  wakeup IPI); measure on hardware. Details in CLAUDE.md. Zircon's calls:
+  wakeup IPI); measure on hardware. Details in docs/design/drivers.md. Zircon's calls:
   `interrupt_create(resource, vector, options)` (an IRQ resource
   covering the vector; EDGE/LEVEL and HIGH/LOW modes; VIRTUAL),
   `interrupt_bind` (to a port: a packet per interrupt, re-armed by
@@ -490,7 +490,7 @@ pinned DMA without a driver stack. The boot tests add it.
   as below, syscalls 147/148. Plain MSI's affinity is NOT_SUPPORTED (its
   driver programs the capability; MSI-X moves per vector). The test uses
   edu's MSI and virtio-blk's MSI-X table. ITS and IMSIC remain. Details
-  in CLAUDE.md. Zircon's `msi_allocate(resource
+  in docs/design/drivers.md. Zircon's `msi_allocate(resource
   MSI_BASE 11, count)` and `msi_create(msi, options, id, vmo, offset)`
   (the MSI-X table in a BAR VMO, programmed by the kernel; masking
   through the table), each vector an interrupt object with its own
@@ -502,7 +502,7 @@ pinned DMA without a driver stack. The boot tests add it.
 - **K9e: BTI with no IOMMU, PMTs, contiguous VMOs (item 14, part).**
   **Done** (2026-10-10): as below, syscalls 150-156. The properties are
   set with croi's `bti_set_properties`, which only narrows (devmgr sets
-  them, then grants the BTI). Details in CLAUDE.md.
+  them, then grants the BTI). Details in docs/design/drivers.md.
   `iommu_create(resource IOMMU_BASE 8, DUMMY)`, `bti_create(iommu, 0,
   bti_id)`, `bti_pin(bti, options, vmo, offset, size, addrs)` returning a
   PMT, `pmt_unpin`, `bti_release_quarantine`, `vmo_create_contiguous(bti,
@@ -1130,7 +1130,7 @@ THREAD, VMO, maps, handle table) and the NAME property.
 
 ### Open items (2026-10-11)
 
-What is still open after K13, gathered from the milestones above, CLAUDE.md's
+What is still open after K13, gathered from the milestones above, docs/design's
 "Not yet" notes and Todhchai's requirements. Where croi knowingly differs
 from Zircon, see docs/zircon-divergences.md.
 
@@ -1328,7 +1328,7 @@ them as one mechanism in K2, used in K6:
 
 ## Conventions shared with Todhchai
 
-Most of these already hold in croi (see CLAUDE.md):
+Most of these already hold in croi (see docs/design/):
 - Swift 6.4, with strict memory safety as an error
 - typed throws, `~Copyable`, `Span`, `InlineArray`, `Atomic`
 - `@c @implementation` across the C boundary, and typed C23 enum constants

@@ -207,9 +207,10 @@ target is attainable, if neither does it is a design decision
 | `user/` | User-space headers (`croi/syscall.h`), the C user runtime, the vDSO, userboot, `m2` and test programs |
 | `tools/` | `mkbootfs.py`, `elf2efi.py`, the QEMU runner, `bench.py`, and `zircon-bench/` (croi's budgets on Zircon) |
 | `bench/history/` | Recorded budget runs per machine (`tools/bench.py --record`) |
-| `docs/` | Roadmap |
+| `docs/` | Roadmap, Zircon divergences, design notes (`docs/design/`) |
 
-`CLAUDE.md` is the detailed design notebook for each subsystem.
+`docs/design/` is the detailed design notebook for each subsystem (indexed
+from `CLAUDE.md`, which holds the project rules).
 
 ## License
 
